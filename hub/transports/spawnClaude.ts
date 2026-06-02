@@ -6,19 +6,17 @@ export function makeHeadlessRunner(bin = "claude"): HeadlessRunner {
   return async (args, stdin, cwd, timeoutMs) => {
     const proc = Bun.spawn([bin, ...args], { cwd, stdin: "pipe", stdout: "pipe", stderr: "pipe" })
     proc.stdin.write(stdin); proc.stdin.end()
-    const timeoutPromise = new Promise<never>((_, reject) =>
-      setTimeout(() => { proc.kill(); reject(new Error(`claude timed out after ${timeoutMs}ms`)) }, timeoutMs)
-    )
+    let timerId: ReturnType<typeof setTimeout> | undefined
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timerId = setTimeout(() => { proc.kill(); reject(new Error(`claude timed out after ${timeoutMs}ms`)) }, timeoutMs)
+    })
     try {
-      const stdout = await Promise.race([
-        new Response(proc.stdout).text(),
-        timeoutPromise,
-      ])
+      const stdout = await Promise.race([new Response(proc.stdout).text(), timeoutPromise])
       const code = await proc.exited
       if (code !== 0) throw new Error(`claude exited ${code}`)
       return { stdout }
     } finally {
-      // ensure process is cleaned up if we get here via timeout path
+      clearTimeout(timerId)
     }
   }
 }
