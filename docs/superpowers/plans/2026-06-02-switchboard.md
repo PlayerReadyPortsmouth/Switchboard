@@ -1623,6 +1623,218 @@ git commit -m "feat: config loading + validation, example configs"
 
 ---
 
+### Task 14A: Base pairing/allowlist gate
+
+**Files:**
+- Create: `tests/baseGate.test.ts`
+- Create: `hub/baseGate.ts`
+- Create: `scripts/pair.ts`
+
+This is the layer-0 wall (spec §13): an unpaired stranger is dropped (or handed a pairing code) **before** any role resolution or routing — so even `"*"` agents aren't reachable by anyone who merely shares a server. Ported and condensed from upstream `server.ts`. Guild channels must be explicitly opted in (`groups`). State lives in `‹stateDir›/access.json` and is re-read on every message (live edits, no restart).
+
+- [ ] **Step 1: Write the failing test** in `tests/baseGate.test.ts`
+
+```ts
+import { test, expect } from "bun:test"
+import { BaseGate } from "../hub/baseGate"
+import { mkdtempSync, writeFileSync } from "fs"
+import { join } from "path"
+import { tmpdir } from "os"
+
+function gateWith(access: object): { path: string; gate: BaseGate } {
+  const dir = mkdtempSync(join(tmpdir(), "sb-gate-"))
+  const path = join(dir, "access.json")
+  writeFileSync(path, JSON.stringify(access))
+  return { path, gate: new BaseGate(path) }
+}
+const NOW = 1_000_000
+
+test("allowlisted DM sender is delivered", () => {
+  const { gate } = gateWith({ dmPolicy: "pairing", allowFrom: ["u1"], groups: [], pending: {} })
+  expect(gate.gate("u1", "c", true, NOW)).toEqual({ action: "deliver" })
+})
+
+test("unknown DM in pairing mode gets a code", () => {
+  const { gate } = gateWith({ dmPolicy: "pairing", allowFrom: [], groups: [], pending: {} })
+  const r = gate.gate("u9", "c", true, NOW)
+  expect(r.action).toBe("pair")
+  if (r.action === "pair") expect(r.code).toMatch(/^[0-9a-f]{6}$/)
+})
+
+test("the same sender gets the same pending code back", () => {
+  const { gate } = gateWith({ dmPolicy: "pairing", allowFrom: [], groups: [], pending: {} })
+  const a = gate.gate("u9", "c", true, NOW)
+  const b = gate.gate("u9", "c", true, NOW + 10)
+  if (a.action === "pair" && b.action === "pair") expect(b.code).toBe(a.code)
+  else throw new Error("expected pair on both")
+})
+
+test("unknown DM in allowlist mode is dropped silently", () => {
+  const { gate } = gateWith({ dmPolicy: "allowlist", allowFrom: [], groups: [], pending: {} })
+  expect(gate.gate("u9", "c", true, NOW)).toEqual({ action: "drop" })
+})
+
+test("disabled policy drops everything, even allowlisted", () => {
+  const { gate } = gateWith({ dmPolicy: "disabled", allowFrom: ["u1"], groups: [], pending: {} })
+  expect(gate.gate("u1", "c", true, NOW)).toEqual({ action: "drop" })
+})
+
+test("guild message delivers only for an opted-in channel", () => {
+  const { gate } = gateWith({ dmPolicy: "pairing", allowFrom: [], groups: ["chan1"], pending: {} })
+  expect(gate.gate("u9", "chan1", false, NOW)).toEqual({ action: "deliver" })
+  expect(gate.gate("u9", "chan2", false, NOW)).toEqual({ action: "drop" })
+})
+
+test("expired pending codes are pruned (a new code is issued)", () => {
+  const { gate } = gateWith({ dmPolicy: "pairing", allowFrom: [],
+    groups: [], pending: { dead: { senderId: "u9", chatId: "c", expiresAt: NOW - 1 } } })
+  const r = gate.gate("u9", "c", true, NOW)
+  if (r.action === "pair") expect(r.code).not.toBe("dead")
+  else throw new Error("expected pair")
+})
+
+test("approve moves the sender to allowFrom and returns the chat id", () => {
+  const { path, gate } = gateWith({ dmPolicy: "pairing", allowFrom: [], groups: [], pending: {} })
+  const r = gate.gate("u9", "cX", true, NOW)
+  if (r.action !== "pair") throw new Error("expected pair")
+  const approved = gate.approve(r.code, NOW)
+  expect(approved).toEqual({ senderId: "u9", chatId: "cX" })
+  // a fresh gate over the same file now delivers
+  expect(new BaseGate(path).gate("u9", "cX", true, NOW)).toEqual({ action: "deliver" })
+})
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `bun test tests/baseGate.test.ts`
+Expected: FAIL — module not found.
+
+- [ ] **Step 3: Implement `hub/baseGate.ts`**
+
+```ts
+import { readFileSync, writeFileSync, mkdirSync, renameSync } from "fs"
+import { dirname } from "path"
+import { randomBytes } from "crypto"
+
+export type DmPolicy = "pairing" | "allowlist" | "disabled"
+export interface PendingPair { senderId: string; chatId: string; expiresAt: number }
+export interface BaseAccess {
+  dmPolicy: DmPolicy
+  allowFrom: string[]
+  groups: string[]                       // opted-in guild channel ids
+  pending: Record<string, PendingPair>   // code → pending
+}
+export type GateResult =
+  | { action: "deliver" }
+  | { action: "drop" }
+  | { action: "pair"; code: string }
+
+const PAIR_TTL_MS = 60 * 60 * 1000
+const MAX_PENDING = 3
+
+function defaults(): BaseAccess {
+  return { dmPolicy: "pairing", allowFrom: [], groups: [], pending: {} }
+}
+
+/** Layer-0 access wall. Re-reads access.json on every gate() call for live edits. */
+export class BaseGate {
+  constructor(private path: string) {}
+
+  private read(): BaseAccess {
+    try {
+      const p = JSON.parse(readFileSync(this.path, "utf8")) as Partial<BaseAccess>
+      return {
+        dmPolicy: p.dmPolicy ?? "pairing",
+        allowFrom: p.allowFrom ?? [],
+        groups: p.groups ?? [],
+        pending: p.pending ?? {},
+      }
+    } catch { return defaults() }
+  }
+
+  private write(a: BaseAccess): void {
+    mkdirSync(dirname(this.path), { recursive: true })
+    const tmp = this.path + ".tmp"
+    writeFileSync(tmp, JSON.stringify(a, null, 2), { mode: 0o600 })
+    renameSync(tmp, this.path)
+  }
+
+  gate(userId: string, chatId: string, isDM: boolean, nowMs: number): GateResult {
+    const a = this.read()
+    // prune expired pending
+    let changed = false
+    for (const [code, p] of Object.entries(a.pending)) {
+      if (p.expiresAt < nowMs) { delete a.pending[code]; changed = true }
+    }
+
+    if (a.dmPolicy === "disabled") { if (changed) this.write(a); return { action: "drop" } }
+
+    if (!isDM) {
+      if (changed) this.write(a)
+      return a.groups.includes(chatId) ? { action: "deliver" } : { action: "drop" }
+    }
+
+    if (a.allowFrom.includes(userId)) { if (changed) this.write(a); return { action: "deliver" } }
+    if (a.dmPolicy === "allowlist") { if (changed) this.write(a); return { action: "drop" } }
+
+    // pairing mode — reuse an existing code for this sender if present
+    for (const [code, p] of Object.entries(a.pending)) {
+      if (p.senderId === userId) { if (changed) this.write(a); return { action: "pair", code } }
+    }
+    if (Object.keys(a.pending).length >= MAX_PENDING) { if (changed) this.write(a); return { action: "drop" } }
+
+    const code = randomBytes(3).toString("hex")
+    a.pending[code] = { senderId: userId, chatId, expiresAt: nowMs + PAIR_TTL_MS }
+    this.write(a)
+    return { action: "pair", code }
+  }
+
+  /** Approve a pending code: add the sender to allowFrom. Returns the pairing context. */
+  approve(code: string, _nowMs: number): { senderId: string; chatId: string } | null {
+    const a = this.read()
+    const p = a.pending[code]
+    if (!p) return null
+    if (!a.allowFrom.includes(p.senderId)) a.allowFrom.push(p.senderId)
+    delete a.pending[code]
+    this.write(a)
+    return { senderId: p.senderId, chatId: p.chatId }
+  }
+}
+```
+
+- [ ] **Step 4: Run to verify it passes**
+
+Run: `bun test tests/baseGate.test.ts`
+Expected: `8 pass`.
+
+- [ ] **Step 5: Write the operator pairing CLI `scripts/pair.ts`**
+
+```ts
+#!/usr/bin/env bun
+// Approve a pairing code: bun run scripts/pair.ts <code>
+import { join } from "path"
+import { homedir } from "os"
+import { BaseGate } from "../hub/baseGate"
+
+const code = process.argv[2]
+if (!code) { console.error("usage: bun run scripts/pair.ts <code>"); process.exit(1) }
+const stateDir = process.env.SWITCHBOARD_STATE_DIR ?? join(homedir(), ".switchboard")
+const gate = new BaseGate(join(stateDir, "access.json"))
+const r = gate.approve(code, Date.now())
+if (!r) { console.error(`no pending code "${code}"`); process.exit(1) }
+console.log(`approved ${r.senderId} — they can now DM the bot`)
+```
+
+- [ ] **Step 6: Run the full suite + typecheck, then commit**
+
+```bash
+bun test && bun run typecheck
+git add hub/baseGate.ts tests/baseGate.test.ts scripts/pair.ts
+git commit -m "feat: base pairing/allowlist gate + operator pairing CLI"
+```
+
+---
+
 ### Task 15: Gateway — inbound parse, role resolution, outbound send
 
 **Files:**
@@ -1929,6 +2141,7 @@ function fakes() {
   return {
     dispatched, plain,
     deps: {
+      baseGate: (_userId: string, _chatId: string, _isDM: boolean) => ({ action: "deliver" as const }),
       resolveRoles: async (_id: string) => ["dev"],
       route: async () => ({ agent: "research", confidence: 0.9, switch: true }),
       dispatch: (agent: string, chatKey: string) => { dispatched.push({ agent, chatKey }); return true },
@@ -1969,6 +2182,24 @@ test("!switch to a non-permitted agent is refused", async () => {
   expect(f.dispatched.length).toBe(0)
   expect(f.plain[0].text.toLowerCase()).toContain("not available")
 })
+
+test("an unpaired stranger gets a pairing code and is not dispatched", async () => {
+  const f = fakes()
+  f.deps.baseGate = () => ({ action: "pair" as const, code: "abc123" })
+  const o = new Orchestrator(hub, reg, f.deps as any)
+  await o.handleMessage(dm("hello", "stranger"))
+  expect(f.dispatched.length).toBe(0)
+  expect(f.plain[0].text).toContain("abc123")
+})
+
+test("a base-gate drop is silent (no reply, no dispatch)", async () => {
+  const f = fakes()
+  f.deps.baseGate = () => ({ action: "drop" as const })
+  const o = new Orchestrator(hub, reg, f.deps as any)
+  await o.handleMessage(dm("hello", "stranger"))
+  expect(f.dispatched.length).toBe(0)
+  expect(f.plain.length).toBe(0)
+})
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -1986,7 +2217,10 @@ import { chatKey, decideAgent, BindingStore } from "./bindings"
 import { parseControlCommand, renderAgentList } from "./gateway"
 import { join } from "path"
 
+import type { GateResult } from "./baseGate"
+
 export interface OrchestratorDeps {
+  baseGate: (userId: string, chatId: string, isDM: boolean) => GateResult
   resolveRoles: (userId: string) => Promise<string[]>
   route: (msg: string, permitted: { name: string; description: string }[], current: string | null)
     => Promise<RouteDecision | null>
@@ -2002,6 +2236,15 @@ export class Orchestrator {
   }
 
   async handleMessage(inbound: InboundMessage): Promise<void> {
+    // Layer 0: base pairing/allowlist wall — before any routing.
+    const g = this.deps.baseGate(inbound.userId, inbound.chatId, inbound.isDM)
+    if (g.action === "drop") return
+    if (g.action === "pair") {
+      await this.deps.sendPlain(inbound.chatId,
+        `Pairing required. Share this code with the operator to get access: \`${g.code}\``)
+      return
+    }
+
     const roles = await this.deps.resolveRoles(inbound.userId)
     const permitted = permittedAgents(this.reg, roles, inbound.userId)
     const key = chatKey(this.hub.chatKeyScope, inbound.isDM, inbound.chatId, inbound.userId)
@@ -2061,7 +2304,7 @@ export class Orchestrator {
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `bun test tests/orchestrator.test.ts`
-Expected: `4 pass`.
+Expected: `6 pass`.
 
 - [ ] **Step 5: Implement the thin entrypoint `hub/index.ts`**
 
@@ -2069,6 +2312,7 @@ Expected: `4 pass`.
 import { join } from "path"
 import { config as loadEnv } from "./env"   // see note below
 import { loadConfigs } from "./config"
+import { BaseGate } from "./baseGate"
 import { Gateway } from "./gateway"
 import { Dispatcher } from "./transports/index"
 import { HeadlessTransport } from "./transports/headless"
@@ -2106,7 +2350,10 @@ dispatcher.onReply(async reply => {
   await gateway.sendReply(reply, agents[reply.agent])
 })
 
+const baseGate = new BaseGate(join(hub.stateDir, "access.json"))
+
 const orchestrator = new Orchestrator(hub, agents, {
+  baseGate: (userId, chatId, isDM) => baseGate.gate(userId, chatId, isDM, Date.now()),
   resolveRoles: id => gateway.resolveRoles(id),
   route: (msg, permitted, current) =>
     routeFn({ message: msg, permitted, current }, routerRunner, hub.routerModel),
@@ -2219,7 +2466,7 @@ cp config/agents.example.json config/agents.json
 Run: `bun run hub`
 Expected stderr: `switchboard hub: gateway connected`.
 
-- [ ] **Step 4: Pair + ephemeral path.** DM the bot "what is 2+2?". Expected: a reply tagged `**💡 qa** · 4` (or similar). Confirms: gateway inbound, access (`qa` is `"*"`), router → `qa`, headless spawn, tagged reply.
+- [ ] **Step 4: Pair + ephemeral path.** DM the bot "hi". Expected (default `pairing` policy): a reply with a 6-hex pairing code. Approve it: `bun run scripts/pair.ts <code>`. Now DM "what is 2+2?". Expected: a reply tagged `**💡 qa** · 4` (or similar). Confirms: base gate → pairing → approval, gateway inbound, access (`qa` is `"*"`), router → `qa`, headless spawn, tagged reply.
 
 - [ ] **Step 5: Start a persistent agent.** In a second terminal: `scripts/start-agent.sh research`. Confirm the hub logs the shim registering. DM the bot "research the history of WebRTC". Expected: a reply tagged `**🔬 research** · …`. Confirms: socket transport, persistent session, role gating (give yourself the `dev`/`admin` role; without it `research` should be invisible to `!agents`).
 
@@ -2248,5 +2495,5 @@ git commit -m "docs: verified end-to-end running instructions"
 - Spec §9 config → Task 14.
 - Spec §10 edge cases → Task 7 (decideAgent fallbacks, permitted-shrink), 10 (timeout apology), 17 (offline reply, no-access reply).
 - Spec §3/§7 access + permission stance → Tasks 3, 16.
+- Spec §13 base pairing/allowlist gate → Task 14A (`hub/baseGate.ts` + `scripts/pair.ts`), wired into the orchestrator (Task 17) as the layer-0 check before routing. Strangers are dropped or handed a pairing code before reaching any agent, including `"*"` agents.
 - Spec §12 testing → unit tests throughout; Task 19 manual E2E.
-- Base pairing/allowlist gate (spec §13): **deferred note** — v1 relies on Discord's "shared server" + Public Bot toggle + role/user access as the perimeter; the upstream pairing flow can be ported into a `hub/baseGate.ts` as a fast-follow if open DM spam becomes an issue. This is the one spec element intentionally staged out of the first build; flagged here so it isn't mistaken for full coverage.
