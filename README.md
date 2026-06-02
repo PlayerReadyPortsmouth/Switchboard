@@ -7,7 +7,7 @@ Switchboard extends the official Claude Code Discord plugin (which is strictly *
 - **Persistent agents** — long-lived `claude --channels` sessions (research, coding) connected to the hub through a thin channel shim. Native UX: reply/react/edit relay.
 - **Ephemeral agents** — headless `claude -p --resume` workers spawned per conversation for quick Q&A, with a fixed tool allowlist.
 
-> **Status:** implemented v1. All **69** unit tests pass (`bun test`) and `bun run typecheck` is clean. Manual Discord end-to-end testing is still **pending**. See the [Status of features](#status-of-features) section for what works and the known v1 gap.
+> **Status:** implemented v1. All **77** unit tests pass (`bun test`) and `bun run typecheck` is clean. Manual Discord end-to-end testing is still **pending**. See the [Status of features](#status-of-features) section for what works and the known v1 gap.
 
 ## Why a hub?
 
@@ -72,6 +72,8 @@ docs/        superpowers/ spec + plan
    bun run scripts/pair.ts <code>
    ```
 
+   The hub then DMs the user a confirmation that they're paired.
+
 7. **Persistent agents.** Once the hub is running, launch a persistent agent by name:
 
    ```bash
@@ -80,7 +82,7 @@ docs/        superpowers/ spec + plan
 
 ## Status of features
 
-**Working in v1** (covered by the 69 passing unit tests):
+**Working in v1** (covered by the 77 passing unit tests):
 
 - Message routing through the hub, with the **base gate** (role + user-id access control).
 - Per-agent access by Discord **role** and **user id**.
@@ -88,15 +90,14 @@ docs/        superpowers/ spec + plan
 - **Haiku router** (`claude -p --model claude-haiku-4-5`) with **sticky** bindings and confident **auto-switching** above the configured threshold.
 - **Ephemeral** agents: headless `claude -p` workers with a fixed tool allowlist and idle timeout.
 - **Persistent** agents via the channel **shim**: reply / react / edit relay.
+- **Interactive permission relay for persistent agents.** When a persistent agent hits a tool-approval prompt, the hub DMs the base-gate allowlist an Allow/Deny prompt (buttons, or a `y/n <code>` text reply); the answer routes back to the originating agent's shim. Wired end-to-end through `onPermissionRequest` → `PermissionRouter` in `hub/index.ts`.
 - Message **tagging + chunking** (Discord 2000-char limit) and agent-prefix tagging.
 - **Bindings persistence** (sticky conversation → agent state survives restarts).
-- **Pairing CLI** (`scripts/pair.ts`).
+- **Pairing CLI** (`scripts/pair.ts`) — approving a code now sends the user a Discord confirmation message (via the hub's approved-dir poller).
 
 **Known v1 gap:**
 
-- **Interactive permission relay for persistent agents is scaffolded but not wired in.** The transport hooks (`onPermissionRequest`), the shim, and the `PermissionRouter` all exist and are tested — but they are **not yet connected in `hub/index.ts`**. As a result, a persistent agent that hits a tool-approval prompt will **stall**. To finish this, wire `onPermissionRequest` in `hub/index.ts` to the `PermissionRouter`.
 - **Manual Discord end-to-end testing is pending** — only unit tests have run so far.
-- The `pair.ts` approval does **not** yet send the user a Discord confirmation message.
 
 ## Docs
 
