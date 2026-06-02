@@ -326,13 +326,13 @@ test("newline mode prefers paragraph boundaries", () => {
 })
 
 test("formatOutbound tags only the first chunk", () => {
-  const out = formatOutbound("a".repeat(2500), research, "prefix", 2000, "length")
+  const out = formatOutbound("a".repeat(2500), research, "prefix", 2000, "length", "research")
   expect(out[0].startsWith("**🔬 research** · ")).toBe(true)
   expect(out[1].startsWith("**🔬")).toBe(false)
 })
 ```
 
-> Note: the test references the agent's *name* `research`; `formatOutbound` receives it as an argument (see signature below).
+> Note: `formatOutbound` takes the agent's *name* as an explicit required 6th argument (`AgentConfig` has no `name` field). The gateway (Task 15) passes `reply.agent` for it.
 
 - [ ] **Step 2: Run to verify it fails**
 
@@ -366,11 +366,11 @@ export function chunk(text: string, limit: number, mode: "length" | "newline"): 
 /** Split text to Discord's limit and tag the first chunk with the agent's identity. */
 export function formatOutbound(
   text: string,
-  agent: AgentConfig & { name?: string },
+  agent: AgentConfig,
   style: "prefix" | "embed",
   limit: number,
   mode: "length" | "newline",
-  name = agent.name ?? "",
+  name: string,
 ): string[] {
   const tag = style === "prefix" ? `**${agent.emoji} ${name}** · ` : ""
   // Reserve room for the tag so the first chunk still fits under the limit.
