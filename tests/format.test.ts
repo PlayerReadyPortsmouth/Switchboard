@@ -25,7 +25,7 @@ test("newline mode prefers paragraph boundaries", () => {
 })
 
 test("formatOutbound tags only the first chunk", () => {
-  const out = formatOutbound("a".repeat(2500), research, "prefix", 2000, "length")
+  const out = formatOutbound("a".repeat(2500), research, "prefix", 2000, "length", "research")
   expect(out[0].startsWith("**🔬 research** · ")).toBe(true)
   expect(out[1].startsWith("**🔬")).toBe(false)
 })

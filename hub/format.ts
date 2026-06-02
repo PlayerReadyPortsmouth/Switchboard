@@ -21,11 +21,11 @@ export function chunk(text: string, limit: number, mode: "length" | "newline"): 
 /** Split text to Discord's limit and tag the first chunk with the agent's identity. */
 export function formatOutbound(
   text: string,
-  agent: AgentConfig & { name?: string },
+  agent: AgentConfig,
   style: "prefix" | "embed",
   limit: number,
   mode: "length" | "newline",
-  name = agent.name ?? "",
+  name: string,
 ): string[] {
   const tag = style === "prefix" ? `**${agent.emoji} ${name}** · ` : ""
   // Reserve room for the tag so the first chunk still fits under the limit.
