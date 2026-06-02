@@ -75,6 +75,11 @@ export class BaseGate {
     return { action: "pair", code }
   }
 
+  /** Current allowlisted user snowflakes (read live from access.json). */
+  listAllowed(): string[] {
+    return this.read().allowFrom
+  }
+
   /** Approve a pending code: add the sender to allowFrom. Returns the pairing context. */
   approve(code: string, _nowMs: number): { senderId: string; chatId: string } | null {
     const a = this.read()

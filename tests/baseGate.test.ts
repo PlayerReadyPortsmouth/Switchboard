@@ -56,6 +56,11 @@ test("expired pending codes are pruned (a new code is issued)", () => {
   else throw new Error("expected pair")
 })
 
+test("listAllowed returns the allowFrom users", () => {
+  const { gate } = gateWith({ dmPolicy: "pairing", allowFrom: ["u1", "u2"], groups: [], pending: {} })
+  expect(gate.listAllowed().sort()).toEqual(["u1", "u2"])
+})
+
 test("approve moves the sender to allowFrom and returns the chat id", () => {
   const { path, gate } = gateWith({ dmPolicy: "pairing", allowFrom: [], groups: [], pending: {} })
   const r = gate.gate("u9", "cX", true, NOW)

@@ -1,5 +1,6 @@
 import {
-  Client, GatewayIntentBits, Partials, ChannelType, type Message,
+  Client, GatewayIntentBits, Partials, ChannelType,
+  ButtonBuilder, ButtonStyle, ActionRowBuilder, type Message, type Interaction,
 } from "discord.js"
 import type { AgentRegistry, InboundMessage, AgentReply, AgentConfig, HubConfig } from "./types"
 import { formatOutbound } from "./format"
@@ -31,6 +32,8 @@ export function renderAgentList(reg: AgentRegistry, permitted: string[], current
 export class Gateway {
   readonly client: Client
   private onMessage: (m: InboundMessage) => void = () => {}
+  private permButtonCb: (requestId: string, behavior: "allow" | "deny") => void = () => {}
+  private isAuthorized: (userId: string) => boolean = () => false
 
   constructor(private cfg: HubConfig, private registry: AgentRegistry) {
     this.client = new Client({
@@ -44,6 +47,33 @@ export class Gateway {
   }
 
   handleInbound(cb: (m: InboundMessage) => void): void { this.onMessage = cb }
+
+  /** Called by the hub: which users may answer permission prompts (base-gate allowlist). */
+  setPermissionAuthorizer(fn: (userId: string) => boolean): void { this.isAuthorized = fn }
+  onPermissionButton(cb: (requestId: string, behavior: "allow" | "deny") => void): void {
+    this.permButtonCb = cb
+  }
+
+  /** DM each allowlisted user an Allow/Deny prompt for a tool-permission request. */
+  async sendPermissionPrompt(
+    userIds: string[], requestId: string, toolName: string,
+  ): Promise<void> {
+    const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder().setCustomId(`perm:allow:${requestId}`).setLabel("Allow")
+        .setEmoji("✅").setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`perm:deny:${requestId}`).setLabel("Deny")
+        .setEmoji("❌").setStyle(ButtonStyle.Danger),
+    )
+    const content = `🔐 Permission request: \`${toolName}\``
+    for (const uid of userIds) {
+      try {
+        const u = await this.client.users.fetch(uid)
+        await u.send({ content, components: [row] })
+      } catch (e) {
+        process.stderr.write(`gateway: permission prompt to ${uid} failed: ${e}\n`)
+      }
+    }
+  }
 
   /** Resolve a user's roles by looking them up as a member across configured guilds. */
   async resolveRoles(userId: string): Promise<string[]> {
@@ -68,6 +98,21 @@ export class Gateway {
         attachments: [...msg.attachments.values()].map(a => ({
           name: a.name ?? a.id, type: a.contentType ?? "unknown", size: a.size })),
       })
+    })
+    this.client.on("interactionCreate", async (interaction: Interaction) => {
+      if (!interaction.isButton()) return
+      const m = /^perm:(allow|deny):(.+)$/.exec(interaction.customId)
+      if (!m) return
+      if (!this.isAuthorized(interaction.user.id)) {
+        await interaction.reply({ content: "Not authorized.", ephemeral: true }).catch(() => {})
+        return
+      }
+      const behavior = m[1] as "allow" | "deny"
+      this.permButtonCb(m[2], behavior)
+      const label = behavior === "allow" ? "✅ Allowed" : "❌ Denied"
+      await interaction.update({
+        content: `${interaction.message.content}\n\n${label}`, components: [],
+      }).catch(() => {})
     })
     await this.client.login(token)
   }

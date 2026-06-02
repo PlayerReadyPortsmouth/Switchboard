@@ -9,6 +9,7 @@ import { ChannelShimTransport } from "./transports/channelShim"
 import { makeHeadlessRunner, makeRouterRunner } from "./transports/spawnClaude"
 import { route as routeFn } from "./router"
 import { Orchestrator } from "./orchestrator"
+import { PermissionRouter } from "./permissions"
 
 const CONFIG_DIR = process.env.SWITCHBOARD_CONFIG ?? join(import.meta.dir, "..", "config")
 const { hub, agents } = loadConfigs(CONFIG_DIR)
@@ -41,10 +42,33 @@ dispatcher.onReply(async reply => {
 
 const baseGate = new BaseGate(join(hub.stateDir, "access.json"))
 
+const permRouter = new PermissionRouter()
+
+// Only allowlisted users may answer permission prompts.
+gateway.setPermissionAuthorizer(uid => baseGate.listAllowed().includes(uid))
+
+// A persistent agent's shim raised a tool-permission request → prompt the allowlist.
+for (const [name, shim] of Object.entries(shims)) {
+  shim.onPermissionRequest(req => {
+    permRouter.register(req.requestId, name)
+    void gateway.sendPermissionPrompt(baseGate.listAllowed(), req.requestId, req.toolName)
+  })
+}
+
+// A button click → route the answer back to the originating agent's shim.
+gateway.onPermissionButton((requestId, behavior) => {
+  const agent = permRouter.resolve(requestId)
+  if (agent) shims[agent]?.sendPermissionResult(requestId, behavior)
+})
+
 const orchestrator = new Orchestrator(hub, agents, {
   baseGate: (userId, chatId, isDM) => baseGate.gate(userId, chatId, isDM, Date.now()),
-  // G2 wires this to the PermissionRouter; until then no live permission requests exist.
-  resolvePermission: () => false,
+  resolvePermission: (code, behavior) => {
+    const agent = permRouter.resolve(code)
+    if (!agent) return false
+    shims[agent]?.sendPermissionResult(code, behavior)
+    return true
+  },
   resolveRoles: id => gateway.resolveRoles(id),
   route: (msg, permitted, current) =>
     routeFn({ message: msg, permitted, current }, routerRunner, hub.routerModel),
