@@ -12,6 +12,7 @@ export class ChannelShimTransport implements AgentTransport {
   private conn: Conn | null = null
   private cb: (r: AgentReply) => void = () => {}
   private permCb: (requestId: string, behavior: "allow" | "deny") => void = () => {}
+  private permReqCb: (req: { requestId: string; toolName: string; description: string; inputPreview: string }) => void = () => {}
 
   constructor(public readonly name: string, private socketPath: string) {}
 
@@ -51,11 +52,15 @@ export class ChannelShimTransport implements AgentTransport {
         this.cb({ agent: this.name, kind: "edit", chatId: msg.chatId,
           messageId: msg.messageId, text: msg.text })
         break
-      // permission_request handled in Phase 5 (Task 16).
+      case "permission_request":
+        this.permReqCb({ requestId: msg.requestId, toolName: msg.toolName,
+          description: msg.description, inputPreview: msg.inputPreview })
+        break
     }
   }
 
   onReply(cb: (r: AgentReply) => void): void { this.cb = cb }
+  onPermissionRequest(cb: typeof this.permReqCb): void { this.permReqCb = cb }
   isAvailable(): boolean { return this.conn?.registered === true }
 
   deliver(chatKey: string, inbound: InboundMessage): void {

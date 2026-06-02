@@ -2,6 +2,7 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js"
+import { z } from "zod"
 import { encode, LineDecoder } from "../hub/framing"
 
 interface WireInbound {
@@ -66,12 +67,34 @@ async function main() {
               method: "notifications/claude/channel",
               params: inboundToChannelNotification(m),
             })
+          } else if (m.t === "permission_result") {
+            void mcp.notification({
+              method: "notifications/claude/channel/permission",
+              params: { request_id: m.requestId, behavior: m.behavior },
+            })
           }
         }
       },
     },
   })
   sock.write(encode({ t: "register", agent: AGENT }))
+
+  // CC → shim: a tool wants permission. Forward it onto the hub socket.
+  mcp.setNotificationHandler(
+    z.object({
+      method: z.literal("notifications/claude/channel/permission_request"),
+      params: z.object({
+        request_id: z.string(),
+        tool_name: z.string(),
+        description: z.string(),
+        input_preview: z.string(),
+      }),
+    }) as any,
+    async ({ params }: any) => {
+      sock.write(encode({ t: "permission_request", requestId: params.request_id,
+        toolName: params.tool_name, description: params.description, inputPreview: params.input_preview }))
+    },
+  )
 
   mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [
