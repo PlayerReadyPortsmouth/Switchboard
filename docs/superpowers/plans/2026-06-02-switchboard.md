@@ -1911,7 +1911,7 @@ export function renderAgentList(reg: AgentRegistry, permitted: string[], current
   const lines = permitted.map(n => {
     const c = reg[n]
     const mark = n === current ? "  ← current" : ""
-    return `${c.emoji} **${n}** — ${c.description}${mark}`
+    return `${c.emoji} ${n} — ${c.description}${mark}`
   })
   return lines.length ? lines.join("\n") : "(no agents available to you)"
 }
@@ -2259,11 +2259,13 @@ export class Orchestrator {
     }
 
     const current = bound && permitted.includes(bound) ? bound : null
-    const decision = await this.deps.route(
+    const routed = await this.deps.route(
       inbound.content,
       permitted.map(n => ({ name: n, description: this.reg[n].description })),
       current,
     )
+    // Defense in depth: never let a router pick escape the caller's permitted set.
+    const decision = routed && permitted.includes(routed.agent) ? routed : null
     const agent = decideAgent({
       current, permitted, decision,
       threshold: this.hub.switchThreshold, defaultAgent: this.hub.defaultAgent,
@@ -2274,7 +2276,7 @@ export class Orchestrator {
         `${this.reg[agent].emoji} ${agent} is offline right now. Try \`!agents\`.`)
       return
     }
-    this.bindings.set(key, { agent, sessionId: this.bindings.get(key)?.sessionId, lastActive: inbound.ts.length })
+    this.bindings.set(key, { agent, sessionId: this.bindings.get(key)?.sessionId, lastActive: Date.parse(inbound.ts) })
     this.deps.dispatch(agent, key, inbound)
   }
 
@@ -2294,7 +2296,7 @@ export class Orchestrator {
         if (!permitted.includes(c.arg)) {
           await this.deps.sendPlain(inbound.chatId, `**${c.arg}** is not available to you.`); return
         }
-        this.bindings.set(key, { agent: c.arg, lastActive: inbound.ts.length })
+        this.bindings.set(key, { agent: c.arg, lastActive: Date.parse(inbound.ts) })
         await this.deps.sendPlain(inbound.chatId, `Switched to ${this.reg[c.arg].emoji} **${c.arg}**.`); return
     }
   }
