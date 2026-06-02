@@ -29,6 +29,7 @@ function fakes() {
       dispatch: (agent: string, chatKey: string) => { dispatched.push({ agent, chatKey }); return true },
       isAvailable: () => true,
       sendPlain: async (chatId: string, text: string) => { plain.push({ chatId, text }) },
+      resolvePermission: (_code: string, _behavior: string) => false,
     },
   }
 }
@@ -81,4 +82,25 @@ test("a base-gate drop is silent (no reply, no dispatch)", async () => {
   await o.handleMessage(dm("hello", "stranger"))
   expect(f.dispatched.length).toBe(0)
   expect(f.plain.length).toBe(0)
+})
+
+test("a y/n <code> reply for a known permission resolves it and does not dispatch", async () => {
+  const f = fakes()
+  const resolved: { code: string; behavior: string }[] = []
+  f.deps.resolvePermission = (code: string, behavior: string) => {
+    if (code !== "abcde") return false
+    resolved.push({ code, behavior }); return true
+  }
+  const o = new Orchestrator(hub, reg, f.deps as any)
+  await o.handleMessage(dm("y abcde"))
+  expect(resolved).toEqual([{ code: "abcde", behavior: "allow" }])
+  expect(f.dispatched.length).toBe(0)
+})
+
+test("a y/n <code> reply for an UNKNOWN code falls through to normal handling", async () => {
+  const f = fakes()
+  f.deps.resolvePermission = () => false   // unknown code
+  const o = new Orchestrator(hub, reg, f.deps as any)
+  await o.handleMessage(dm("y zzzzz"))
+  expect(f.dispatched.length).toBe(1)      // treated as a normal message → routed
 })

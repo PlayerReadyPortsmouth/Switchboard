@@ -3,12 +3,15 @@ import type { RouteDecision } from "./router"
 import { permittedAgents } from "./access"
 import { chatKey, decideAgent, BindingStore } from "./bindings"
 import { parseControlCommand, renderAgentList } from "./gateway"
+import { parsePermissionReply } from "./permissions"
 import { join } from "path"
 
 import type { GateResult } from "./baseGate"
 
 export interface OrchestratorDeps {
   baseGate: (userId: string, chatId: string, isDM: boolean) => GateResult
+  /** Resolve a permission reply by code; returns true if the code was a live request. */
+  resolvePermission: (code: string, behavior: "allow" | "deny") => boolean
   resolveRoles: (userId: string) => Promise<string[]>
   route: (msg: string, permitted: { name: string; description: string }[], current: string | null)
     => Promise<RouteDecision | null>
@@ -32,6 +35,12 @@ export class Orchestrator {
         `Pairing required. Share this code with the operator to get access: \`${g.code}\``)
       return
     }
+
+    // Permission text-reply intercept: "y/n <code>" from a paired user. Only
+    // consume it if the code maps to a live permission request; otherwise it's
+    // ordinary chat and falls through.
+    const perm = parsePermissionReply(inbound.content)
+    if (perm && this.deps.resolvePermission(perm.code, perm.behavior)) return
 
     const roles = await this.deps.resolveRoles(inbound.userId)
     const permitted = permittedAgents(this.reg, roles, inbound.userId)

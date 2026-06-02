@@ -43,6 +43,8 @@ const baseGate = new BaseGate(join(hub.stateDir, "access.json"))
 
 const orchestrator = new Orchestrator(hub, agents, {
   baseGate: (userId, chatId, isDM) => baseGate.gate(userId, chatId, isDM, Date.now()),
+  // G2 wires this to the PermissionRouter; until then no live permission requests exist.
+  resolvePermission: () => false,
   resolveRoles: id => gateway.resolveRoles(id),
   route: (msg, permitted, current) =>
     routeFn({ message: msg, permitted, current }, routerRunner, hub.routerModel),
