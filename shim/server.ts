@@ -124,4 +124,9 @@ async function main() {
   await mcp.connect(new StdioServerTransport())
 }
 
-if (import.meta.main) void main()
+if (import.meta.main) {
+  main().catch(err => {
+    process.stderr.write(`switchboard shim: fatal: ${err}\n`)
+    process.exit(1)
+  })
+}
