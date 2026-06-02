@@ -10,6 +10,7 @@ import { makeHeadlessRunner, makeRouterRunner } from "./transports/spawnClaude"
 import { route as routeFn } from "./router"
 import { Orchestrator } from "./orchestrator"
 import { PermissionRouter } from "./permissions"
+import { drainApprovals } from "./approvals"
 
 const CONFIG_DIR = process.env.SWITCHBOARD_CONFIG ?? join(import.meta.dir, "..", "config")
 const { hub, agents } = loadConfigs(CONFIG_DIR)
@@ -80,3 +81,9 @@ const orchestrator = new Orchestrator(hub, agents, {
 gateway.handleInbound(m => { void orchestrator.handleMessage(m) })
 await gateway.start(token)
 console.error("switchboard hub: gateway connected")
+
+setInterval(() => {
+  for (const { chatId } of drainApprovals(hub.stateDir)) {
+    void gateway.sendPlain(chatId, "✅ Paired! You can talk to the agents now. Try `!agents`.")
+  }
+}, 5000).unref()
