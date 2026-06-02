@@ -64,7 +64,7 @@ export class Orchestrator {
         `${this.reg[agent].emoji} ${agent} is offline right now. Try \`!agents\`.`)
       return
     }
-    this.bindings.set(key, { agent, sessionId: this.bindings.get(key)?.sessionId, lastActive: inbound.ts.length })
+    this.bindings.set(key, { agent, sessionId: this.bindings.get(key)?.sessionId, lastActive: Date.parse(inbound.ts) })
     this.deps.dispatch(agent, key, inbound)
   }
 
@@ -84,7 +84,7 @@ export class Orchestrator {
         if (!permitted.includes(c.arg)) {
           await this.deps.sendPlain(inbound.chatId, `**${c.arg}** is not available to you.`); return
         }
-        this.bindings.set(key, { agent: c.arg, lastActive: inbound.ts.length })
+        this.bindings.set(key, { agent: c.arg, lastActive: Date.parse(inbound.ts) })
         await this.deps.sendPlain(inbound.chatId, `Switched to ${this.reg[c.arg].emoji} **${c.arg}**.`); return
     }
   }
