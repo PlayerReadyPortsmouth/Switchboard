@@ -1,0 +1,17 @@
+# Secrets & local state
+.env
+.env.*
+*.sock
+/state/
+inbox/
+approved/
+
+# Dependencies & build
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
