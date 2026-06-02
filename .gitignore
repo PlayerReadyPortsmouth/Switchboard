@@ -6,6 +6,9 @@
 inbox/
 approved/
 
+# Operator-specific agent registry (copy from config/agents.example.json)
+config/agents.json
+
 # Dependencies & build
 node_modules/
 dist/

@@ -7,9 +7,24 @@ export function expandHome(p: string): string {
   return p.startsWith("~") ? join(homedir(), p.slice(1)) : p
 }
 
+function readConfigFile(dir: string, file: string, hint: string): string {
+  try {
+    return readFileSync(join(dir, file), "utf8")
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new Error(`config: config/${file} not found — ${hint}`)
+    }
+    throw err
+  }
+}
+
 export function loadConfigs(dir: string): { hub: HubConfig; agents: AgentRegistry } {
-  const hub = JSON.parse(readFileSync(join(dir, "hub.config.json"), "utf8")) as HubConfig
-  const agents = JSON.parse(readFileSync(join(dir, "agents.json"), "utf8")) as AgentRegistry
+  const hub = JSON.parse(
+    readConfigFile(dir, "hub.config.json", "copy config/hub.config.json into place and set guildIds"),
+  ) as HubConfig
+  const agents = JSON.parse(
+    readConfigFile(dir, "agents.json", "copy config/agents.example.json to config/agents.json"),
+  ) as AgentRegistry
 
   hub.socketPath = expandHome(hub.socketPath)
   hub.stateDir = expandHome(hub.stateDir)
