@@ -7,8 +7,8 @@ function fakeTransport(name: string, available = true): AgentTransport & { deliv
   let cb: (r: AgentReply) => void = () => {}
   return {
     name, delivered,
-    deliver: (chatKey, inbound) => { delivered.push({ chatKey, inbound }) },
-    onReply: c => { cb = c },
+    deliver: (chatKey: string, inbound: InboundMessage) => { delivered.push({ chatKey, inbound }) },
+    onReply: (c: (r: AgentReply) => void) => { cb = c },
     isAvailable: () => available,
     _emit: (r: AgentReply) => cb(r),
   } as any
