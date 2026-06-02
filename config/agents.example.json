@@ -1,0 +1,14 @@
+{
+  "qa": {
+    "emoji": "💡", "description": "quick code & general questions",
+    "mode": "ephemeral",
+    "access": { "roles": ["*"] },
+    "runtime": { "cwd": "~", "model": "claude-haiku-4-5", "allowedTools": ["Read", "Grep", "Glob"] }
+  },
+  "research": {
+    "emoji": "🔬", "description": "web research, deep multi-source dives",
+    "mode": "persistent",
+    "access": { "roles": ["dev", "admin"], "users": [] },
+    "runtime": { "cwd": "~", "model": "claude-sonnet-4-6" }
+  }
+}

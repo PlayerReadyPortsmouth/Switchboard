@@ -1,0 +1,12 @@
+{
+  "botTokenEnv": "DISCORD_BOT_TOKEN",
+  "guildIds": [],
+  "socketPath": "~/.switchboard/hub.sock",
+  "stateDir": "~/.switchboard",
+  "routerModel": "claude-haiku-4-5",
+  "switchThreshold": 0.7,
+  "defaultAgent": "qa",
+  "ephemeralTimeoutMs": 120000,
+  "tagStyle": "prefix",
+  "chatKeyScope": "user"
+}
