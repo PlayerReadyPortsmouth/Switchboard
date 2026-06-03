@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test"
-import { StreamJsonTransport, splitLines } from "../hub/transports/streamJson"
+import { StreamJsonTransport, splitLines, normalizeCard } from "../hub/transports/streamJson"
 import type { AgentConfig } from "../hub/types"
 
 function fakeProc() {
@@ -137,4 +137,11 @@ test("splitLines yields complete lines and buffers a partial remainder", () => {
   expect(acc.buf).toBe("c")
   expect(splitLines(acc, "-more\n")).toEqual(["c-more"])
   expect(acc.buf).toBe("")
+})
+
+test("normalizeCard fills missing buttons/title/body so the card pipeline can't crash", () => {
+  expect(normalizeCard({ title: "T" })).toEqual({ title: "T", body: "", buttons: [] })
+  expect(normalizeCard(undefined)).toEqual({ title: "(untitled)", body: "", buttons: [] })
+  const full = { title: "x", body: "y", buttons: [{ customId: "a:b:c", label: "L" }], footer: "f" }
+  expect(normalizeCard(full)).toEqual(full)
 })

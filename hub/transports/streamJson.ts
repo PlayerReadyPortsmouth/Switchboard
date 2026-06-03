@@ -29,6 +29,18 @@ export interface ShimSocketLike {
 /** A Discord snowflake id (17–20 digits). */
 const SNOWFLAKE = /^\d{17,20}$/
 
+/** Coerce a possibly-malformed agent card into a renderable CardSpec — a card
+ *  missing `buttons` / `title` / `body` must not crash the card pipeline. */
+export function normalizeCard(card: any): CardSpec {
+  const c = card ?? {}
+  return {
+    ...c,
+    title: typeof c.title === "string" ? c.title : "(untitled)",
+    body: typeof c.body === "string" ? c.body : "",
+    buttons: Array.isArray(c.buttons) ? c.buttons : [],
+  }
+}
+
 export interface StreamJsonOpts {
   spawner: ProcessSpawner
   socket: ShimSocketLike
@@ -65,7 +77,7 @@ export class StreamJsonTransport implements AgentTransport {
     const chan = (id: string) => (SNOWFLAKE.test(id) ? id : this.lastChatId)
     socket.onNotify(({ chatId, card, correlationId }) => {
       this.cardThisTurn = true
-      this.cb({ agent: this.name, kind: "card", chatId: chan(chatId), card, correlationId })
+      this.cb({ agent: this.name, kind: "card", chatId: chan(chatId), card: normalizeCard(card), correlationId })
     })
     socket.onReact(({ chatId, messageId, emoji }) =>
       this.cb({ agent: this.name, kind: "react", chatId: chan(chatId), messageId, emoji }))
