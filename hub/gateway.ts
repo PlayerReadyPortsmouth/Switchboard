@@ -17,20 +17,39 @@ const STYLE: Record<string, ButtonStyle> = {
   success: ButtonStyle.Success, danger: ButtonStyle.Danger,
 }
 
+/** Build an embed + (optional) button row, defensively clamped to Discord's
+ *  limits so a malformed/oversized agent card can never throw at send time
+ *  (empty description, >4096 body, empty button row, etc.). `row` is undefined
+ *  when the card has no usable buttons. */
 export function buildCardComponents(card: CardSpec): {
-  embed: EmbedBuilder; row: ActionRowBuilder<ButtonBuilder>
+  embed: EmbedBuilder; row?: ActionRowBuilder<ButtonBuilder>
 } {
-  const embed = new EmbedBuilder().setTitle(card.title).setDescription(card.body)
-  if (card.fields?.length) embed.addFields(card.fields)
-  if (card.footer) embed.setFooter({ text: card.footer })
-  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-    ...card.buttons.slice(0, 5).map((b) => {
-      const btn = new ButtonBuilder().setCustomId(b.customId).setLabel(b.label)
+  const clip = (s: unknown, n: number) => (typeof s === "string" ? s.slice(0, n) : "")
+  const embed = new EmbedBuilder()
+  const title = clip(card.title, 256)
+  const body = clip(card.body, 4096)
+  if (title) embed.setTitle(title)
+  if (body) embed.setDescription(body)
+  // An embed must carry SOMETHING; if both title and body are empty, give it a body.
+  if (!title && !body) embed.setDescription("(no details)")
+  const fields = (card.fields ?? [])
+    .slice(0, 25)
+    .map((f) => ({ name: clip(f.name, 256) || "​", value: clip(f.value, 1024) || "​", inline: f.inline }))
+  if (fields.length) embed.addFields(fields)
+  if (card.footer) embed.setFooter({ text: clip(card.footer, 2048) })
+
+  const btns = (card.buttons ?? [])
+    .filter((b) => b && b.customId && b.label)
+    .slice(0, 5)
+    .map((b) => {
+      const btn = new ButtonBuilder().setCustomId(clip(b.customId, 100)).setLabel(clip(b.label, 80))
         .setStyle(STYLE[b.style ?? "secondary"])
       if (b.emoji) btn.setEmoji(b.emoji)
       return btn
-    }),
-  )
+    })
+  const row = btns.length
+    ? new ActionRowBuilder<ButtonBuilder>().addComponents(...btns)
+    : undefined
   return { embed, row }
 }
 
@@ -184,7 +203,7 @@ export class Gateway {
     const ch = await this.client.channels.fetch(chatId)
     if (!ch || !("send" in ch)) return
     const { embed, row } = buildCardComponents(card)
-    await (ch as any).send({ embeds: [embed], components: [row] })
+    await (ch as any).send({ embeds: [embed], components: row ? [row] : [] })
   }
 
   async sendPlain(chatId: string, text: string): Promise<void> {

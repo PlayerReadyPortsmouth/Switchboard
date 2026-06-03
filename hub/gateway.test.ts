@@ -12,8 +12,21 @@ test("buildCardComponents maps CardSpec buttons to an embed + action row", () =>
     ],
   })
   expect(embed.data.title).toBe("Build failed")
-  expect(row.components.length).toBe(2)
-  expect((row.components[0].data as any).custom_id).toBe("action:retry:B-1")
+  expect(row!.components.length).toBe(2)
+  expect((row!.components[0].data as any).custom_id).toBe("action:retry:B-1")
+})
+
+test("buildCardComponents survives a malformed card (empty body, no buttons, oversized)", () => {
+  // empty body must not throw (Discord rejects an empty description)
+  const a = buildCardComponents({ title: "T", body: "", buttons: [] })
+  expect(a.embed.data.description).toBeUndefined()
+  expect(a.row).toBeUndefined()
+  // title + body both empty → a placeholder description, still no row
+  const b = buildCardComponents({ title: "", body: "", buttons: [] })
+  expect(b.embed.data.description).toBe("(no details)")
+  // oversized body is clamped to Discord's 4096 limit
+  const c = buildCardComponents({ title: "T", body: "x".repeat(5000), buttons: [] })
+  expect(c.embed.data.description!.length).toBe(4096)
 })
 
 test("parseNotifyCustomId recognises ns:action:arg ids and ignores perm:", () => {
