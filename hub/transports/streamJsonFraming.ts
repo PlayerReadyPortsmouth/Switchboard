@@ -1,0 +1,59 @@
+/** A parsed stdout stream-json event we care about. */
+export type StreamEvent =
+  | { kind: "result"; text: string }
+  | { kind: "assistant" }
+
+/** Parse one newline-delimited stream-json stdout line. Returns null for noise. */
+export function parseStreamEvent(line: string): StreamEvent | null {
+  const s = line.trim()
+  if (!s) return null
+  let ev: any
+  try { ev = JSON.parse(s) } catch { return null }
+  if (ev.type === "result" && typeof ev.result === "string") return { kind: "result", text: ev.result }
+  if (ev.type === "assistant") return { kind: "assistant" }
+  return null
+}
+
+/** A stream-json user message line (newline-terminated) for the agent's stdin. */
+export function userMessageFrame(text: string): string {
+  return JSON.stringify({
+    type: "user", message: { role: "user", content: [{ type: "text", text }] },
+  }) + "\n"
+}
+
+/** A button click delivered to the agent as a tagged user message. */
+export function interactionFrame(customId: string, userId: string): string {
+  return userMessageFrame(`[interaction] custom_id=${customId} user_id=${userId}`)
+}
+
+export interface ClaudeArgvOpts {
+  mcpConfigPath: string
+  model?: string
+  appendSystemPrompt?: string
+  claudeArgs?: string[]
+}
+
+/** Build the argv for a stream-json agent process. */
+export function buildClaudeArgv(o: ClaudeArgvOpts): string[] {
+  const argv = [
+    "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+    "--mcp-config", o.mcpConfigPath, "--strict-mcp-config",
+    "--dangerously-skip-permissions",
+  ]
+  if (o.model) argv.push("--model", o.model)
+  if (o.appendSystemPrompt) argv.push("--append-system-prompt", o.appendSystemPrompt)
+  if (o.claudeArgs?.length) argv.push(...o.claudeArgs)
+  return argv
+}
+
+/** The --mcp-config object registering the shim as a normal MCP server. */
+export function buildShimMcpConfig(shimPath: string, socketPath: string, agentName: string) {
+  return {
+    mcpServers: {
+      "switchboard-shim": {
+        command: "bun", args: ["run", shimPath],
+        env: { HUB_SOCKET: socketPath, AGENT_NAME: agentName },
+      },
+    },
+  }
+}
