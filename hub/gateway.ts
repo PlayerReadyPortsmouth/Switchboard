@@ -1,15 +1,46 @@
 import {
   Client, GatewayIntentBits, Partials, ChannelType,
-  ButtonBuilder, ButtonStyle, ActionRowBuilder, type Message, type Interaction,
+  ButtonBuilder, ButtonStyle, ActionRowBuilder, EmbedBuilder, type Message, type Interaction,
 } from "discord.js"
-import type { AgentRegistry, InboundMessage, AgentReply, AgentConfig, HubConfig } from "./types"
+import type { AgentRegistry, InboundMessage, AgentReply, AgentConfig, HubConfig, CardSpec } from "./types"
 import { formatOutbound } from "./format"
+import { isDeployAuthorized } from "./deployGate"
 
 export type Control =
   | { cmd: "agents"; arg: undefined }
   | { cmd: "who"; arg: undefined }
   | { cmd: "reset"; arg: undefined }
   | { cmd: "switch"; arg: string }
+
+const STYLE: Record<string, ButtonStyle> = {
+  primary: ButtonStyle.Primary, secondary: ButtonStyle.Secondary,
+  success: ButtonStyle.Success, danger: ButtonStyle.Danger,
+}
+
+export function buildCardComponents(card: CardSpec): {
+  embed: EmbedBuilder; row: ActionRowBuilder<ButtonBuilder>
+} {
+  const embed = new EmbedBuilder().setTitle(card.title).setDescription(card.body)
+  if (card.fields?.length) embed.addFields(card.fields)
+  if (card.footer) embed.setFooter({ text: card.footer })
+  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    ...card.buttons.slice(0, 5).map((b) => {
+      const btn = new ButtonBuilder().setCustomId(b.customId).setLabel(b.label)
+        .setStyle(STYLE[b.style ?? "secondary"])
+      if (b.emoji) btn.setEmoji(b.emoji)
+      return btn
+    }),
+  )
+  return { embed, row }
+}
+
+/** A card button customId is `ns:action:arg`. The `perm:` namespace is reserved
+ *  for the permission relay and is NOT treated as a card-notify id here. */
+export function parseNotifyCustomId(id: string): { ns: string; action: string; arg: string } | null {
+  const m = /^([a-z][a-z0-9_]*):([a-z0-9_]+):(.+)$/.exec(id)
+  if (!m || m[1] === "perm") return null
+  return { ns: m[1]!, action: m[2]!, arg: m[3]! }
+}
 
 export function parseControlCommand(text: string): Control | null {
   const m = text.trim().match(/^!(agents|who|reset|switch)(?:\s+(\S+))?$/i)
@@ -33,7 +64,11 @@ export class Gateway {
   readonly client: Client
   private onMessage: (m: InboundMessage) => void = () => {}
   private permButtonCb: (requestId: string, behavior: "allow" | "deny") => void = () => {}
+  private notifyButtonCb: (customId: string, userId: string) => void = () => {}
   private isAuthorized: (userId: string) => boolean = () => false
+  private deployApproverUserId = ""
+
+  setDeployApprover(userId: string): void { this.deployApproverUserId = userId }
 
   constructor(private cfg: HubConfig, private registry: AgentRegistry) {
     this.client = new Client({
@@ -53,6 +88,7 @@ export class Gateway {
   onPermissionButton(cb: (requestId: string, behavior: "allow" | "deny") => void): void {
     this.permButtonCb = cb
   }
+  onNotifyButton(cb: (customId: string, userId: string) => void): void { this.notifyButtonCb = cb }
 
   /** DM each allowlisted user an Allow/Deny prompt for a tool-permission request. */
   async sendPermissionPrompt(
@@ -101,18 +137,30 @@ export class Gateway {
     })
     this.client.on("interactionCreate", async (interaction: Interaction) => {
       if (!interaction.isButton()) return
-      const m = /^perm:(allow|deny):(.+)$/.exec(interaction.customId)
-      if (!m) return
       if (!this.isAuthorized(interaction.user.id)) {
         await interaction.reply({ content: "Not authorized.", ephemeral: true }).catch(() => {})
         return
       }
-      const behavior = m[1] as "allow" | "deny"
-      this.permButtonCb(m[2], behavior)
-      const label = behavior === "allow" ? "✅ Allowed" : "❌ Denied"
-      await interaction.update({
-        content: `${interaction.message.content}\n\n${label}`, components: [],
-      }).catch(() => {})
+      const perm = /^perm:(allow|deny):(.+)$/.exec(interaction.customId)
+      if (perm) {
+        const behavior = perm[1] as "allow" | "deny"
+        this.permButtonCb(perm[2]!, behavior)
+        const label = behavior === "allow" ? "✅ Allowed" : "❌ Denied"
+        await interaction.update({
+          content: `${interaction.message.content}\n\n${label}`, components: [],
+        }).catch(() => {})
+        return
+      }
+      if (parseNotifyCustomId(interaction.customId)) {
+        const okDeploy = isDeployAuthorized(interaction.customId, interaction.user.id, this.deployApproverUserId)
+        if (!okDeploy) {
+          await interaction.reply({ content: "🔒 Only the deploy approver can deploy to live.", ephemeral: true }).catch(() => {})
+          return
+        }
+        this.notifyButtonCb(interaction.customId, interaction.user.id)
+        await interaction.deferUpdate().catch(() => {})  // agent will edit the card to reflect the action
+        return
+      }
     })
     await this.client.login(token)
   }
@@ -130,6 +178,13 @@ export class Gateway {
           ? { reply: { messageReference: reply.replyTo, failIfNotExists: false } } : {}),
       })
     }
+  }
+
+  async sendCard(chatId: string, card: CardSpec): Promise<void> {
+    const ch = await this.client.channels.fetch(chatId)
+    if (!ch || !("send" in ch)) return
+    const { embed, row } = buildCardComponents(card)
+    await (ch as any).send({ embeds: [embed], components: [row] })
   }
 
   async sendPlain(chatId: string, text: string): Promise<void> {

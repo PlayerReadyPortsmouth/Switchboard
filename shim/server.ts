@@ -34,6 +34,8 @@ export function toolCallToWire(name: string, args: Record<string, any>) {
       return { t: "react", chatId: args.chat_id, messageId: args.message_id, emoji: args.emoji }
     case "edit_message":
       return { t: "edit", chatId: args.chat_id, messageId: args.message_id, text: args.text }
+    case "post_card":
+      return { t: "notify", chatId: args.chat_id, card: args.card, correlationId: args.correlation_id }
     default:
       return null
   }
@@ -71,6 +73,11 @@ async function main() {
             void mcp.notification({
               method: "notifications/claude/channel/permission",
               params: { request_id: m.requestId, behavior: m.behavior },
+            })
+          } else if (m.t === "interaction_result") {
+            void mcp.notification({
+              method: "notifications/claude/channel/interaction",
+              params: { custom_id: m.customId, user_id: m.userId },
             })
           }
         }
@@ -111,6 +118,22 @@ async function main() {
         inputSchema: { type: "object", properties: {
           chat_id: { type: "string" }, message_id: { type: "string" }, text: { type: "string" } },
           required: ["chat_id", "message_id", "text"] } },
+      { name: "post_card",
+        description: "Post a rich card (embed + buttons) to a Discord channel. Button clicks return as a channel/interaction notification. Pass a correlation_id (e.g. the ticket id) to tie clicks to this card.",
+        inputSchema: { type: "object", properties: {
+          chat_id: { type: "string" },
+          correlation_id: { type: "string" },
+          card: { type: "object", properties: {
+            title: { type: "string" }, body: { type: "string" },
+            footer: { type: "string" },
+            fields: { type: "array", items: { type: "object", properties: {
+              name: { type: "string" }, value: { type: "string" }, inline: { type: "boolean" } }, required: ["name", "value"] } },
+            buttons: { type: "array", items: { type: "object", properties: {
+              customId: { type: "string" }, label: { type: "string" },
+              style: { type: "string", enum: ["primary", "secondary", "success", "danger"] },
+              emoji: { type: "string" } }, required: ["customId", "label"] } },
+          }, required: ["title", "body", "buttons"] } },
+          required: ["chat_id", "card"] } },
     ],
   }))
 

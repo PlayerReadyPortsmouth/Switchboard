@@ -8,5 +8,42 @@
   "defaultAgent": "qa",
   "ephemeralTimeoutMs": 120000,
   "tagStyle": "prefix",
-  "chatKeyScope": "user"
+  "chatKeyScope": "user",
+  "deployApproverUserId": "<USER_ID>",
+  "webhookPort": 4400,
+  "webhooks": [
+    {
+      "path": "/hooks/example",
+      "secretEnv": "MY_WEBHOOK_SECRET",
+      "agent": "assistant",
+      "channelId": "<channel id>",
+      "prefix": "INCOMING"
+    }
+  ],
+  "schedules": [
+    {
+      "id": "daily-digest",
+      "hourUtc": 7,
+      "agent": "assistant",
+      "channelId": "<channel id>",
+      "message": "Post the daily digest."
+    }
+  ],
+  "commands": [
+    {
+      "match": "!digest",
+      "agent": "assistant",
+      "channelId": "<channel id>",
+      "message": "Post the digest now.",
+      "allowlistOnly": true
+    }
+  ],
+  "spawnTriggers": [
+    {
+      "pattern": "SPAWN_WORKER\\s+(\\S+)",
+      "agent": "worker",
+      "taskTemplate": "Handle task $1. Job id: $jobId.",
+      "setupCommand": "git worktree add /tmp/$jobId"
+    }
+  ]
 }

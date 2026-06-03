@@ -7,7 +7,15 @@ Switchboard extends the official Claude Code Discord plugin (which is strictly *
 - **Persistent agents** — long-lived `claude --channels` sessions (research, coding) connected to the hub through a thin channel shim. Native UX: reply/react/edit relay.
 - **Ephemeral agents** — headless `claude -p --resume` workers spawned per conversation for quick Q&A, with a fixed tool allowlist.
 
-> **Status:** implemented v1. All **77** unit tests pass (`bun test`) and `bun run typecheck` is clean. Manual Discord end-to-end testing is still **pending**. See the [Status of features](#status-of-features) section for what works and the known v1 gap.
+On top of the router, the hub adds a small set of **config-driven integration primitives** — all optional, all generic, all defined as arrays in `config/hub.config.json`:
+
+- **Webhook → agent cards** — one HTTP listener (`webhookPort`) fans out by path; each route HMAC-verifies an inbound POST and delivers the body to an agent, which can reply with a rich **card** (embed + buttons).
+- **Gated button actions** — agents post cards whose buttons route back to the originating agent when clicked (the `NotifyRouter`); only base-gate-allowlisted users may press buttons.
+- **Approver-only deploy gate** — buttons in the `deploy:` namespace can only be pressed by a single configured approver (`deployApproverUserId`).
+- **Daily scheduler** — fire a message to an agent at a chosen UTC hour, once per day.
+- **Config-driven ephemeral spawning** — when any agent's outbound text matches a configured regex, spawn an ephemeral agent with an interpolated task (and an optional setup shell step, e.g. to create a worktree).
+
+> **Status:** implemented v1. All **95** unit tests pass (`bun test`) and `bun run typecheck` is clean. Manual Discord end-to-end testing is still **pending**. See the [Status of features](#status-of-features) section for what works and the known v1 gap.
 
 ## Why a hub?
 
@@ -80,9 +88,19 @@ docs/        superpowers/ spec + plan
    scripts/start-agent.sh <agent-name>
    ```
 
+## Integration config
+
+These optional arrays in `config/hub.config.json` wire the hub to the outside world. See `config/hub.config.json` for a fully-placeholder example.
+
+- **`webhooks[]`** — `{ path, secretEnv, agent, channelId, prefix? }`. A single HTTP listener on `webhookPort` routes by `path`; each POST is HMAC-verified against `process.env[secretEnv]` (header `X-Switchboard-Signature: sha256=…`) and the body is delivered as `"{prefix} {rawBody}"` to `agent`, scoped to `channelId`.
+- **`schedules[]`** — `{ id, hourUtc, agent, channelId, message }`. Delivers `message` to `agent`@`channelId` daily at `hourUtc` (UTC), once per `id` per day.
+- **`commands[]`** — `{ match, agent, channelId, message, allowlistOnly? }`. An inbound chat message whose trimmed content equals `match` delivers `message` to `agent`@`channelId`; if `allowlistOnly`, only base-gate-allowlisted users may trigger it.
+- **`spawnTriggers[]`** — `{ pattern, agent, taskTemplate, setupCommand? }`. When any agent's outbound text matches the regex `pattern`, an ephemeral `agent` is spawned with task = `taskTemplate` interpolated (`$1`,`$2`… = capture groups, `$jobId` = a generated id). If `setupCommand` is set, it runs first as a shell command (same interpolation) — e.g. to create a worktree.
+- **`deployApproverUserId`** — only this Discord user may press buttons in the `deploy:` namespace.
+
 ## Status of features
 
-**Working in v1** (covered by the 77 passing unit tests):
+**Working in v1** (covered by the 95 passing unit tests):
 
 - Message routing through the hub, with the **base gate** (role + user-id access control).
 - Per-agent access by Discord **role** and **user id**.
@@ -94,6 +112,10 @@ docs/        superpowers/ spec + plan
 - Message **tagging + chunking** (Discord 2000-char limit) and agent-prefix tagging.
 - **Bindings persistence** (sticky conversation → agent state survives restarts).
 - **Pairing CLI** (`scripts/pair.ts`) — approving a code now sends the user a Discord confirmation message (via the hub's approved-dir poller).
+- **Webhook → agent cards** (`webhooks[]`): HMAC-verified inbound POSTs delivered to an agent, which can post rich cards (embed + buttons).
+- **Gated button actions** (`NotifyRouter`): card-button clicks route back to the originating agent; only allowlisted users may press, and the **`deploy:` namespace is approver-only** (`deployApproverUserId`).
+- **Daily scheduler** (`schedules[]`): UTC-hour message delivery to an agent, once per day per schedule id.
+- **Config-driven ephemeral spawning** (`spawnTriggers[]`): an outbound-text regex spawns an ephemeral agent with an interpolated task and optional setup shell step.
 
 **Known v1 gap:**
 

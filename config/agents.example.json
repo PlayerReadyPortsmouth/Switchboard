@@ -10,5 +10,29 @@
     "mode": "persistent",
     "access": { "roles": ["dev", "admin"], "users": [] },
     "runtime": { "cwd": "~", "model": "claude-sonnet-4-6" }
+  },
+  "assistant": {
+    "emoji": "🤖",
+    "description": "persistent assistant — handles webhooks, schedules, commands; can post cards",
+    "mode": "persistent",
+    "access": { "roles": ["<ROLE>"], "users": ["<USER_ID>"] },
+    "runtime": {
+      "cwd": "<path to a checkout the agent can read>",
+      "model": "claude-sonnet-4-6",
+      "appendSystemPrompt": "<optional extra system prompt for this agent>",
+      "claudeArgs": ["--add-dir", "<extra dir>"]
+    }
+  },
+  "worker": {
+    "emoji": "🚀",
+    "description": "ephemeral worker — spawned per spawnTrigger to run a one-shot task",
+    "mode": "ephemeral",
+    "access": { "roles": [], "users": ["<USER_ID>"] },
+    "runtime": {
+      "cwd": "<working dir for the task>",
+      "model": "claude-opus-4-8",
+      "allowedTools": ["Bash", "Read", "Edit", "Write", "Grep", "Glob"],
+      "appendSystemPrompt": "<optional extra system prompt for this worker>"
+    }
   }
 }

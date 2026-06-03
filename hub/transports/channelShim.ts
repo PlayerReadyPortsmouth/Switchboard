@@ -13,6 +13,7 @@ export class ChannelShimTransport implements AgentTransport {
   private cb: (r: AgentReply) => void = () => {}
   private permCb: (requestId: string, behavior: "allow" | "deny") => void = () => {}
   private permReqCb: (req: { requestId: string; toolName: string; description: string; inputPreview: string }) => void = () => {}
+  private notifyCb: (n: { chatId: string; card: import("../types").CardSpec; correlationId: string }) => void = () => {}
 
   constructor(public readonly name: string, private socketPath: string) {}
 
@@ -56,11 +57,15 @@ export class ChannelShimTransport implements AgentTransport {
         this.permReqCb({ requestId: msg.requestId, toolName: msg.toolName,
           description: msg.description, inputPreview: msg.inputPreview })
         break
+      case "notify":
+        this.notifyCb({ chatId: msg.chatId, card: msg.card, correlationId: msg.correlationId })
+        break
     }
   }
 
   onReply(cb: (r: AgentReply) => void): void { this.cb = cb }
   onPermissionRequest(cb: typeof this.permReqCb): void { this.permReqCb = cb }
+  onNotify(cb: typeof this.notifyCb): void { this.notifyCb = cb }
   isAvailable(): boolean { return this.conn?.registered === true }
 
   deliver(chatKey: string, inbound: InboundMessage): void {
@@ -71,6 +76,10 @@ export class ChannelShimTransport implements AgentTransport {
   /** Used in Task 16 to relay a permission answer back to this agent's shim. */
   sendPermissionResult(requestId: string, behavior: "allow" | "deny"): void {
     this.conn?.socket.write(encode({ t: "permission_result", requestId, behavior }))
+  }
+
+  sendInteractionResult(customId: string, userId: string): void {
+    this.conn?.socket.write(encode({ t: "interaction_result", customId, userId }))
   }
 
   async close(): Promise<void> {
