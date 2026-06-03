@@ -14,6 +14,8 @@ export class ShimSocketServer {
   private notifyCb: (n: { chatId: string; card: CardSpec; correlationId: string }) => void = () => {}
   private reactCb: (r: { chatId: string; messageId: string; emoji: string }) => void = () => {}
   private editCb: (e: { chatId: string; messageId: string; text: string }) => void = () => {}
+  private updateCb: (u: { chatId: string; card: CardSpec; correlationId: string }) => void = () => {}
+  private finishCb: () => void = () => {}
 
   constructor(private socketPath: string) {}
 
@@ -21,6 +23,8 @@ export class ShimSocketServer {
   onNotify(cb: typeof this.notifyCb) { this.notifyCb = cb }
   onReact(cb: typeof this.reactCb) { this.reactCb = cb }
   onEdit(cb: typeof this.editCb) { this.editCb = cb }
+  onUpdate(cb: typeof this.updateCb) { this.updateCb = cb }
+  onFinish(cb: typeof this.finishCb) { this.finishCb = cb }
   isRegistered() { return this.registered }
 
   async listen(): Promise<void> {
@@ -44,6 +48,8 @@ export class ShimSocketServer {
       case "notify": this.notifyCb({ chatId: m.chatId, card: m.card, correlationId: m.correlationId }); break
       case "react": this.reactCb({ chatId: m.chatId, messageId: m.messageId, emoji: m.emoji }); break
       case "edit": this.editCb({ chatId: m.chatId, messageId: m.messageId, text: m.text }); break
+      case "update": this.updateCb({ chatId: m.chatId, card: m.card, correlationId: m.correlationId }); break
+      case "finish": this.finishCb(); break
     }
   }
 

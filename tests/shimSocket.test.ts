@@ -35,3 +35,23 @@ test("receives register, notify, react, edit from a connected shim", async () =>
   expect(edits[0]).toEqual({ chatId: "c1", messageId: "m1", text: "new" })
   client.end(); await srv.close()
 })
+
+import { test as st, expect as se } from "bun:test"
+import { ShimSocketServer as SSS } from "../hub/transports/shimSocket"
+import { encode as enc } from "../hub/framing"
+
+st("dispatches update and finish wire messages to their callbacks", async () => {
+  const path = join(tmpdir(), `sbtest-${process.pid}-${globalThis.performance.now()}.sock`)
+  const srv = new SSS(path)
+  let updated: any = null; let finished = false
+  srv.onUpdate((u) => { updated = u })
+  srv.onFinish(() => { finished = true })
+  await srv.listen()
+  const sock = await Bun.connect({ unix: path, socket: { data() {} } })
+  sock.write(enc({ t: "update", chatId: "c", correlationId: "T1", card: { title: "x" } }))
+  sock.write(enc({ t: "finish" }))
+  await Bun.sleep(50)
+  se(updated).toEqual({ chatId: "c", correlationId: "T1", card: { title: "x" } })
+  se(finished).toBe(true)
+  sock.end(); await srv.close()
+})
