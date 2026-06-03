@@ -4,8 +4,8 @@ One Discord bot, many Claude Code agents.
 
 Switchboard extends the official Claude Code Discord plugin (which is strictly **1 bot ↔ 1 session**) into a **hub** that fans a single Discord bot out to many Claude Code agents — each with its own working directory, model, tools, and MCP setup. A small Claude router (`claude -p --model claude-haiku-4-5`, reusing your Claude Code auth) decides which agent each message reaches, conversations stay stickily bound to an agent with confident auto-switching, and access is gated per Discord **role and user ID**.
 
-- **Persistent agents** — long-lived `claude --channels` sessions (research, coding) connected to the hub through a thin channel shim. Native UX: reply/react/edit relay.
-- **Ephemeral agents** — headless `claude -p --resume` workers spawned per conversation for quick Q&A, with a fixed tool allowlist.
+- **Persistent agents** — long-lived `claude -p --input-format stream-json` sessions (research, coding) the hub owns directly: it writes inbound messages to the agent's stdin and reads replies from its stdout. Cards/react/edit come through a thin MCP **shim**.
+- **Ephemeral agents** — the same stream-json session spawned on demand per task (e.g. via a spawn trigger), torn down when it exits.
 
 On top of the router, the hub adds a small set of **config-driven integration primitives** — all optional, all generic, all defined as arrays in `config/hub.config.json`:
 
@@ -15,23 +15,23 @@ On top of the router, the hub adds a small set of **config-driven integration pr
 - **Daily scheduler** — fire a message to an agent at a chosen UTC hour, once per day.
 - **Config-driven ephemeral spawning** — when any agent's outbound text matches a configured regex, spawn an ephemeral agent with an interpolated task (and an optional setup shell step, e.g. to create a worktree).
 
-> **Status:** implemented v1. All **95** unit tests pass (`bun test`) and `bun run typecheck` is clean. Manual Discord end-to-end testing is still **pending**. See the [Status of features](#status-of-features) section for what works and the known v1 gap.
+> **Status:** implemented. All unit tests pass (`bun test`) and `bun run typecheck` is clean. The agent transport runs on the documented stream-json protocol (the earlier experimental `--channels` mechanism was removed when current Claude CLIs dropped its `command:` form); the stdin→reply + MCP-card round-trip is proven against a real `claude` via `scripts/smoke-streamjson.ts`. Manual full Discord end-to-end (a live bot in a guild) is the remaining check.
 
 ## Why a hub?
 
-Discord allows only one gateway connection per bot token, so you can't run N `claude --channels` sessions on one token. Switchboard runs a single **hub** process that owns the token and gateway and routes each message to an agent behind it.
+Discord allows only one gateway connection per bot token, so you can't run N agent sessions on one token. Switchboard runs a single **hub** process that owns the token and gateway and routes each message to an agent behind it.
 
 - The **hub** owns the bot token + Discord gateway, runs the base gate (role/user access), the Haiku router, sticky bindings, and the orchestrator that dispatches to agents.
-- **Persistent** agents are long-lived `claude --channels` processes that connect back to the hub over a local socket via a thin channel **shim**.
-- **Ephemeral** agents are headless `claude -p --resume` workers spawned on demand per conversation, with a fixed tool allowlist, and torn down after an idle timeout.
+- **Persistent** agents are long-lived `claude -p --input-format stream-json` processes the hub spawns and owns: inbound → the agent's stdin, replies ← its stdout. The agent's MCP **shim** (registered via `--mcp-config`) relays `post_card`/`react`/`edit` back to the hub over a local socket.
+- **Ephemeral** agents are the same kind of session spawned on demand (e.g. by a spawn trigger), kept alive for any card → button-click loop, and torn down when the process exits.
 
 ## Layout
 
 ```
 hub/         the one process that owns the bot token + gateway + router
-shim/        per-persistent-agent channel server (hub ↔ claude --channels)
+shim/        per-agent MCP server for post_card/react/edit (hub ↔ agent over a socket)
 config/      hub.config.json + agents.json (the agent registry)
-scripts/     start-agent.sh — launch a persistent agent; pair.ts — approve a paired user
+scripts/     smoke-streamjson.ts — real-CLI transport check; pair.ts — approve a paired user
 docs/        superpowers/ spec + plan
 ```
 
@@ -82,10 +82,12 @@ docs/        superpowers/ spec + plan
 
    The hub then DMs the user a confirmation that they're paired.
 
-7. **Persistent agents.** Once the hub is running, launch a persistent agent by name:
+7. **Agents start themselves.** The hub spawns each persistent agent (from
+   `config/agents.json`) at boot and spawns ephemeral agents on demand — there is
+   no separate launch step. To verify the agent transport against a real `claude`:
 
    ```bash
-   scripts/start-agent.sh <agent-name>
+   bun run scripts/smoke-streamjson.ts   # expects: reply + card round-trip
    ```
 
 ## Integration config
@@ -95,33 +97,35 @@ These optional arrays in `config/hub.config.json` wire the hub to the outside wo
 - **`webhooks[]`** — `{ path, secretEnv, agent, channelId, prefix? }`. A single HTTP listener on `webhookPort` routes by `path`; each POST is HMAC-verified against `process.env[secretEnv]` (header `X-Switchboard-Signature: sha256=…`) and the body is delivered as `"{prefix} {rawBody}"` to `agent`, scoped to `channelId`.
 - **`schedules[]`** — `{ id, hourUtc, agent, channelId, message }`. Delivers `message` to `agent`@`channelId` daily at `hourUtc` (UTC), once per `id` per day.
 - **`commands[]`** — `{ match, agent, channelId, message, allowlistOnly? }`. An inbound chat message whose trimmed content equals `match` delivers `message` to `agent`@`channelId`; if `allowlistOnly`, only base-gate-allowlisted users may trigger it.
-- **`spawnTriggers[]`** — `{ pattern, agent, taskTemplate, setupCommand? }`. When any agent's outbound text matches the regex `pattern`, an ephemeral `agent` is spawned with task = `taskTemplate` interpolated (`$1`,`$2`… = capture groups, `$jobId` = a generated id). If `setupCommand` is set, it runs first as a shell command (same interpolation) — e.g. to create a worktree.
+- **`spawnTriggers[]`** — `{ pattern, agent, taskTemplate, setupCommand?, teardownCommand? }`. When any agent's outbound text matches the regex `pattern`, an ephemeral `agent` is spawned with task = `taskTemplate` interpolated (`$1`,`$2`… = capture groups, `$jobId` = a generated id). If `setupCommand` is set, it runs first as a shell command (same interpolation) — e.g. to create a worktree; if `teardownCommand` is set, it runs after the spawned agent's process exits — e.g. to remove that worktree.
 - **`deployApproverUserId`** — only this Discord user may press buttons in the `deploy:` namespace.
 
 ## Status of features
 
-**Working in v1** (covered by the 95 passing unit tests):
+**Working** (covered by the passing unit tests + the real-CLI smoke check):
 
 - Message routing through the hub, with the **base gate** (role + user-id access control).
 - Per-agent access by Discord **role** and **user id**.
 - **Control commands** (e.g. forcing/switching the bound agent).
 - **Haiku router** (`claude -p --model claude-haiku-4-5`) with **sticky** bindings and confident **auto-switching** above the configured threshold.
-- **Ephemeral** agents: headless `claude -p` workers with a fixed tool allowlist and idle timeout.
-- **Persistent** agents via the channel **shim**: reply / react / edit relay.
-- **Interactive permission relay for persistent agents.** When a persistent agent hits a tool-approval prompt, the hub DMs the base-gate allowlist an Allow/Deny prompt (buttons, or a `y/n <code>` text reply); the answer routes back to the originating agent's shim. Wired end-to-end through `onPermissionRequest` → `PermissionRouter` in `hub/index.ts`.
+- **stream-json agent transport** (`StreamJsonTransport`): the hub spawns each agent as a `claude -p --input-format stream-json` session, delivers inbound on stdin, and emits each turn's `result` as the reply. Proven against a real `claude` by `scripts/smoke-streamjson.ts`.
+- **MCP shim relay**: agents post cards / react / edit via the shim (registered with `--mcp-config`), forwarded to the hub over a socket.
+- **Open tool permissions** (agents run `--dangerously-skip-permissions`); the only gate is the approver-only `deploy:` button namespace.
 - Message **tagging + chunking** (Discord 2000-char limit) and agent-prefix tagging.
 - **Bindings persistence** (sticky conversation → agent state survives restarts).
 - **Pairing CLI** (`scripts/pair.ts`) — approving a code now sends the user a Discord confirmation message (via the hub's approved-dir poller).
 - **Webhook → agent cards** (`webhooks[]`): HMAC-verified inbound POSTs delivered to an agent, which can post rich cards (embed + buttons).
-- **Gated button actions** (`NotifyRouter`): card-button clicks route back to the originating agent; only allowlisted users may press, and the **`deploy:` namespace is approver-only** (`deployApproverUserId`).
+- **Gated button actions** (`NotifyRouter`): card-button clicks route back to the originating agent via its stdin; only allowlisted users may press, and the **`deploy:` namespace is approver-only** (`deployApproverUserId`).
 - **Daily scheduler** (`schedules[]`): UTC-hour message delivery to an agent, once per day per schedule id.
-- **Config-driven ephemeral spawning** (`spawnTriggers[]`): an outbound-text regex spawns an ephemeral agent with an interpolated task and optional setup shell step.
+- **Config-driven ephemeral spawning** (`spawnTriggers[]`): an outbound-text regex spawns an ephemeral agent with an interpolated task, optional setup + teardown shell steps; spawned agents post cards and receive button clicks like any agent.
 
-**Known v1 gap:**
+**Known gaps:**
 
-- **Manual Discord end-to-end testing is pending** — only unit tests have run so far.
+- **Manual full Discord end-to-end** (a live bot in a guild) is the remaining check; the transport itself is proven via the smoke script.
+- **Idle GC of spawned workers**: workers are torn down when their process exits; a long-idle-but-alive worker is not yet reaped on a timer.
 
 ## Docs
 
 - Spec: [`docs/superpowers/specs/2026-06-02-switchboard-design.md`](docs/superpowers/specs/2026-06-02-switchboard-design.md)
 - Plan: [`docs/superpowers/plans/2026-06-02-switchboard.md`](docs/superpowers/plans/2026-06-02-switchboard.md)
+- stream-json transport — Spec: [`docs/superpowers/specs/2026-06-03-streamjson-transport-design.md`](docs/superpowers/specs/2026-06-03-streamjson-transport-design.md), Plan: [`docs/superpowers/plans/2026-06-03-streamjson-transport.md`](docs/superpowers/plans/2026-06-03-streamjson-transport.md)

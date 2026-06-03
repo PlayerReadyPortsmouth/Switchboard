@@ -48,7 +48,7 @@ export interface AgentRuntime {
   cwd: string
   model?: string
   allowedTools?: string[]      // ephemeral only
-  claudeArgs?: string[]        // persistent: extra flags for claude --channels
+  claudeArgs?: string[]        // extra flags appended to the agent's `claude` invocation
   appendSystemPrompt?: string
 }
 
