@@ -97,6 +97,7 @@ export interface SpawnTrigger {
   agent: string         // ephemeral agent to spawn
   taskTemplate: string  // task text; $1,$2… = capture groups, $jobId = generated id
   setupCommand?: string // optional shell command run first (same interpolation)
+  teardownCommand?: string // optional shell command run after the spawned agent ends (same interpolation)
 }
 
 export interface HubConfig {
