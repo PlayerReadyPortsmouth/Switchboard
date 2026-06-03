@@ -2,34 +2,11 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js"
-import { z } from "zod"
-import { encode, LineDecoder } from "../hub/framing"
-
-interface WireInbound {
-  chatKey: string
-  inbound: { chatId: string; messageId: string; userId: string; user: string
-    content: string; ts: string; isDM: boolean
-    attachments?: { name: string; type: string; size: number }[] }
-}
-
-/** Translate a hub socket inbound into the channel-notification params CC expects. */
-export function inboundToChannelNotification(w: WireInbound) {
-  const i = w.inbound
-  return {
-    content: i.content,
-    meta: {
-      chat_id: i.chatId, message_id: i.messageId,
-      user: i.user, user_id: i.userId, ts: i.ts,
-    },
-  }
-}
+import { encode } from "../hub/framing"
 
 /** Translate an MCP tool call from CC into the wire message for the hub. */
 export function toolCallToWire(name: string, args: Record<string, any>) {
   switch (name) {
-    case "reply":
-      return { t: "reply", chatId: args.chat_id, text: args.text,
-        replyTo: args.reply_to, files: args.files }
     case "react":
       return { t: "react", chatId: args.chat_id, messageId: args.message_id, emoji: args.emoji }
     case "edit_message":
@@ -49,77 +26,23 @@ async function main() {
   }
 
   const mcp = new Server(
-    { name: "switchboard-shim", version: "1.0.0" },
-    { capabilities: { tools: {}, experimental: { "claude/channel": {} } },
+    { name: "switchboard-shim", version: "2.0.0" },
+    { capabilities: { tools: {} },
       instructions:
-        "Messages from Discord arrive as <channel ...>. Reply with the reply tool, " +
-        "passing chat_id back. Use react and edit_message as needed. Your transcript " +
-        "output never reaches the user — only the reply tool does." },
+        "Post rich cards to Discord with post_card; use react and edit_message as needed. " +
+        "Your normal text response IS your reply to the user — you do not need a separate reply tool." },
   )
 
-  const dec = new LineDecoder()
-  const sock = await Bun.connect({
-    unix: SOCKET,
-    socket: {
-      data(_s, data) {
-        for (const obj of dec.push(data.toString())) {
-          const m = obj as any
-          if (m.t === "inbound") {
-            void mcp.notification({
-              method: "notifications/claude/channel",
-              params: inboundToChannelNotification(m),
-            })
-          } else if (m.t === "permission_result") {
-            void mcp.notification({
-              method: "notifications/claude/channel/permission",
-              params: { request_id: m.requestId, behavior: m.behavior },
-            })
-          } else if (m.t === "interaction_result") {
-            void mcp.notification({
-              method: "notifications/claude/channel/interaction",
-              params: { custom_id: m.customId, user_id: m.userId },
-            })
-          }
-        }
-      },
-    },
-  })
+  // Connect to the hub socket purely to FORWARD tool calls (agent → hub).
+  // Inbound messages and button interactions reach this agent via its stdin
+  // (the hub owns the process), not through this socket.
+  const sock = await Bun.connect({ unix: SOCKET, socket: { data() {} } })
   sock.write(encode({ t: "register", agent: AGENT }))
-
-  // CC → shim: a tool wants permission. Forward it onto the hub socket.
-  mcp.setNotificationHandler(
-    z.object({
-      method: z.literal("notifications/claude/channel/permission_request"),
-      params: z.object({
-        request_id: z.string(),
-        tool_name: z.string(),
-        description: z.string(),
-        input_preview: z.string(),
-      }),
-    }) as any,
-    async ({ params }: any) => {
-      sock.write(encode({ t: "permission_request", requestId: params.request_id,
-        toolName: params.tool_name, description: params.description, inputPreview: params.input_preview }))
-    },
-  )
 
   mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [
-      { name: "reply", description: "Reply on Discord. Pass chat_id from the inbound message.",
-        inputSchema: { type: "object", properties: {
-          chat_id: { type: "string" }, text: { type: "string" },
-          reply_to: { type: "string" }, files: { type: "array", items: { type: "string" } } },
-          required: ["chat_id", "text"] } },
-      { name: "react", description: "Add an emoji reaction to a message.",
-        inputSchema: { type: "object", properties: {
-          chat_id: { type: "string" }, message_id: { type: "string" }, emoji: { type: "string" } },
-          required: ["chat_id", "message_id", "emoji"] } },
-      { name: "edit_message", description: "Edit a message the bot previously sent.",
-        inputSchema: { type: "object", properties: {
-          chat_id: { type: "string" }, message_id: { type: "string" }, text: { type: "string" } },
-          required: ["chat_id", "message_id", "text"] } },
       { name: "post_card",
-        description: "Post a rich card (embed + buttons) to a Discord channel. Button clicks return as a channel/interaction notification. Pass a correlation_id (e.g. the ticket id) to tie clicks to this card.",
+        description: "Post a rich card (embed + buttons) to a Discord channel. Button clicks return to you as a `[interaction] custom_id=… user_id=…` message. Pass a correlation_id (e.g. the ticket id) to tie clicks to this card.",
         inputSchema: { type: "object", properties: {
           chat_id: { type: "string" },
           correlation_id: { type: "string" },
@@ -134,6 +57,14 @@ async function main() {
               emoji: { type: "string" } }, required: ["customId", "label"] } },
           }, required: ["title", "body", "buttons"] } },
           required: ["chat_id", "card"] } },
+      { name: "react", description: "Add an emoji reaction to a message.",
+        inputSchema: { type: "object", properties: {
+          chat_id: { type: "string" }, message_id: { type: "string" }, emoji: { type: "string" } },
+          required: ["chat_id", "message_id", "emoji"] } },
+      { name: "edit_message", description: "Edit a message the bot previously sent.",
+        inputSchema: { type: "object", properties: {
+          chat_id: { type: "string" }, message_id: { type: "string" }, text: { type: "string" } },
+          required: ["chat_id", "message_id", "text"] } },
     ],
   }))
 
