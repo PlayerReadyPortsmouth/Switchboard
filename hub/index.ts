@@ -112,6 +112,8 @@ async function runSpawnTrigger(trig: SpawnTrigger, groups: string[], chatId: str
     chatId, messageId: `spawn:${jobId}`, userId: "system", user: "hub",
     content: interpolate(trig.taskTemplate, groups, jobId), ts: new Date().toISOString(), isDM: false,
   })
+  // The matched trigger text is consumed (not shown); confirm the spawn to the channel.
+  void gateway.sendPlain(chatId, `🔧 \`${trig.agent}\` agent dispatched (job ${jobId}).`)
   scheduleTeardown(jobId, t, () => (trig.teardownCommand ? interpolate(trig.teardownCommand, groups, jobId) : undefined))
 }
 

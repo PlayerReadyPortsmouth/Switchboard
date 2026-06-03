@@ -26,6 +26,9 @@ export interface ShimSocketLike {
   close(): Promise<void>
 }
 
+/** A Discord snowflake id (17–20 digits). */
+const SNOWFLAKE = /^\d{17,20}$/
+
 export interface StreamJsonOpts {
   spawner: ProcessSpawner
   socket: ShimSocketLike
@@ -57,14 +60,17 @@ export class StreamJsonTransport implements AgentTransport {
 
   async start(): Promise<void> {
     const { socket, spawner, shimPath, socketPath, mcpConfigPath } = this.opts
+    // An agent may pass a non-snowflake chat_id (e.g. an unexpanded "$CHANNEL"
+    // env reference) — fall back to the channel this conversation is bound to.
+    const chan = (id: string) => (SNOWFLAKE.test(id) ? id : this.lastChatId)
     socket.onNotify(({ chatId, card, correlationId }) => {
       this.cardThisTurn = true
-      this.cb({ agent: this.name, kind: "card", chatId, card, correlationId })
+      this.cb({ agent: this.name, kind: "card", chatId: chan(chatId), card, correlationId })
     })
     socket.onReact(({ chatId, messageId, emoji }) =>
-      this.cb({ agent: this.name, kind: "react", chatId, messageId, emoji }))
+      this.cb({ agent: this.name, kind: "react", chatId: chan(chatId), messageId, emoji }))
     socket.onEdit(({ chatId, messageId, text }) =>
-      this.cb({ agent: this.name, kind: "edit", chatId, messageId, text }))
+      this.cb({ agent: this.name, kind: "edit", chatId: chan(chatId), messageId, text }))
     await socket.listen()
 
     const write = this.opts.writeMcpConfig ?? ((p, c) => writeFileSync(p, c))

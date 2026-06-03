@@ -82,6 +82,14 @@ test("a notify (card) from the socket becomes a card reply", async () => {
   expect(replies[0]).toMatchObject({ agent: "worker", kind: "card", chatId: "c1", correlationId: "k" })
 })
 
+test("card chatId falls back to the conversation channel when not a snowflake", async () => {
+  const { t, fs } = make(); await t.start()
+  const replies: any[] = []; t.onReply((r) => replies.push(r))
+  t.deliver("1511807891881853139", { chatId: "1511807891881853139", messageId: "m", userId: "u", user: "x", content: "hi", ts: "t", isDM: false })
+  fs.fireNotify({ chatId: "$TRIAGE_CHANNEL", card: { title: "T", body: "b", buttons: [] }, correlationId: "k" })
+  expect(replies.find((r) => r.kind === "card").chatId).toBe("1511807891881853139")
+})
+
 test("the end-of-turn result is suppressed when a card was posted that turn", async () => {
   const { t, fp, fs } = make(); await t.start()
   const replies: any[] = []; t.onReply((r) => replies.push(r))
