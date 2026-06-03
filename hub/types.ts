@@ -10,12 +10,25 @@ export interface InboundMessage {
   attachments?: { name: string; type: string; size: number }[]
 }
 
+/** A text-input popup a button can open instead of acting immediately. */
+export interface CardModal {
+  title: string;
+  inputs: {
+    id: string;                         // field key returned on submit
+    label: string;
+    style: "short" | "paragraph";
+    placeholder?: string;
+    required?: boolean;
+  }[];                                  // ≤5 inputs (Discord limit)
+}
+
 /** A rich card an agent asks the hub to post: an embed + rows of buttons. */
 export interface CardButton {
   customId: string;          // e.g. "ns:action:arg" (ns≠"perm") — routed by NotifyRouter
   label: string;
   style?: "primary" | "secondary" | "success" | "danger";
   emoji?: string;
+  modal?: CardModal;         // if set, clicking opens this modal instead of relaying
 }
 export interface CardSpec {
   title: string;
@@ -28,7 +41,7 @@ export interface CardSpec {
 /** A request from an agent back out to Discord. */
 export interface AgentReply {
   agent: string
-  kind: "reply" | "react" | "edit" | "card"
+  kind: "reply" | "react" | "edit" | "card" | "update"
   chatId: string
   text?: string
   messageId?: string    // for react/edit
@@ -91,6 +104,28 @@ export interface CommandRoute {
   allowlistOnly?: boolean   // if set, only base-gate-allowlisted users may trigger
 }
 
+/** A button namespace whose click runs a hub-side command instead of relaying
+ *  to the agent. Matched by `namespace:action` against a clicked customId. */
+export interface GatedAction {
+  namespace: string;         // matches the customId ns,    e.g. "deploy"
+  action: string;            // matches the customId action, e.g. "go"
+  approverOnly?: boolean;    // require deployApproverUserId
+  command: string;           // hub-side shell command; $arg = the customId arg
+  terminateAgent?: boolean;  // tear down the card's owning agent on success
+  pendingText: string;       // card body while the command runs ($arg interpolated)
+  successText: string;       // card body on exit 0           ($arg interpolated)
+  failureText: string;       // card body on non-zero exit    ($arg interpolated)
+}
+
+/** When a spawn trigger fires, optionally edit an existing card to a handoff
+ *  state (e.g. "working"). Templates interpolate $1,$2… and $jobId. */
+export interface SpawnCardUpdate {
+  correlationId: string;
+  title: string;
+  body: string;
+  buttons: CardButton[];
+}
+
 /** When ANY agent's outbound text matches `pattern`, spawn `agent` to run a task. */
 export interface SpawnTrigger {
   pattern: string       // regex tested against outbound agent text
@@ -98,6 +133,7 @@ export interface SpawnTrigger {
   taskTemplate: string  // task text; $1,$2… = capture groups, $jobId = generated id
   setupCommand?: string // optional shell command run first (same interpolation)
   teardownCommand?: string // optional shell command run after the spawned agent ends (same interpolation)
+  onSpawnCard?: SpawnCardUpdate // if set, edit this card to a handoff state when the trigger fires
 }
 
 export interface HubConfig {
@@ -117,4 +153,5 @@ export interface HubConfig {
   spawnTriggers?: SpawnTrigger[] // outbound-text patterns → ephemeral-agent spawns
   webhookPort?: number           // single HTTP listener port for all webhooks[].path
   deployApproverUserId?: string  // Discord user id allowed to press deploy:* buttons
+  gatedActions?: GatedAction[]   // hub-side button handlers that run shell commands
 }
