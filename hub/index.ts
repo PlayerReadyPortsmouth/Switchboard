@@ -125,6 +125,11 @@ for (const [name, cfg] of Object.entries(agents)) {
   }
 }
 const dispatcher = new Dispatcher(dispatchTransports)
+// Dispatcher's constructor re-binds each transport's onReply to its own aggregator,
+// so route that aggregator back to onAgentReply. For persistent agents the routing
+// key is the agent name (== reply.agent). (Ephemeral spawn transports are not in the
+// Dispatcher and keep the onReply set in makeTransport, keyed by jobId.)
+dispatcher.onReply((reply) => { void onAgentReply(reply, reply.agent) })
 
 /** Deliver a synthesised system inbound to an agent scoped to a channel. */
 function deliverToAgent(agentName: string, channelId: string, idTag: string, content: string): void {
