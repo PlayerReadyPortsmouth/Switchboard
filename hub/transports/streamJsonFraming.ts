@@ -21,9 +21,14 @@ export function userMessageFrame(text: string): string {
   }) + "\n"
 }
 
-/** A button click delivered to the agent as a tagged user message. */
-export function interactionFrame(customId: string, userId: string): string {
-  return userMessageFrame(`[interaction] custom_id=${customId} user_id=${userId}`)
+/** A button click (and optional modal fields) delivered to the agent as a
+ *  tagged user message. */
+export function interactionFrame(
+  customId: string, userId: string, fields?: Record<string, string>,
+): string {
+  const base = `[interaction] custom_id=${customId} user_id=${userId}`
+  const suffix = fields && Object.keys(fields).length ? ` fields=${JSON.stringify(fields)}` : ""
+  return userMessageFrame(base + suffix)
 }
 
 export interface ClaudeArgvOpts {

@@ -65,3 +65,21 @@ test("buildShimMcpConfig registers the shim with its env", () => {
     },
   })
 })
+
+import { test as t2, expect as e2 } from "bun:test"
+import { interactionFrame as iframe } from "../hub/transports/streamJsonFraming"
+
+t2("interactionFrame without fields is a plain tagged user message", () => {
+  const text = JSON.parse(iframe("deploy:go:42", "u9")).message.content[0].text
+  e2(text).toBe("[interaction] custom_id=deploy:go:42 user_id=u9")
+})
+
+t2("interactionFrame with fields appends a JSON fields= suffix", () => {
+  const text = JSON.parse(iframe("fix:feedback:T1", "u9", { feedback: "make it blue" })).message.content[0].text
+  e2(text).toBe('[interaction] custom_id=fix:feedback:T1 user_id=u9 fields={"feedback":"make it blue"}')
+})
+
+t2("interactionFrame ignores an empty fields object", () => {
+  const text = JSON.parse(iframe("a:b:c", "u", {})).message.content[0].text
+  e2(text).toBe("[interaction] custom_id=a:b:c user_id=u")
+})
