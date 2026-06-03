@@ -43,6 +43,7 @@ export class StreamJsonTransport implements AgentTransport {
   private alive = false
   private closed = false
   private lastChatId = ""
+  private cardThisTurn = false
   private cb: (r: AgentReply) => void = () => {}
 
   constructor(
@@ -56,8 +57,10 @@ export class StreamJsonTransport implements AgentTransport {
 
   async start(): Promise<void> {
     const { socket, spawner, shimPath, socketPath, mcpConfigPath } = this.opts
-    socket.onNotify(({ chatId, card, correlationId }) =>
-      this.cb({ agent: this.name, kind: "card", chatId, card, correlationId }))
+    socket.onNotify(({ chatId, card, correlationId }) => {
+      this.cardThisTurn = true
+      this.cb({ agent: this.name, kind: "card", chatId, card, correlationId })
+    })
     socket.onReact(({ chatId, messageId, emoji }) =>
       this.cb({ agent: this.name, kind: "react", chatId, messageId, emoji }))
     socket.onEdit(({ chatId, messageId, text }) =>
@@ -82,7 +85,14 @@ export class StreamJsonTransport implements AgentTransport {
     this.proc.onStdoutLine((line) => {
       const ev = parseStreamEvent(line)
       if (ev?.kind === "result") {
-        this.cb({ agent: this.name, kind: "reply", chatId: this.lastChatId, text: ev.text })
+        // The agent's end-of-turn text is posted as a reply ONLY when it didn't
+        // already communicate via a card this turn — a card IS the message, so the
+        // transcript summary underneath it is redundant noise. Turns with no card
+        // (e.g. a short "Backlogged" acknowledgement) still post their text.
+        if (!this.cardThisTurn) {
+          this.cb({ agent: this.name, kind: "reply", chatId: this.lastChatId, text: ev.text })
+        }
+        this.cardThisTurn = false
       }
     })
   }

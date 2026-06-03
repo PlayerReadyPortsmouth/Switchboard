@@ -82,6 +82,28 @@ test("a notify (card) from the socket becomes a card reply", async () => {
   expect(replies[0]).toMatchObject({ agent: "worker", kind: "card", chatId: "c1", correlationId: "k" })
 })
 
+test("the end-of-turn result is suppressed when a card was posted that turn", async () => {
+  const { t, fp, fs } = make(); await t.start()
+  const replies: any[] = []; t.onReply((r) => replies.push(r))
+  fs.fireNotify({ chatId: "c1", card: { title: "T", body: "b", buttons: [] }, correlationId: "k" })
+  fp.emitStdout(JSON.stringify({ type: "result", subtype: "success", result: "verbose summary" }))
+  // only the card reply — no redundant text reply underneath it
+  expect(replies.map((r) => r.kind)).toEqual(["card"])
+})
+
+test("a later card-less turn still posts its result text", async () => {
+  const { t, fp, fs } = make(); await t.start()
+  const replies: any[] = []; t.onReply((r) => replies.push(r))
+  // turn 1: card → result suppressed
+  fs.fireNotify({ chatId: "c1", card: { title: "T", body: "b", buttons: [] }, correlationId: "k" })
+  fp.emitStdout(JSON.stringify({ type: "result", result: "summary" }))
+  // turn 2 (e.g. a button action): no card → result posted
+  t.deliver("c1", { chatId: "c1", messageId: "m2", userId: "u", user: "x", content: "[interaction] …", ts: "t", isDM: false })
+  fp.emitStdout(JSON.stringify({ type: "result", result: "📋 Backlogged" }))
+  expect(replies.map((r) => r.kind)).toEqual(["card", "reply"])
+  expect(replies[1].text).toBe("📋 Backlogged")
+})
+
 test("sendInteraction writes a tagged user message", async () => {
   const { t, fp } = make(); await t.start()
   t.sendInteraction("deploy:go:job-1", "u9")
