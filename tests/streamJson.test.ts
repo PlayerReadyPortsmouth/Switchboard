@@ -78,8 +78,8 @@ test("a result event becomes a reply to the last-delivered chat", async () => {
 test("a notify (card) from the socket becomes a card reply", async () => {
   const { t, fs } = make(); await t.start()
   const replies: any[] = []; t.onReply((r) => replies.push(r))
-  fs.fireNotify({ chatId: "c1", card: { title: "T", body: "b", buttons: [] }, correlationId: "k" })
-  expect(replies[0]).toMatchObject({ agent: "worker", kind: "card", chatId: "c1", correlationId: "k" })
+  fs.fireNotify({ chatId: "1511807891881853139", card: { title: "T", body: "b", buttons: [] }, correlationId: "k" })
+  expect(replies[0]).toMatchObject({ agent: "worker", kind: "card", chatId: "1511807891881853139", correlationId: "k" })
 })
 
 test("card chatId falls back to the conversation channel when not a snowflake", async () => {
