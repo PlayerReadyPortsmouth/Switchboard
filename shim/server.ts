@@ -13,6 +13,10 @@ export function toolCallToWire(name: string, args: Record<string, any>) {
       return { t: "edit", chatId: args.chat_id, messageId: args.message_id, text: args.text }
     case "post_card":
       return { t: "notify", chatId: args.chat_id, card: args.card, correlationId: args.correlation_id }
+    case "update_card":
+      return { t: "update", chatId: args.chat_id, correlationId: args.correlation_id, card: args.card }
+    case "finish":
+      return { t: "finish" }
     default:
       return null
   }
@@ -54,7 +58,15 @@ async function main() {
             buttons: { type: "array", items: { type: "object", properties: {
               customId: { type: "string" }, label: { type: "string" },
               style: { type: "string", enum: ["primary", "secondary", "success", "danger"] },
-              emoji: { type: "string" } }, required: ["customId", "label"] } },
+              emoji: { type: "string" },
+              modal: { type: "object", properties: {
+                title: { type: "string" },
+                inputs: { type: "array", items: { type: "object", properties: {
+                  id: { type: "string" }, label: { type: "string" },
+                  style: { type: "string", enum: ["short", "paragraph"] },
+                  placeholder: { type: "string" }, required: { type: "boolean" } }, required: ["id", "label", "style"] } } },
+                required: ["title", "inputs"] } },
+              required: ["customId", "label"] } },
           }, required: ["title", "body", "buttons"] } },
           required: ["chat_id", "card"] } },
       { name: "react", description: "Add an emoji reaction to a message.",
@@ -65,6 +77,32 @@ async function main() {
         inputSchema: { type: "object", properties: {
           chat_id: { type: "string" }, message_id: { type: "string" }, text: { type: "string" } },
           required: ["chat_id", "message_id", "text"] } },
+      { name: "update_card",
+        description: "Edit a card you previously posted, identified by its correlation_id. Replaces the embed + buttons in place. Use this for every progress update instead of posting a new card.",
+        inputSchema: { type: "object", properties: {
+          chat_id: { type: "string" },
+          correlation_id: { type: "string" },
+          card: { type: "object", properties: {
+            title: { type: "string" }, body: { type: "string" }, footer: { type: "string" },
+            fields: { type: "array", items: { type: "object", properties: {
+              name: { type: "string" }, value: { type: "string" }, inline: { type: "boolean" } }, required: ["name", "value"] } },
+            buttons: { type: "array", items: { type: "object", properties: {
+              customId: { type: "string" }, label: { type: "string" },
+              style: { type: "string", enum: ["primary", "secondary", "success", "danger"] },
+              emoji: { type: "string" },
+              modal: { type: "object", properties: {
+                title: { type: "string" },
+                inputs: { type: "array", items: { type: "object", properties: {
+                  id: { type: "string" }, label: { type: "string" },
+                  style: { type: "string", enum: ["short", "paragraph"] },
+                  placeholder: { type: "string" }, required: { type: "boolean" } }, required: ["id", "label", "style"] } } },
+                required: ["title", "inputs"] } },
+              required: ["customId", "label"] } },
+          }, required: ["title", "body", "buttons"] } },
+          required: ["chat_id", "correlation_id", "card"] } },
+      { name: "finish",
+        description: "Signal you have completed your task and need no further turns. For an ephemeral (spawned) agent this ends and tears down the session; for a persistent agent it simply ends the turn.",
+        inputSchema: { type: "object", properties: {} } },
     ],
   }))
 
