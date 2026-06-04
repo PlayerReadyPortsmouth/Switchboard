@@ -2,9 +2,9 @@ import {
   Client, GatewayIntentBits, Partials, ChannelType,
   ButtonBuilder, ButtonStyle, ActionRowBuilder, EmbedBuilder, type Message, type Interaction,
 } from "discord.js"
-import type { AgentRegistry, InboundMessage, AgentReply, AgentConfig, HubConfig, CardSpec } from "./types"
+import type { AgentRegistry, InboundMessage, AgentReply, AgentConfig, HubConfig, CardSpec, CardModal } from "./types"
 import { formatOutbound } from "./format"
-import { isDeployAuthorized } from "./deployGate"
+import { buildModal } from "./modal"
 
 export type Control =
   | { cmd: "agents"; arg: undefined }
@@ -86,8 +86,15 @@ export class Gateway {
   private notifyButtonCb: (customId: string, userId: string) => void = () => {}
   private isAuthorized: (userId: string) => boolean = () => false
   private deployApproverUserId = ""
+  private modalByCustomId = new Map<string, CardModal>()
+  private notifyGate: (customId: string, userId: string) => boolean = () => true
+  private modalSubmitCb: (customId: string, userId: string, fields: Record<string, string>) => void = () => {}
 
   setDeployApprover(userId: string): void { this.deployApproverUserId = userId }
+  registerModal(customId: string, spec: CardModal): void { this.modalByCustomId.set(customId, spec) }
+  unregisterModals(customIds: string[]): void { for (const id of customIds) this.modalByCustomId.delete(id) }
+  setNotifyButtonGate(fn: (customId: string, userId: string) => boolean): void { this.notifyGate = fn }
+  onModalSubmit(cb: typeof this.modalSubmitCb): void { this.modalSubmitCb = cb }
 
   constructor(private cfg: HubConfig, private registry: AgentRegistry) {
     this.client = new Client({
@@ -155,9 +162,31 @@ export class Gateway {
       })
     })
     this.client.on("interactionCreate", async (interaction: Interaction) => {
+      // Modal submissions: collect fields and relay to the owning agent.
+      if (interaction.isModalSubmit()) {
+        if (!this.isAuthorized(interaction.user.id)) {
+          await interaction.reply({ content: "Not authorized.", ephemeral: true }).catch(() => {})
+          return
+        }
+        const fields: Record<string, string> = {}
+        for (const [key, comp] of interaction.fields.fields) fields[key] = (comp as any).value
+        this.modalSubmitCb(interaction.customId, interaction.user.id, fields)
+        await interaction.deferUpdate().catch(() => {})
+        return
+      }
       if (!interaction.isButton()) return
       if (!this.isAuthorized(interaction.user.id)) {
         await interaction.reply({ content: "Not authorized.", ephemeral: true }).catch(() => {})
+        return
+      }
+      // A button that opens a modal: show it (must be the first response).
+      const modalSpec = this.modalByCustomId.get(interaction.customId)
+      if (modalSpec) {
+        if (!this.notifyGate(interaction.customId, interaction.user.id)) {
+          await interaction.reply({ content: "🔒 Not authorized for this action.", ephemeral: true }).catch(() => {})
+          return
+        }
+        await interaction.showModal(buildModal(interaction.customId, modalSpec)).catch(() => {})
         return
       }
       const perm = /^perm:(allow|deny):(.+)$/.exec(interaction.customId)
@@ -165,19 +194,16 @@ export class Gateway {
         const behavior = perm[1] as "allow" | "deny"
         this.permButtonCb(perm[2]!, behavior)
         const label = behavior === "allow" ? "✅ Allowed" : "❌ Denied"
-        await interaction.update({
-          content: `${interaction.message.content}\n\n${label}`, components: [],
-        }).catch(() => {})
+        await interaction.update({ content: `${interaction.message.content}\n\n${label}`, components: [] }).catch(() => {})
         return
       }
       if (parseNotifyCustomId(interaction.customId)) {
-        const okDeploy = isDeployAuthorized(interaction.customId, interaction.user.id, this.deployApproverUserId)
-        if (!okDeploy) {
-          await interaction.reply({ content: "🔒 Only the deploy approver can deploy to live.", ephemeral: true }).catch(() => {})
+        if (!this.notifyGate(interaction.customId, interaction.user.id)) {
+          await interaction.reply({ content: "🔒 Not authorized for this action.", ephemeral: true }).catch(() => {})
           return
         }
         this.notifyButtonCb(interaction.customId, interaction.user.id)
-        await interaction.deferUpdate().catch(() => {})  // agent will edit the card to reflect the action
+        await interaction.deferUpdate().catch(() => {})   // hub edits the card to reflect the action
         return
       }
     })
@@ -199,11 +225,23 @@ export class Gateway {
     }
   }
 
-  async sendCard(chatId: string, card: CardSpec): Promise<void> {
+  async sendCard(chatId: string, card: CardSpec): Promise<string | undefined> {
     const ch = await this.client.channels.fetch(chatId)
-    if (!ch || !("send" in ch)) return
+    if (!ch || !("send" in ch)) return undefined
     const { embed, row } = buildCardComponents(card)
-    await (ch as any).send({ embeds: [embed], components: row ? [row] : [] })
+    const msg = await (ch as any).send({ embeds: [embed], components: row ? [row] : [] })
+    return msg?.id as string | undefined
+  }
+
+  async editCard(chatId: string, messageId: string, card: CardSpec): Promise<void> {
+    try {
+      const ch = await this.client.channels.fetch(chatId)
+      if (!ch || !("messages" in ch)) return
+      const { embed, row } = buildCardComponents(card)
+      await (ch as any).messages.edit(messageId, { embeds: [embed], components: row ? [row] : [] })
+    } catch (e) {
+      process.stderr.write(`gateway: editCard ${messageId} failed: ${e}\n`)
+    }
   }
 
   async sendPlain(chatId: string, text: string): Promise<void> {

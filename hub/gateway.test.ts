@@ -51,3 +51,11 @@ test("gateway deploy gate: isDeployAuthorized unit check", () => {
   // empty approver = deny all deploy
   expect(isDeployAuthorized("deploy:go:J1", approver, "")).toBe(false)
 })
+
+import { test as gt, expect as ge } from "bun:test"
+import { buildModal as bm } from "./modal"
+
+gt("buildModal integrates for a feedback button (smoke)", () => {
+  const m = bm("fix:feedback:T1", { title: "Feedback", inputs: [{ id: "feedback", label: "Note", style: "paragraph" }] })
+  ge(m.data.custom_id).toBe("fix:feedback:T1")
+})
