@@ -13,6 +13,10 @@ import { NotifyRouter } from "./notifyRouter"
 import { startWebhookListener, type WebhookHandler } from "./webhookListener"
 import { shouldRunDailyAt, currentBucket } from "./scheduler"
 import { drainApprovals } from "./approvals"
+import { CardRegistry } from "./cardRegistry"
+import { CardLifecycle } from "./cardLifecycle"
+import { matchGatedAction, requiresApprover } from "./gatedActions"
+import { isDeployAuthorized } from "./deployGate"
 import type { AgentConfig, AgentReply, SpawnTrigger } from "./types"
 
 const CONFIG_DIR = process.env.SWITCHBOARD_CONFIG ?? join(import.meta.dir, "..", "config")
@@ -24,6 +28,10 @@ if (!token) { console.error(`missing ${hub.botTokenEnv}`); process.exit(1) }
 
 const gateway = new Gateway(hub, agents)
 gateway.setDeployApprover(hub.deployApproverUserId ?? "")
+const deployApprover = hub.deployApproverUserId ?? ""
+gateway.setNotifyButtonGate((customId, userId) =>
+  isDeployAuthorized(customId, userId, deployApprover) &&
+  (requiresApprover(customId, hub.gatedActions ?? []) ? !!deployApprover && userId === deployApprover : true))
 const routerRunner = makeRouterRunner()
 const spawner = makeBunProcessSpawner()
 
@@ -32,6 +40,19 @@ const notifyRouter = new NotifyRouter()
 
 // key → live transport (persistent agent name, or jobId for spawned workers).
 const transports = new Map<string, StreamJsonTransport>()
+
+const cardRegistry = new CardRegistry()
+const cardLifecycle = new CardLifecycle(cardRegistry, {
+  sendCard: (chatId, card) => gateway.sendCard(chatId, card),
+  editCard: (chatId, messageId, card) => gateway.editCard(chatId, messageId, card),
+  registerButtons: (ids, key) => notifyRouter.register(ids, key),
+  forgetButtons: (ids) => notifyRouter.forget(ids),
+  registerModals: (card) => { for (const b of card.buttons) if (b.modal) gateway.registerModal(b.customId, b.modal) },
+  unregisterModals: (ids) => gateway.unregisterModals(ids),
+  ownerOf: (customId) => notifyRouter.agentFor(customId),
+  closeTransport: (key) => { void transports.get(key)?.close() },
+  runCommand: (cmd) => Bun.spawn(["sh", "-c", cmd], { stdout: "inherit", stderr: "inherit" }).exited,
+})
 
 /** Build (but do not start) a StreamJsonTransport and register it under `key`. */
 function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonTransport {
@@ -56,8 +77,11 @@ const spawnTriggers = (hub.spawnTriggers ?? []).map((t) => ({ ...t, re: new RegE
  *  text → spawn-trigger match or a plain reply; react/edit → passthrough. */
 async function onAgentReply(reply: AgentReply, key: string): Promise<void> {
   if (reply.kind === "card" && reply.card) {
-    notifyRouter.register(reply.card.buttons.map((b) => b.customId), key)
-    await gateway.sendCard(reply.chatId, reply.card)
+    await cardLifecycle.onCard(reply, key)
+    return
+  }
+  if (reply.kind === "update" && reply.card && reply.correlationId) {
+    await cardLifecycle.onUpdate(reply.correlationId, reply.chatId, reply.card, key)
     return
   }
   if (reply.kind === "reply" && reply.text) {
@@ -147,10 +171,17 @@ const baseGate = new BaseGate(join(hub.stateDir, "access.json"))
 // Only allowlisted users may press card buttons.
 gateway.setPermissionAuthorizer((uid) => baseGate.listAllowed().includes(uid))
 
-// A card button was clicked → relay it to the owning agent's transport via stdin.
+// A card button was clicked → gated actions run hub-side; others relay to the agent.
 gateway.onNotifyButton((customId, userId) => {
+  const action = matchGatedAction(customId, hub.gatedActions ?? [])
+  if (action) { void cardLifecycle.runGated(action, customId); return }
   const key = notifyRouter.agentFor(customId)
   if (key) transports.get(key)?.sendInteraction(customId, userId)
+})
+
+gateway.onModalSubmit((customId, userId, fields) => {
+  const key = notifyRouter.agentFor(customId)
+  if (key) transports.get(key)?.sendInteraction(customId, userId, fields)
 })
 
 // Webhooks: one HTTP listener; each route HMAC-verifies and delivers "{prefix} {body}".
