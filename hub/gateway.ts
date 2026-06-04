@@ -88,6 +88,8 @@ export class Gateway {
   private modalByCustomId = new Map<string, CardModal>()
   private notifyGate: (customId: string, userId: string) => boolean = () => true
   private modalSubmitCb: (customId: string, userId: string, fields: Record<string, string>) => void = () => {}
+  private reactionCb: (emojiName: string, userId: string, channelId: string, messageId: string) => void = () => {}
+  onReaction(cb: typeof this.reactionCb): void { this.reactionCb = cb }
 
   registerModal(customId: string, spec: CardModal): void { this.modalByCustomId.set(customId, spec) }
   unregisterModals(customIds: string[]): void { for (const id of customIds) this.modalByCustomId.delete(id) }
@@ -100,8 +102,9 @@ export class Gateway {
         GatewayIntentBits.DirectMessages, GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent,
         GatewayIntentBits.GuildMembers,   // role resolution
+        GatewayIntentBits.GuildMessageReactions,
       ],
-      partials: [Partials.Channel],
+      partials: [Partials.Channel, Partials.Message, Partials.Reaction],
     })
   }
 
@@ -204,6 +207,15 @@ export class Gateway {
         await interaction.deferUpdate().catch(() => {})   // hub edits the card to reflect the action
         return
       }
+    })
+    this.client.on("messageReactionAdd", async (reaction, user) => {
+      try {
+        if (user.bot) return
+        if (reaction.partial) await reaction.fetch()
+        const emojiName = reaction.emoji.name ?? ""
+        const channelId = reaction.message.channelId
+        this.reactionCb(emojiName, user.id, channelId, reaction.message.id)
+      } catch (e) { process.stderr.write(`gateway: reaction handler: ${e}\n`) }
     })
     await this.client.login(token)
   }
