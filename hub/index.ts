@@ -1,4 +1,5 @@
 import { join } from "path"
+import { unlinkSync } from "fs"
 import { config as loadEnv } from "./env"
 import { loadConfigs } from "./config"
 import { BaseGate } from "./baseGate"
@@ -17,6 +18,7 @@ import { CardRegistry } from "./cardRegistry"
 import { CardLifecycle } from "./cardLifecycle"
 import { matchGatedAction, requiresApprover } from "./gatedActions"
 import { isDeployAuthorized } from "./deployGate"
+import { clearReactionAgent } from "./channelPin"
 import type { AgentConfig, AgentReply, SpawnTrigger, SpawnCardUpdate, CardSpec } from "./types"
 
 const CONFIG_DIR = process.env.SWITCHBOARD_CONFIG ?? join(import.meta.dir, "..", "config")
@@ -62,6 +64,8 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonT
     shimPath: SHIM_PATH,
     socketPath,
     mcpConfigPath: join(hub.stateDir, `${key}.mcp.json`),
+    resumable: cfg.runtime.resumable === true,
+    sessionPath: join(hub.stateDir, `${key}.session`),
   })
   t.onReply((reply) => { void onAgentReply(reply, key) })
   transports.set(key, t)
@@ -181,6 +185,19 @@ const dispatcher = new Dispatcher(dispatchTransports)
 // Dispatcher and keep the onReply set in makeTransport, keyed by jobId.)
 dispatcher.onReply((reply) => { void onAgentReply(reply, reply.agent) })
 
+/** Clear a persistent agent's context: drop its session file + respawn fresh. */
+async function resetAgentSession(name: string, channelId: string): Promise<void> {
+  const cfg = agents[name]
+  if (!cfg) return
+  try { unlinkSync(join(hub.stateDir, `${name}.session`)) } catch {}
+  const old = transports.get(name)
+  if (old) { await old.close(); transports.delete(name) }
+  const fresh = makeTransport(name, name, cfg)   // resumable, but the session file is now gone → fresh session
+  await fresh.start()
+  dispatcher.replace(name, fresh)
+  void gateway.sendPlain(channelId, "🧹 context cleared — fresh session.")
+}
+
 /** Deliver a synthesised system inbound to an agent scoped to a channel. */
 function deliverToAgent(agentName: string, channelId: string, idTag: string, content: string): void {
   const ok = dispatcher.dispatch(agentName, channelId, {
@@ -206,6 +223,12 @@ gateway.onNotifyButton((customId, userId) => {
 gateway.onModalSubmit((customId, userId, fields) => {
   const key = notifyRouter.agentFor(customId)
   if (key) transports.get(key)?.sendInteraction(customId, userId, fields)
+})
+
+gateway.onReaction((emojiName, userId, channelId /* , messageId */) => {
+  if (!baseGate.listAllowed().includes(userId)) return
+  const agentName = clearReactionAgent(channelId, emojiName, hub.channelAgents ?? [])
+  if (agentName) void resetAgentSession(agentName, channelId)
 })
 
 // Webhooks: one HTTP listener; each route HMAC-verifies and delivers "{prefix} {body}".

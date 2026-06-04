@@ -28,4 +28,8 @@ export class Dispatcher {
     return this.byName.get(agent)?.isAvailable() ?? false
   }
   onReply(cb: (r: AgentReply) => void): void { this.replyCb = cb }
+  replace(name: string, t: AgentTransport): void {
+    this.byName.set(name, t)
+    t.onReply((r) => this.replyCb(r))
+  }
 }
