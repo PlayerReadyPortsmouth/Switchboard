@@ -137,17 +137,25 @@ async function runSpawnTrigger(trig: SpawnTrigger, groups: string[], chatId: str
   const cfg = agents[trig.agent]
   if (!cfg) { process.stderr.write(`spawn-trigger: agent "${trig.agent}" not found\n`); return }
   const jobId = nextJobId()
+  // Paint the card to its handoff state BEFORE the (slow) setupCommand so the
+  // operator sees "working" immediately, not after the worktree checkout.
+  const paintSpawnCard = (card: CardSpec): Promise<void> => {
+    if (!trig.onSpawnCard) return Promise.resolve()
+    const corr = interpolate(trig.onSpawnCard.correlationId, groups, jobId)
+    return cardLifecycle.onUpdate(corr, chatId, card, jobId)
+  }
+  if (trig.onSpawnCard) await paintSpawnCard(buildSpawnCard(trig.onSpawnCard, groups, jobId))
   if (trig.setupCommand) {
     const code = await Bun.spawn(["sh", "-c", interpolate(trig.setupCommand, groups, jobId)],
       { stdout: "inherit", stderr: "inherit" }).exited
-    if (code !== 0) { process.stderr.write(`spawn-trigger: setupCommand exited ${code}; aborting\n`); return }
+    if (code !== 0) {
+      process.stderr.write(`spawn-trigger: setupCommand exited ${code}; aborting\n`)
+      await paintSpawnCard({ title: "⚠️ Could not start", body: `Setup failed (job ${jobId}); see hub logs.`, buttons: [] })
+      return
+    }
   }
   const t = makeTransport(trig.agent, jobId, cfg)
   await t.start()
-  if (trig.onSpawnCard) {
-    const corr = interpolate(trig.onSpawnCard.correlationId, groups, jobId)
-    await cardLifecycle.onUpdate(corr, chatId, buildSpawnCard(trig.onSpawnCard, groups, jobId), jobId)
-  }
   t.deliver(jobId, {
     chatId, messageId: `spawn:${jobId}`, userId: "system", user: "hub",
     content: interpolate(trig.taskTemplate, groups, jobId), ts: new Date().toISOString(), isDM: false,
