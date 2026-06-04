@@ -63,6 +63,7 @@ export interface AgentRuntime {
   allowedTools?: string[]      // ephemeral only
   claudeArgs?: string[]        // extra flags appended to the agent's `claude` invocation
   appendSystemPrompt?: string
+  resumable?: boolean        // persistent agent: persist + --resume its CLI session
 }
 
 export interface AgentConfig {
@@ -136,6 +137,15 @@ export interface SpawnTrigger {
   onSpawnCard?: SpawnCardUpdate // if set, edit this card to a handoff state when the trigger fires
 }
 
+/** Pin a channel to a specific agent: messages there bypass the router and go
+ *  straight to `agent`. Optional `clearReaction` (a unicode emoji name) resets
+ *  that agent's session when an allowlisted user reacts with it. */
+export interface ChannelAgent {
+  channelId: string;
+  agent: string;
+  clearReaction?: string;
+}
+
 export interface HubConfig {
   botTokenEnv: string
   guildIds: string[]
@@ -154,4 +164,5 @@ export interface HubConfig {
   webhookPort?: number           // single HTTP listener port for all webhooks[].path
   deployApproverUserId?: string  // Discord user id allowed to press deploy:* buttons
   gatedActions?: GatedAction[]   // hub-side button handlers that run shell commands
+  channelAgents?: ChannelAgent[]  // channels pinned to a specific agent
 }
