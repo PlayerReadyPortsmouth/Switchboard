@@ -4,6 +4,7 @@ import { permittedAgents } from "./access"
 import { chatKey, decideAgent, BindingStore } from "./bindings"
 import { parseControlCommand, renderAgentList } from "./gateway"
 import { parsePermissionReply } from "./permissions"
+import { resolvePinnedAgent } from "./channelPin"
 import { join } from "path"
 
 import type { GateResult } from "./baseGate"
@@ -49,6 +50,18 @@ export class Orchestrator {
 
     const control = parseControlCommand(inbound.content)
     if (control) { await this.handleControl(control, inbound, key, permitted, bound); return }
+
+    // Channel pin: a pinned channel goes straight to its agent, bypassing the router.
+    const pinned = resolvePinnedAgent(inbound.chatId, this.hub.channelAgents ?? [])
+    if (pinned && this.reg[pinned] && permitted.includes(pinned)) {
+      if (!this.deps.isAvailable(pinned)) {
+        await this.deps.sendPlain(inbound.chatId, `${this.reg[pinned].emoji} ${pinned} is offline right now.`)
+        return
+      }
+      this.bindings.set(key, { agent: pinned, sessionId: this.bindings.get(key)?.sessionId, lastActive: Date.parse(inbound.ts) })
+      this.deps.dispatch(pinned, key, inbound)
+      return
+    }
 
     if (permitted.length === 0) {
       await this.deps.sendPlain(inbound.chatId, "You don't have access to any agents yet.")

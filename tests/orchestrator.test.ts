@@ -104,3 +104,31 @@ test("a y/n <code> reply for an UNKNOWN code falls through to normal handling", 
   await o.handleMessage(dm("y zzzzz"))
   expect(f.dispatched.length).toBe(1)      // treated as a normal message → routed
 })
+
+test("pinned channel bypasses router and dispatches straight to pinned agent", async () => {
+  const pinnedReg: AgentRegistry = {
+    ...reg,
+    "dev-agent": {
+      emoji: "🛠️", description: "dev work", mode: "persistent",
+      access: { roles: [], users: ["u1"] }, runtime: { cwd: "." },
+    },
+  }
+  const pinnedHub: HubConfig = {
+    ...hub,
+    channelAgents: [{ channelId: "pinchan", agent: "dev-agent" }],
+  }
+  const f = fakes()
+  let routeCalled = false
+  f.deps.route = async () => { routeCalled = true; return { agent: "research", confidence: 0.9, switch: true } }
+
+  const o = new Orchestrator(pinnedHub, pinnedReg, f.deps as any)
+  const msg: InboundMessage = {
+    chatId: "pinchan", messageId: "m1", userId: "u1", user: "bob",
+    content: "do some dev work", ts: new Date().toISOString(), isDM: false,
+  }
+  await o.handleMessage(msg)
+
+  expect(f.dispatched.length).toBe(1)
+  expect(f.dispatched[0].agent).toBe("dev-agent")
+  expect(routeCalled).toBe(false)
+})
