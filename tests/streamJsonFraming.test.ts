@@ -83,3 +83,21 @@ t2("interactionFrame ignores an empty fields object", () => {
   const text = JSON.parse(iframe("a:b:c", "u", {})).message.content[0].text
   e2(text).toBe("[interaction] custom_id=a:b:c user_id=u")
 })
+
+import { test as st, expect as se } from "bun:test"
+import { parseStreamEvent as pse, buildClaudeArgv as bca } from "../hub/transports/streamJsonFraming"
+
+st("parseStreamEvent extracts session_id from the init event", () => {
+  const ev = pse(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-123", tools: [] }))
+  se(ev).toEqual({ kind: "init", sessionId: "sess-123" })
+})
+
+st("buildClaudeArgv appends --resume when resumeSessionId is set", () => {
+  const argv = bca({ mcpConfigPath: "/m", resumeSessionId: "sess-123" })
+  se(argv).toContain("--resume")
+  se(argv[argv.indexOf("--resume") + 1]).toBe("sess-123")
+})
+
+st("buildClaudeArgv omits --resume when no session", () => {
+  se(bca({ mcpConfigPath: "/m" })).not.toContain("--resume")
+})
