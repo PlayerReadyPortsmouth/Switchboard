@@ -17,7 +17,7 @@ import { CardRegistry } from "./cardRegistry"
 import { CardLifecycle } from "./cardLifecycle"
 import { matchGatedAction, requiresApprover } from "./gatedActions"
 import { isDeployAuthorized } from "./deployGate"
-import type { AgentConfig, AgentReply, SpawnTrigger } from "./types"
+import type { AgentConfig, AgentReply, SpawnTrigger, SpawnCardUpdate, CardSpec } from "./types"
 
 const CONFIG_DIR = process.env.SWITCHBOARD_CONFIG ?? join(import.meta.dir, "..", "config")
 const { hub, agents } = loadConfigs(CONFIG_DIR)
@@ -105,6 +105,19 @@ function interpolate(tmpl: string, groups: string[], jobId: string): string {
   })
 }
 
+/** Build the handoff CardSpec from a SpawnCardUpdate, interpolating $1,$2,$jobId. */
+function buildSpawnCard(s: SpawnCardUpdate, groups: string[], jobId: string): CardSpec {
+  return {
+    title: interpolate(s.title, groups, jobId),
+    body: interpolate(s.body, groups, jobId),
+    buttons: s.buttons.map((b) => ({
+      ...b,
+      customId: interpolate(b.customId, groups, jobId),
+      label: interpolate(b.label, groups, jobId),
+    })),
+  }
+}
+
 /** Tear down a spawned worker once its process has exited, then run teardownCommand. */
 function scheduleTeardown(jobId: string, t: StreamJsonTransport, teardownCmd: () => string | undefined): void {
   const tick = setInterval(() => {
@@ -132,12 +145,16 @@ async function runSpawnTrigger(trig: SpawnTrigger, groups: string[], chatId: str
   }
   const t = makeTransport(trig.agent, jobId, cfg)
   await t.start()
+  if (trig.onSpawnCard) {
+    const corr = interpolate(trig.onSpawnCard.correlationId, groups, jobId)
+    await cardLifecycle.onUpdate(corr, chatId, buildSpawnCard(trig.onSpawnCard, groups, jobId), jobId)
+  }
   t.deliver(jobId, {
     chatId, messageId: `spawn:${jobId}`, userId: "system", user: "hub",
     content: interpolate(trig.taskTemplate, groups, jobId), ts: new Date().toISOString(), isDM: false,
   })
   // The matched trigger text is consumed (not shown); confirm the spawn to the channel.
-  void gateway.sendPlain(chatId, `🔧 \`${trig.agent}\` agent dispatched (job ${jobId}).`)
+  if (!trig.onSpawnCard) void gateway.sendPlain(chatId, `🔧 \`${trig.agent}\` agent dispatched (job ${jobId}).`)
   scheduleTeardown(jobId, t, () => (trig.teardownCommand ? interpolate(trig.teardownCommand, groups, jobId) : undefined))
 }
 
@@ -209,6 +226,18 @@ setInterval(() => {
     }
   }
 }, 5 * 60 * 1000).unref()
+
+// Idle backstop: close any ephemeral (spawned) transport with no activity for
+// ephemeralTimeoutMs — guards against an agent that neither finishes nor is
+// actioned. Persistent agents (keyed by name) are never reaped here.
+setInterval(() => {
+  const now = Date.now()
+  for (const [, t] of transports) {
+    if (agents[t.name]?.mode === "ephemeral" && now - t.lastActivityMs() > hub.ephemeralTimeoutMs) {
+      void t.close()
+    }
+  }
+}, 60_000).unref()
 
 const orchestrator = new Orchestrator(hub, agents, {
   baseGate: (userId, chatId, isDM) => baseGate.gate(userId, chatId, isDM, Date.now()),
