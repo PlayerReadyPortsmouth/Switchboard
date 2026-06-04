@@ -27,7 +27,6 @@ const token = process.env[hub.botTokenEnv]
 if (!token) { console.error(`missing ${hub.botTokenEnv}`); process.exit(1) }
 
 const gateway = new Gateway(hub, agents)
-gateway.setDeployApprover(hub.deployApproverUserId ?? "")
 const deployApprover = hub.deployApproverUserId ?? ""
 gateway.setNotifyButtonGate((customId, userId) =>
   isDeployAuthorized(customId, userId, deployApprover) &&
@@ -232,9 +231,10 @@ setInterval(() => {
 // actioned. Persistent agents (keyed by name) are never reaped here.
 setInterval(() => {
   const now = Date.now()
-  for (const [, t] of transports) {
+  for (const [key, t] of transports) {
     if (agents[t.name]?.mode === "ephemeral" && now - t.lastActivityMs() > hub.ephemeralTimeoutMs) {
       void t.close()
+      transports.delete(key)
     }
   }
 }, 60_000).unref()

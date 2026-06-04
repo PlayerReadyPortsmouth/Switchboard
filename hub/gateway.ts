@@ -85,12 +85,10 @@ export class Gateway {
   private permButtonCb: (requestId: string, behavior: "allow" | "deny") => void = () => {}
   private notifyButtonCb: (customId: string, userId: string) => void = () => {}
   private isAuthorized: (userId: string) => boolean = () => false
-  private deployApproverUserId = ""
   private modalByCustomId = new Map<string, CardModal>()
   private notifyGate: (customId: string, userId: string) => boolean = () => true
   private modalSubmitCb: (customId: string, userId: string, fields: Record<string, string>) => void = () => {}
 
-  setDeployApprover(userId: string): void { this.deployApproverUserId = userId }
   registerModal(customId: string, spec: CardModal): void { this.modalByCustomId.set(customId, spec) }
   unregisterModals(customIds: string[]): void { for (const id of customIds) this.modalByCustomId.delete(id) }
   setNotifyButtonGate(fn: (customId: string, userId: string) => boolean): void { this.notifyGate = fn }
