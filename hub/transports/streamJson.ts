@@ -23,6 +23,8 @@ export interface ShimSocketLike {
   onNotify(cb: (n: { chatId: string; card: CardSpec; correlationId: string }) => void): void
   onReact(cb: (r: { chatId: string; messageId: string; emoji: string }) => void): void
   onEdit(cb: (e: { chatId: string; messageId: string; text: string }) => void): void
+  onUpdate(cb: (u: { chatId: string; card: CardSpec; correlationId: string }) => void): void
+  onFinish(cb: () => void): void
   close(): Promise<void>
 }
 
@@ -59,6 +61,7 @@ export class StreamJsonTransport implements AgentTransport {
   private closed = false
   private lastChatId = ""
   private cardThisTurn = false
+  private lastActivity = Date.now()
   private cb: (r: AgentReply) => void = () => {}
 
   constructor(
@@ -83,6 +86,15 @@ export class StreamJsonTransport implements AgentTransport {
       this.cb({ agent: this.name, kind: "react", chatId: chan(chatId), messageId, emoji }))
     socket.onEdit(({ chatId, messageId, text }) =>
       this.cb({ agent: this.name, kind: "edit", chatId: chan(chatId), messageId, text }))
+    socket.onUpdate(({ chatId, card, correlationId }) => {
+      this.cardThisTurn = true
+      this.cb({ agent: this.name, kind: "update", chatId: chan(chatId), card: normalizeCard(card), correlationId })
+    })
+    socket.onFinish(() => {
+      // Only ephemeral/spawned agents self-terminate; a persistent agent serves
+      // many items and must never be killed by a finish.
+      if (this.cfg.mode === "ephemeral") { this.alive = false; try { this.proc?.kill() } catch {} }
+    })
     await socket.listen()
 
     const write = this.opts.writeMcpConfig ?? ((p, c) => writeFileSync(p, c))
@@ -116,13 +128,17 @@ export class StreamJsonTransport implements AgentTransport {
   }
 
   deliver(_chatKey: string, inbound: InboundMessage): void {
+    this.lastActivity = Date.now()
     this.lastChatId = inbound.chatId
     this.proc?.writeStdin(userMessageFrame(inbound.content))
   }
 
-  sendInteraction(customId: string, userId: string): void {
-    this.proc?.writeStdin(interactionFrame(customId, userId))
+  sendInteraction(customId: string, userId: string, fields?: Record<string, string>): void {
+    this.lastActivity = Date.now()
+    this.proc?.writeStdin(interactionFrame(customId, userId, fields))
   }
+
+  lastActivityMs(): number { return this.lastActivity }
 
   async close(): Promise<void> {
     if (this.closed) return

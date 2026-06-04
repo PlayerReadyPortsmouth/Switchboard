@@ -27,6 +27,7 @@ function fakeSocket() {
       onRegister: (cb: any) => { reg = cb },
       onNotify: (cb: any) => { notify = cb },
       onReact: () => {}, onEdit: () => {},
+      onUpdate: () => {}, onFinish: () => {},
       close: async () => {},
     },
     fireNotify: (n: any) => notify(n),
@@ -144,4 +145,77 @@ test("normalizeCard fills missing buttons/title/body so the card pipeline can't 
   expect(normalizeCard(undefined)).toEqual({ title: "(untitled)", body: "", buttons: [] })
   const full = { title: "x", body: "y", buttons: [{ customId: "a:b:c", label: "L" }], footer: "f" }
   expect(normalizeCard(full)).toEqual(full)
+})
+
+import { test as jt, expect as je } from "bun:test"
+import { StreamJsonTransport as SJT } from "../hub/transports/streamJson"
+import type { AgentConfig as AC } from "../hub/types"
+
+function fakeSocket2() {
+  let notify: any = () => {}, update: any = () => {}, finish: any = () => {}
+  return {
+    sock: {
+      listen: async () => {}, onRegister: () => {},
+      onNotify: (cb: any) => { notify = cb }, onReact: () => {}, onEdit: () => {},
+      onUpdate: (cb: any) => { update = cb }, onFinish: (cb: any) => { finish = cb },
+      close: async () => {},
+    },
+    fireUpdate: (u: any) => update(u), fireFinish: () => finish(),
+  }
+}
+function fakeProc2() {
+  let exitCb: (c: number) => void = () => {}
+  const writes: string[] = []; let killed = false
+  return {
+    handle: { writeStdin: (s: string) => writes.push(s), onStdoutLine: () => {},
+      onExit: (cb: any) => { exitCb = cb }, kill: () => { killed = true } },
+    writes, killed: () => killed,
+  }
+}
+function make2(mode: "persistent" | "ephemeral") {
+  const fp = fakeProc2(); const fs = fakeSocket2()
+  const cfg: AC = { emoji: "x", description: "d", mode, access: { roles: [] }, runtime: { cwd: "/w" } }
+  const t = new SJT("worker", cfg, {
+    spawner: () => fp.handle, socket: fs.sock as any,
+    shimPath: "/s", socketPath: "/run/w.sock", mcpConfigPath: "/run/w.mcp.json", writeMcpConfig: () => {},
+  })
+  return { t, fp, fs }
+}
+
+jt("a socket update becomes an update reply", async () => {
+  const { t, fs } = make2("ephemeral"); await t.start()
+  const replies: any[] = []; t.onReply((r) => replies.push(r))
+  fs.fireUpdate({ chatId: "1511807891881853139", correlationId: "T1", card: { title: "T", body: "b", buttons: [] } })
+  je(replies[0]).toMatchObject({ kind: "update", correlationId: "T1", chatId: "1511807891881853139" })
+})
+
+jt("finish kills an ephemeral process", async () => {
+  const { t, fp, fs } = make2("ephemeral"); await t.start()
+  fs.fireFinish()
+  je(fp.killed()).toBe(true)
+  je(t.isAvailable()).toBe(false)
+})
+
+jt("finish is a no-op for a persistent process", async () => {
+  const { t, fp, fs } = make2("persistent"); await t.start()
+  fs.fireFinish()
+  je(fp.killed()).toBe(false)
+  je(t.isAvailable()).toBe(true)
+})
+
+jt("sendInteraction forwards modal fields", async () => {
+  const { t, fp } = make2("ephemeral"); await t.start()
+  t.sendInteraction("fix:feedback:T1", "u9", { feedback: "go blue" })
+  // The frame is a JSON-encoded stream-json user message; parse the text payload
+  // and verify the fields= suffix was serialized into it.
+  const text = JSON.parse(fp.writes[0]).message.content[0].text as string
+  je(text).toContain('fields={"feedback":"go blue"}')
+})
+
+jt("lastActivityMs advances on deliver", async () => {
+  const { t } = make2("ephemeral"); await t.start()
+  const before = t.lastActivityMs()
+  await Bun.sleep(5)
+  t.deliver("c", { chatId: "c", messageId: "m", userId: "u", user: "x", content: "hi", ts: "t", isDM: false })
+  je(t.lastActivityMs()).toBeGreaterThan(before)
 })
