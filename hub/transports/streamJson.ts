@@ -1,4 +1,4 @@
-import { writeFileSync, unlinkSync } from "fs"
+import { writeFileSync, unlinkSync, readFileSync } from "fs"
 import type { AgentConfig, AgentReply, InboundMessage, CardSpec } from "../types"
 import type { AgentTransport } from "./index"
 import {
@@ -51,6 +51,13 @@ export interface StreamJsonOpts {
   mcpConfigPath: string
   /** Seam for tests; defaults to writing the file. */
   writeMcpConfig?: (path: string, contents: string) => void
+  /** Persist+resume the CLI session across restarts (persistent agents). */
+  resumable?: boolean
+  /** Path to read/write the captured session id. */
+  sessionPath?: string
+  /** Seams for tests; default to fs read/write of sessionPath. */
+  readSession?: () => string | undefined
+  writeSession?: (id: string) => void
 }
 
 /** One agent = one long-lived `claude -p --input-format stream-json` process.
@@ -100,8 +107,11 @@ export class StreamJsonTransport implements AgentTransport {
     const write = this.opts.writeMcpConfig ?? ((p, c) => writeFileSync(p, c))
     write(mcpConfigPath, JSON.stringify(buildShimMcpConfig(shimPath, socketPath, this.name)))
 
+    const resumeSessionId = this.opts.resumable
+      ? (this.opts.readSession?.() ?? (this.opts.sessionPath ? readSessionFile(this.opts.sessionPath) : undefined))
+      : undefined
     const argv = buildClaudeArgv({
-      mcpConfigPath,
+      mcpConfigPath, resumeSessionId,
       model: this.cfg.runtime.model,
       appendSystemPrompt: this.cfg.runtime.appendSystemPrompt,
       claudeArgs: this.cfg.runtime.claudeArgs,
@@ -114,6 +124,13 @@ export class StreamJsonTransport implements AgentTransport {
     this.proc.onExit(() => { this.alive = false })
     this.proc.onStdoutLine((line) => {
       const ev = parseStreamEvent(line)
+      if (ev?.kind === "init") {
+        if (this.opts.resumable) {
+          if (this.opts.writeSession) this.opts.writeSession(ev.sessionId)
+          else if (this.opts.sessionPath) writeSessionFile(this.opts.sessionPath, ev.sessionId)
+        }
+        return
+      }
       if (ev?.kind === "result") {
         // The agent's end-of-turn text is posted as a reply ONLY when it didn't
         // already communicate via a card this turn — a card IS the message, so the
@@ -147,6 +164,13 @@ export class StreamJsonTransport implements AgentTransport {
     await this.opts.socket.close()
     try { unlinkSync(this.opts.mcpConfigPath) } catch {}
   }
+}
+
+function readSessionFile(p: string): string | undefined {
+  try { const s = readFileSync(p, "utf8").trim(); return s || undefined } catch { return undefined }
+}
+function writeSessionFile(p: string, id: string): void {
+  try { writeFileSync(p, id) } catch {}
 }
 
 /** Accumulate chunks and yield complete newline-delimited lines. */

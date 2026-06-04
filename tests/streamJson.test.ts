@@ -219,3 +219,54 @@ jt("lastActivityMs advances on deliver", async () => {
   t.deliver("c", { chatId: "c", messageId: "m", userId: "u", user: "x", content: "hi", ts: "t", isDM: false })
   je(t.lastActivityMs()).toBeGreaterThan(before)
 })
+
+import { test as zt, expect as ze } from "bun:test"
+import { StreamJsonTransport as SJT2 } from "../hub/transports/streamJson"
+import type { AgentConfig as AC2 } from "../hub/types"
+
+function fakeProcZ() {
+  let line: (l: string) => void = () => {}
+  return { handle: { writeStdin() {}, onStdoutLine(cb: any){ line = cb }, onExit(){}, kill(){} },
+           emit: (l: string) => line(l) }
+}
+function fakeSockZ() {
+  return { listen: async()=>{}, onRegister(){}, onNotify(){}, onReact(){}, onEdit(){}, onUpdate(){}, onFinish(){}, close: async()=>{} }
+}
+const cfgZ: AC2 = { emoji:"x", description:"d", mode:"persistent", access:{roles:[]}, runtime:{ cwd:"/w" } }
+
+zt("init event persists the session id when resumable (via writeSession seam)", async () => {
+  const fp = fakeProcZ(); let saved = ""
+  const t = new SJT2("dev", cfgZ, {
+    spawner: () => fp.handle as any, socket: fakeSockZ() as any,
+    shimPath:"/s", socketPath:"/r.sock", mcpConfigPath:"/r.mcp.json", writeMcpConfig: () => {},
+    resumable: true, writeSession: (id) => { saved = id },
+  })
+  await t.start()
+  fp.emit(JSON.stringify({ type:"system", subtype:"init", session_id:"sess-9" }))
+  ze(saved).toBe("sess-9")
+})
+
+zt("start() passes --resume from readSession when resumable", async () => {
+  let argv: string[] = []
+  const t = new SJT2("dev", cfgZ, {
+    spawner: (a: string[]) => { argv = a; return { writeStdin(){}, onStdoutLine(){}, onExit(){}, kill(){} } as any },
+    socket: fakeSockZ() as any,
+    shimPath:"/s", socketPath:"/r.sock", mcpConfigPath:"/r.mcp.json", writeMcpConfig: () => {},
+    resumable: true, readSession: () => "sess-7",
+  })
+  await t.start()
+  ze(argv).toContain("--resume")
+  ze(argv[argv.indexOf("--resume")+1]).toBe("sess-7")
+})
+
+zt("not resumable → no --resume even if a session would resolve", async () => {
+  let argv: string[] = []
+  const t = new SJT2("dev", cfgZ, {
+    spawner: (a: string[]) => { argv = a; return { writeStdin(){}, onStdoutLine(){}, onExit(){}, kill(){} } as any },
+    socket: fakeSockZ() as any,
+    shimPath:"/s", socketPath:"/r.sock", mcpConfigPath:"/r.mcp.json", writeMcpConfig: () => {},
+    readSession: () => "sess-7",   // resumable not set
+  })
+  await t.start()
+  ze(argv).not.toContain("--resume")
+})
