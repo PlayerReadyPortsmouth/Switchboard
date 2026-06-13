@@ -32,7 +32,33 @@
       "cwd": "<working dir for the task>",
       "model": "claude-opus-4-8",
       "allowedTools": ["Bash", "Read", "Edit", "Write", "Grep", "Glob"],
-      "appendSystemPrompt": "<optional extra system prompt for this worker>"
+      "appendSystemPrompt": "<optional extra system prompt for this worker>",
+      "overseer": { "enabled": true, "maxIterations": 4, "maxWallclockMs": 600000 }
+    }
+  },
+  "help": {
+    "emoji": "💁",
+    "description": "ongoing help conversations — keeps context, remembers across chats; use for follow-ups and anything multi-step",
+    "mode": "persistent",
+    "access": { "roles": ["*"] },
+    "runtime": {
+      "cwd": "~",
+      "model": "claude-sonnet-4-6",
+      "useMemory": true,
+      "injectContext": "onSwitch"
+    }
+  },
+  "help-quick": {
+    "emoji": "⚡",
+    "description": "fast one-off questions that need no follow-up — quick-fire Q&A, spawned fresh per question",
+    "mode": "ephemeral",
+    "access": { "roles": ["*"] },
+    "runtime": {
+      "cwd": "~",
+      "model": "claude-haiku-4-5",
+      "allowedTools": ["Read", "Grep", "Glob"],
+      "useMemory": true,
+      "injectContext": "always"
     }
   }
 }

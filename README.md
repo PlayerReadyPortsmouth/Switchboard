@@ -15,6 +15,12 @@ On top of the router, the hub adds a small set of **config-driven integration pr
 - **Daily scheduler** — fire a message to an agent at a chosen UTC hour, once per day.
 - **Config-driven ephemeral spawning** — when any agent's outbound text matches a configured regex, spawn an ephemeral agent with an interpolated task (and an optional setup shell step, e.g. to create a worktree).
 
+On top of routing, the hub also grows **intelligence with minimal human babysitting**:
+
+- **Recent-message context** — a per-conversation cache the hub injects (where relevant) so a cold/just-switched agent is caught up on what was just said.
+- **Memory vault** — an Obsidian-style `.md` note vault (global / per-user / per-agent / per-channel) that agents read via relevant-context injection and write via `remember`/`recall` tools, plus a background **distiller** that turns idle conversations into notes automatically. Retrieval is **fully local** (an in-process embedding model for recall + a small Claude *librarian* for precision) — no extra API key.
+- **Overseer** — an opt-in "outer agent" that judges each finished turn against the goal and keeps **prodding the agent until the task is actually done**, bounded by hard iteration/wallclock caps.
+
 > **Status:** implemented. All unit tests pass (`bun test`) and `bun run typecheck` is clean. The agent transport runs on the documented stream-json protocol (the earlier experimental `--channels` mechanism was removed when current Claude CLIs dropped its `command:` form); the stdin→reply + MCP-card round-trip is proven against a real `claude` via `scripts/smoke-streamjson.ts`. Manual full Discord end-to-end (a live bot in a guild) is the remaining check.
 
 ## Why a hub?
@@ -100,6 +106,29 @@ These optional arrays in `config/hub.config.json` wire the hub to the outside wo
 - **`spawnTriggers[]`** — `{ pattern, agent, taskTemplate, setupCommand?, teardownCommand? }`. When any agent's outbound text matches the regex `pattern`, an ephemeral `agent` is spawned with task = `taskTemplate` interpolated (`$1`,`$2`… = capture groups, `$jobId` = a generated id). If `setupCommand` is set, it runs first as a shell command (same interpolation) — e.g. to create a worktree; if `teardownCommand` is set, it runs after the spawned agent's process exits — e.g. to remove that worktree.
 - **`deployApproverUserId`** — only this Discord user may press buttons in the `deploy:` namespace.
 
+## Memory, context & the overseer
+
+These make the hub more autonomous. All extra model calls reuse **Claude Code auth** (the router/librarian/distiller/judge are `claude -p` passes) and the embedder is a **local in-process model** — there is **no new API key or external service**.
+
+**Recent-message context.** The hub keeps a per-conversation ring buffer (`contextCacheSize`, default 20), persisted as JSONL under `<stateDir>/cache/`. It injects a compact "recent conversation" block into a turn per the agent's `injectContext` policy: `onSwitch` (default — catch a newly-bound agent up), `always` (every cold ephemeral spawn), or `never`. Quote-replies are captured and inlined too (Discord reply references don't appear in fetched history).
+
+**Memory vault.** An Obsidian-style `.md` note vault under `memoryDir` (default `<stateDir>/memory/`), with four scopes as folders: `global/`, `users/<id>/`, `agents/<name>/`, `channels/<id>/`. Notes are plain markdown with YAML front-matter (`title, scope, tags, created, updated, source`) and `[[wikilinks]]` — human- and Obsidian-editable. Agents with `useMemory: true` get relevant notes injected each turn, each stamped with an **as-of date** so stale specifics get re-verified.
+
+- **Retrieval is two-stage and local by default.** A local sentence-transformer (`@huggingface/transformers`, default `Xenova/all-MiniLM-L6-v2`, loaded lazily) embeds notes into a scope-filtered cosine index; a small Claude **librarian** then ranks the recalled candidates for precision and scope/recency. Only the librarian-selected note bodies are injected (≤5), and recall is capped at ~20 candidates — so **injected context stays bounded regardless of vault size**. Each vector is stamped with the embedding-model version, so swapping models re-embeds cleanly instead of mixing vector spaces.
+- **Hosted backend (optional).** The recall index and embedder both sit behind interfaces, selected by `memory` in `hub.config.json`: `index: "local" | "qdrant"` and `embedder: "local" | "openai"`. **Qdrant** (`memory.qdrant: { url, apiKeyEnv?, collection? }`) provides a hosted/self-hosted vector store; the embedder can target any **OpenAI-compatible `/embeddings` endpoint** (`memory.openai: { baseUrl, apiKeyEnv?, model }`) — OpenAI, Together, or a self-hosted TEI/Ollama. Keys come only from the named env var. Default is fully local, no secrets.
+- **Formation is two-way.** Agents write/read explicitly via the shim's `remember` / `recall` tools (scope defaults to the agent's own folder), **and** a background **distiller** turns an idle conversation (`distillIdleMs`) into note upserts — non-blocking, never on the hot path.
+- **Dedup is entity-aware and conservative.** After any write, a background pass finds same-scope near-duplicates and gates a merge on an LLM "same fact, or distinct facts about different entities?" check — it **never merges on cosine alone**, and fails safe to "distinct" on uncertainty. Distiller-generated dups auto-merge (the staler note is dropped); **agent-authored notes are sacred** — never overwritten or deleted, only flagged to `<memoryDir>/.dedup-review.jsonl` for human review. The distiller also refuses to overwrite a hand-written note at a colliding title.
+
+**Access-weighting & the gardener.** Each note tracks usage (an `.access.json` sidecar — hits when a note is actually injected/recalled), with an exponentially-decayed importance so once-hot notes cool. When `gardener` is enabled, recall is re-ranked by importance and the top notes for the active scopes are **injected proactively** (a "hot set") so load-bearing facts surface without an explicit `recall`. A periodic background **gardener** then does whole-vault hygiene: cross-scope dedup, staleness flags, and **budgeted archival** of cold distiller notes (reversible; agent-authored notes are never archived/deleted, only flagged). Config: `gardener: { enabled, importanceWeight, hotSetSize, decayHalfLifeMs, staleAfterMs, archiveAfterMs, scopeBudget }`; off by default (access hits are still recorded so the signal is ready when you enable it). See [`docs/superpowers/specs/2026-06-13-vault-gardener-design.md`](docs/superpowers/specs/2026-06-13-vault-gardener-design.md).
+
+**The overseer.** An opt-in per-agent loop (`runtime.overseer: { enabled, maxIterations?, maxWallclockMs?, model? }`). On each finished turn, a judge scores the agent's reply against the goal and returns `done` / `working` / `blocked`:
+
+- `done` → ship the reply (plain chat and Q&A always resolve here, so it never loops on conversation).
+- `working` → swallow the intermediate reply and re-prod the agent with a specific nudge, until done or the iteration/wallclock caps are hit (then it ships the last reply with a footer).
+- `blocked` → ship the reply (the question to the human) and stop. The judge reserves `blocked` for **genuine** human dependencies (irreversible/destructive actions, missing info only a human has, high-stakes ambiguous calls); if the agent is merely being over-cautious it returns `working` with a nudge to **proceed with a sensible default** — biasing toward autonomous progress.
+
+Caps + fail-open (a garbled judge ships the reply rather than looping) bound cost and runaway loops. The example `help` (persistent, warm) and `help-quick` (ephemeral, parallel one-shots) agents in `config/agents.example.json` show the dual-mode help pattern; `worker` shows an `overseer` block.
+
 ## Status of features
 
 **Working** (covered by the passing unit tests + the real-CLI smoke check):
@@ -118,14 +147,21 @@ These optional arrays in `config/hub.config.json` wire the hub to the outside wo
 - **Gated button actions** (`NotifyRouter`): card-button clicks route back to the originating agent via its stdin; only allowlisted users may press, and the **`deploy:` namespace is approver-only** (`deployApproverUserId`).
 - **Daily scheduler** (`schedules[]`): UTC-hour message delivery to an agent, once per day per schedule id.
 - **Config-driven ephemeral spawning** (`spawnTriggers[]`): an outbound-text regex spawns an ephemeral agent with an interpolated task, optional setup + teardown shell steps; spawned agents post cards and receive button clicks like any agent.
+- **Recent-message context cache** + per-agent `injectContext` policy; quote-reply capture.
+- **Memory vault** (`MemoryStore`/`MemoryRetriever`): four-scope Obsidian-style notes, recall via a local-embedding OR hosted (Qdrant + OpenAI-compatible) backend + Claude librarian, `remember`/`recall` shim tools, background distiller, and entity-aware dedup with protected agent-authored notes.
+- **Access-weighting & gardener** (`accessStore.ts`/`gardener.ts`): decayed usage importance, importance-weighted recall + proactive hot-set injection, and a periodic whole-vault dedup/stale/archival pass (opt-in via `gardener`).
+- **Overseer** (`overseer.ts`): opt-in keep-prodding-until-done loop with `done`/`working`/`blocked` verdicts, autonomy bias, and iteration/wallclock caps.
 
 **Known gaps:**
 
 - **Manual full Discord end-to-end** (a live bot in a guild) is the remaining check; the transport itself is proven via the smoke script.
 - **Idle GC of spawned workers**: workers are torn down when their process exits; a long-idle-but-alive worker is not yet reaped on a timer.
+- **Local embedder runtime**: the embedding model downloads on first run and needs the `@huggingface/transformers` native runtime; until it's warmed, memory recall is empty (writes/distillation still work and index as soon as the model loads). Or point `memory.embedder`/`memory.index` at a hosted backend (OpenAI-compatible embeddings + Qdrant) — see above.
+- **Archived-note deep recall**: archived notes have their vector dropped, so they're excluded from recall (and browsable on disk under `<scope>/archive/`); searching archived notes on demand and auto-restoring on a hit is future work.
 
 ## Docs
 
 - Spec: [`docs/superpowers/specs/2026-06-02-switchboard-design.md`](docs/superpowers/specs/2026-06-02-switchboard-design.md)
 - Plan: [`docs/superpowers/plans/2026-06-02-switchboard.md`](docs/superpowers/plans/2026-06-02-switchboard.md)
 - stream-json transport — Spec: [`docs/superpowers/specs/2026-06-03-streamjson-transport-design.md`](docs/superpowers/specs/2026-06-03-streamjson-transport-design.md), Plan: [`docs/superpowers/plans/2026-06-03-streamjson-transport.md`](docs/superpowers/plans/2026-06-03-streamjson-transport.md)
+- Overseer & memory — Spec: [`docs/superpowers/specs/2026-06-13-overseer-memory-design.md`](docs/superpowers/specs/2026-06-13-overseer-memory-design.md), Plan: [`docs/superpowers/plans/2026-06-13-overseer-memory.md`](docs/superpowers/plans/2026-06-13-overseer-memory.md)

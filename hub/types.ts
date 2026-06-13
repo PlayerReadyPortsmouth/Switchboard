@@ -8,6 +8,7 @@ export interface InboundMessage {
   ts: string            // ISO timestamp
   isDM: boolean
   attachments?: { name: string; type: string; size: number }[]
+  quote?: { user: string; content: string }   // the message this one quote-replies to
 }
 
 /** A text-input popup a button can open instead of acting immediately. */
@@ -57,6 +58,15 @@ export interface AgentAccess {
   users?: string[]      // user snowflakes
 }
 
+/** Per-agent overseer policy: keep prodding the agent until a judge says the
+ *  task is done, bounded by hard caps. Opt-in (absent ⇒ disabled). */
+export interface OverseerPolicy {
+  enabled: boolean
+  maxIterations?: number   // default 4 — re-prods before giving up
+  maxWallclockMs?: number  // default 600000 — total time budget per goal
+  model?: string           // judge model; defaults to hub.overseerModel
+}
+
 export interface AgentRuntime {
   cwd: string
   model?: string
@@ -64,6 +74,9 @@ export interface AgentRuntime {
   claudeArgs?: string[]        // extra flags appended to the agent's `claude` invocation
   appendSystemPrompt?: string
   resumable?: boolean        // persistent agent: persist + --resume its CLI session
+  useMemory?: boolean        // inject relevant memory-vault notes as context
+  injectContext?: "always" | "onSwitch" | "never"  // recent-message cache injection (default onSwitch)
+  overseer?: OverseerPolicy  // opt-in autonomous "keep prodding until done" loop
 }
 
 export interface AgentConfig {
@@ -165,4 +178,35 @@ export interface HubConfig {
   deployApproverUserId?: string  // Discord user id allowed to press deploy:* buttons
   gatedActions?: GatedAction[]   // hub-side button handlers that run shell commands
   channelAgents?: ChannelAgent[]  // channels pinned to a specific agent
+  // Memory & context (all optional; sensible defaults applied in index.ts).
+  memoryDir?: string             // Obsidian-style note vault root (default <stateDir>/memory)
+  contextCacheSize?: number      // recent-message ring-buffer cap per conversation (default 20)
+  distillIdleMs?: number         // idle gap before a conversation is distilled to notes (default 600000)
+  librarianModel?: string        // model that ranks recalled notes for relevance (default routerModel)
+  distillerModel?: string        // model that distills a conversation into notes
+  overseerModel?: string         // default judge model for overseen agents
+  memory?: MemoryBackend         // recall index + embedder backend selection (default: all local)
+  gardener?: GardenerConfig      // access-weighting + periodic vault hygiene (default: off)
+}
+
+/** Access-weighted recall + the periodic vault-tending pass. Absent ⇒ recall
+ *  stays pure-cosine and no gardening runs (access hits are still recorded). */
+export interface GardenerConfig {
+  enabled?: boolean              // run the periodic gardener pass
+  intervalMs?: number            // gardener cadence (default 6h)
+  importanceWeight?: number      // usage boost on recall rank (default 0.15 when present)
+  hotSetSize?: number            // notes injected proactively by importance (default 3 when present)
+  decayHalfLifeMs?: number       // importance decay half-life (default 14d)
+  staleAfterMs?: number          // age past which a note is flagged stale (default 30d)
+  archiveAfterMs?: number        // cold-for-this-long ⇒ archive candidate (default 90d)
+  scopeBudget?: number           // notes per scope before archival kicks in (default 200)
+}
+
+/** Selects the memory recall index and embedder. Defaults are fully local
+ *  (in-process ONNX embeddings + in-memory cosine index, no secrets). */
+export interface MemoryBackend {
+  index?: "local" | "qdrant"     // default local
+  embedder?: "local" | "openai"  // default local
+  qdrant?: { url: string; apiKeyEnv?: string; collection?: string }
+  openai?: { baseUrl: string; apiKeyEnv?: string; model: string }  // OpenAI-compatible /embeddings
 }

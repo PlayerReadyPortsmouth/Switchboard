@@ -1,5 +1,5 @@
 import { join } from "path"
-import { unlinkSync } from "fs"
+import { unlinkSync, appendFileSync, mkdirSync } from "fs"
 import { config as loadEnv } from "./env"
 import { loadConfigs } from "./config"
 import { BaseGate } from "./baseGate"
@@ -19,6 +19,20 @@ import { CardLifecycle } from "./cardLifecycle"
 import { matchGatedAction, requiresApprover } from "./gatedActions"
 import { isDeployAuthorized } from "./deployGate"
 import { clearReactionAgent } from "./channelPin"
+import { MessageCache } from "./messageCache"
+import { enrich, foldQuote } from "./enrich"
+import { expandHome } from "./config"
+import { MemoryStore, type Scope } from "./memory/store"
+import { VectorIndex } from "./memory/vectorIndex"
+import type { MemoryIndex } from "./memory/memoryIndex"
+import { TransformersEmbedder, type Embedder } from "./memory/embedder"
+import { HttpEmbedder } from "./memory/httpEmbedder"
+import { QdrantIndex } from "./memory/qdrantIndex"
+import { MemoryRetriever } from "./memory/retriever"
+import { AccessStore } from "./memory/accessStore"
+import { Gardener } from "./memory/gardener"
+import { distill } from "./memory/distiller"
+import { Overseer } from "./overseer"
 import type { AgentConfig, AgentReply, SpawnTrigger, SpawnCardUpdate, CardSpec } from "./types"
 
 const CONFIG_DIR = process.env.SWITCHBOARD_CONFIG ?? join(import.meta.dir, "..", "config")
@@ -42,6 +56,93 @@ const notifyRouter = new NotifyRouter()
 // key → live transport (persistent agent name, or jobId for spawned workers).
 const transports = new Map<string, StreamJsonTransport>()
 
+// Recent-message cache (per Discord channel), persisted so it survives restarts
+// and feeds the background distiller. Source for "where relevant" context injection.
+const messageCache = new MessageCache(hub.contextCacheSize ?? 20, join(hub.stateDir, "cache"))
+
+// Memory vault: Obsidian-style .md notes + local-embedding recall + Claude
+// librarian. Reindexed once at boot; the embedder loads its model lazily.
+const memoryDir = hub.memoryDir ? expandHome(hub.memoryDir) : join(hub.stateDir, "memory")
+const memoryStore = new MemoryStore(memoryDir)
+
+// Backend selection (default: fully local, no secrets). Hosted options behind
+// the same seams: Qdrant for recall, an OpenAI-compatible endpoint for embeddings.
+const mem = hub.memory ?? {}
+const embedder: Embedder = mem.embedder === "openai" && mem.openai
+  ? new HttpEmbedder({
+      baseUrl: mem.openai.baseUrl, model: mem.openai.model,
+      apiKey: mem.openai.apiKeyEnv ? process.env[mem.openai.apiKeyEnv] : undefined,
+    })
+  : new TransformersEmbedder()
+const vectorIndex: MemoryIndex = mem.index === "qdrant" && mem.qdrant
+  ? new QdrantIndex({
+      url: mem.qdrant.url, collection: mem.qdrant.collection,
+      apiKey: mem.qdrant.apiKeyEnv ? process.env[mem.qdrant.apiKeyEnv] : undefined,
+    })
+  : new VectorIndex(join(memoryDir, ".index", "vectors.json"))
+// Usage signal: records access hits, weights recall, drives the proactive hot set.
+const garden = hub.gardener ?? {}
+const accessStore = new AccessStore(join(memoryDir, ".access.json"), garden.decayHalfLifeMs)
+const memoryRetriever = new MemoryRetriever({
+  store: memoryStore, index: vectorIndex, embedder,
+  run: makeRouterRunner(), librarianModel: hub.librarianModel ?? hub.routerModel,
+  access: accessStore,
+  importanceWeight: garden.importanceWeight ?? (garden.enabled ? 0.15 : 0),
+  hotSetSize: garden.hotSetSize ?? (garden.enabled ? 3 : 0),
+})
+void memoryRetriever.reindexAll().catch((e) => process.stderr.write(`memory: reindex failed: ${e}\n`))
+
+/** Background dedup for a just-written note: auto-merge distiller dups, append
+ *  suspected protected dups to a review log (never silently touch hand-written notes). */
+function runDedup(path: string): void {
+  void (async () => {
+    try {
+      const { removed, flagged } = await memoryRetriever.dedupe(memoryStore.read(path))
+      for (const r of removed) process.stderr.write(`memory: deduped (merged away) ${r}\n`)
+      if (flagged.length) {
+        mkdirSync(memoryDir, { recursive: true })
+        for (const f of flagged) {
+          appendFileSync(join(memoryDir, ".dedup-review.jsonl"), JSON.stringify({ ts: new Date().toISOString(), ...f }) + "\n")
+        }
+      }
+    } catch (e) { process.stderr.write(`memory: dedup failed: ${e}\n`) }
+  })()
+}
+
+// Per-conversation activity clock — drives the background distiller's idle sweep.
+const convActivity = new Map<string, number>()
+const distilledAt = new Map<string, number>()
+const distillerRunner = makeRouterRunner()
+
+/** Distill one idle conversation's recent cache into memory-vault notes. */
+async function runDistill(convId: string): Promise<void> {
+  const msgs = messageCache.recent(convId)
+  if (msgs.length < 2) return
+  const conversation = msgs
+    .map((m) => `[${m.role === "agent" ? (m.agent ?? "agent") : (m.user ?? "user")}] ${m.text}`)
+    .join("\n")
+  const userIds = [...new Set(msgs.map((m) => m.userId).filter((u): u is string => !!u))]
+  const scopes = ["global", `channels/${convId}`, ...userIds.map((u) => `users/${u}`)] as Scope[]
+  const existing = memoryStore.list(scopes).map((n) => ({ scope: n.scope, title: n.title }))
+  const upserts = await distill(
+    { conversation, existing }, distillerRunner, hub.distillerModel ?? hub.routerModel,
+  )
+  for (const u of upserts) {
+    try {
+      // Protected: never let the distiller overwrite a hand-written (agent-authored) note.
+      const target = memoryStore.notePath(u.scope as Scope, u.title)
+      try {
+        if (memoryStore.read(target).source.startsWith("agent:")) {
+          process.stderr.write(`distill: skipping protected note ${target}\n`); continue
+        }
+      } catch {}
+      const path = memoryStore.write(u.scope as Scope, { title: u.title, tags: u.tags, body: u.body, source: "distiller" })
+      await memoryRetriever.indexNote(memoryStore.read(path)).catch(() => {})
+      runDedup(path)
+    } catch (e) { process.stderr.write(`distill: write failed: ${e}\n`) }
+  }
+}
+
 const cardRegistry = new CardRegistry()
 const cardLifecycle = new CardLifecycle(cardRegistry, {
   sendCard: (chatId, card) => gateway.sendCard(chatId, card),
@@ -58,9 +159,24 @@ const cardLifecycle = new CardLifecycle(cardRegistry, {
 /** Build (but do not start) a StreamJsonTransport and register it under `key`. */
 function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonTransport {
   const socketPath = join(hub.stateDir, `${key}.sock`)
+  const socket = new ShimSocketServer(socketPath)
+  // Agent-initiated memory: `remember` writes a note (scope defaults to this
+  // agent's own folder) and indexes it; `recall` searches and returns notes.
+  socket.onRemember(({ scope, title, tags, body }) => {
+    const s = (scope && /^(global$|users\/|agents\/|channels\/)/.test(scope) ? scope : `agents/${name}`) as Scope
+    try {
+      const path = memoryStore.write(s, { title, tags, body, source: `agent:${name}` })
+      void memoryRetriever.indexNote(memoryStore.read(path)).then(() => runDedup(path)).catch(() => {})
+    } catch (e) { process.stderr.write(`memory: remember failed: ${e}\n`) }
+  })
+  socket.onRecall(async ({ query, scopes }) => {
+    const sc = (scopes?.length ? scopes : ["global", `agents/${name}`]) as Scope[]
+    try { return (await memoryRetriever.relevant(query, sc)).notes.map((n) => ({ title: n.title, body: n.body })) }
+    catch { return [] }
+  })
   const t = new StreamJsonTransport(name, cfg, {
     spawner,
-    socket: new ShimSocketServer(socketPath),
+    socket,
     shimPath: SHIM_PATH,
     socketPath,
     mcpConfigPath: join(hub.stateDir, `${key}.mcp.json`),
@@ -92,6 +208,17 @@ async function onAgentReply(reply: AgentReply, key: string): Promise<void> {
       const m = trig.re.exec(reply.text)
       if (m) { await runSpawnTrigger(trig, m as unknown as string[], reply.chatId); return }
     }
+    // Overseer: for opt-in agents, judge the turn against the goal and either
+    // swallow it (a nudge was delivered → another turn coming) or ship it.
+    if (agents[reply.agent]?.runtime.overseer?.enabled) {
+      const v = await overseer.intercept(reply.agent, reply.chatId, reply.text)
+      if (!v.forward) return
+      if (v.footer) reply.text = `${reply.text}\n\n${v.footer}`
+    }
+    messageCache.record(reply.chatId, {
+      role: "agent", text: reply.text, ts: Date.now(), agent: reply.agent,
+    })
+    convActivity.set(reply.chatId, Date.now())
   }
   await gateway.sendReply(reply, agents[reply.agent])
 }
@@ -207,6 +334,16 @@ function deliverToAgent(agentName: string, channelId: string, idTag: string, con
   if (!ok) process.stderr.write(`deliver: agent "${agentName}" unavailable; skipping\n`)
 }
 
+// Overseer: the "keep prodding until done" loop for opt-in agents. Nudges are
+// delivered back to the agent as a synthesized system message (bypassing routing).
+const overseer = new Overseer({
+  run: makeRouterRunner(),
+  defaultModel: hub.overseerModel ?? hub.routerModel,
+  policyFor: (agent) => agents[agent]?.runtime.overseer,
+  deliverNudge: (agent, convId, text) => deliverToAgent(agent, convId, "overseer:nudge", text),
+  recentConversation: (convId) => messageCache.render(convId),
+})
+
 const baseGate = new BaseGate(join(hub.stateDir, "access.json"))
 
 // Only allowlisted users may press card buttons.
@@ -270,6 +407,37 @@ setInterval(() => {
   }
 }, 60_000).unref()
 
+// Background distiller: sweep for conversations idle past distillIdleMs and turn
+// their recent cache into memory notes — once per idle period (until new activity).
+const DISTILL_IDLE_MS = hub.distillIdleMs ?? 600_000
+setInterval(() => {
+  const now = Date.now()
+  for (const [convId, ts] of convActivity) {
+    if (now - ts < DISTILL_IDLE_MS) continue
+    if ((distilledAt.get(convId) ?? 0) >= ts) continue   // already distilled this idle period
+    distilledAt.set(convId, now)
+    void runDistill(convId).catch((e) => process.stderr.write(`distill: ${e}\n`))
+  }
+}, 60_000).unref()
+
+// Periodic vault gardener: whole-vault dedup, staleness flags, budgeted archival.
+if (garden.enabled) {
+  const gardener = new Gardener({
+    store: memoryStore, index: vectorIndex, access: accessStore,
+    dedupe: (note) => memoryRetriever.dedupe(note),
+    staleAfterMs: garden.staleAfterMs, archiveAfterMs: garden.archiveAfterMs, scopeBudget: garden.scopeBudget,
+  })
+  const runGarden = () => gardener.run().then((r) => {
+    if (r.merged.length || r.archived.length || r.stale.length || r.flaggedDups.length) {
+      process.stderr.write(`gardener: merged=${r.merged.length} archived=${r.archived.length} stale=${r.stale.length} flagged=${r.flaggedDups.length}\n`)
+    }
+    for (const f of r.flaggedDups) {
+      try { appendFileSync(join(memoryDir, ".dedup-review.jsonl"), JSON.stringify({ ts: new Date().toISOString(), ...f }) + "\n") } catch {}
+    }
+  }).catch((e) => process.stderr.write(`gardener: ${e}\n`))
+  setInterval(() => void runGarden(), garden.intervalMs ?? 6 * 60 * 60_000).unref()
+}
+
 const orchestrator = new Orchestrator(hub, agents, {
   baseGate: (userId, chatId, isDM) => baseGate.gate(userId, chatId, isDM, Date.now()),
   resolvePermission: () => false,   // tool permissions handled by --dangerously-skip-permissions
@@ -279,6 +447,32 @@ const orchestrator = new Orchestrator(hub, agents, {
   dispatch: (agent, key, inbound) => dispatcher.dispatch(agent, key, inbound),
   isAvailable: (agent) => dispatcher.isAvailable(agent),
   sendPlain: (chatId, text) => gateway.sendPlain(chatId, text),
+  prepareDispatch: async ({ agent, inbound, isSwitch }) => {
+    const rt = agents[agent]?.runtime
+    // A genuine user-initiated turn (re)sets the overseer goal for this agent.
+    if (rt?.overseer?.enabled) overseer.begin(agent, inbound.chatId, inbound.content)
+    // Render context from PRIOR turns, then record this inbound so it's available
+    // next turn (and to the distiller) without duplicating it in this turn's block.
+    const policy = rt?.injectContext ?? "onSwitch"
+    const wantContext = policy === "always" || (policy === "onSwitch" && isSwitch)
+    const context = wantContext ? messageCache.render(inbound.chatId) : ""
+    // Fold any quote-reply target into the live message so the agent sees it.
+    const live = foldQuote(inbound.content, inbound.quote)
+    let memory = ""
+    if (rt?.useMemory) {
+      const scopes: Scope[] = [
+        "global", `users/${inbound.userId}`, `agents/${agent}`, `channels/${inbound.chatId}`,
+      ]
+      try { memory = (await memoryRetriever.relevant(live, scopes)).render } catch {}
+    }
+    messageCache.record(inbound.chatId, {
+      role: "user", text: live, ts: Date.parse(inbound.ts) || Date.now(),
+      user: inbound.user, userId: inbound.userId,
+    })
+    convActivity.set(inbound.chatId, Date.now())
+    if (!context && !memory && live === inbound.content) return inbound
+    return { ...inbound, content: enrich(live, { memory, context }) }
+  },
 })
 
 // Commands: an inbound whose trimmed content equals `match` delivers `message`

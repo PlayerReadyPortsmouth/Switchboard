@@ -55,3 +55,25 @@ st("dispatches update and finish wire messages to their callbacks", async () => 
   se(finished).toBe(true)
   sock.end(); await srv.close()
 })
+
+st("remember reaches the callback; recall replies with notes keyed by id", async () => {
+  const path = join(tmpdir(), `sbtest-mem-${process.pid}-${globalThis.performance.now()}.sock`)
+  const srv = new SSS(path)
+  let remembered: any = null
+  srv.onRemember((r) => { remembered = r })
+  srv.onRecall(async (q) => [{ title: `for:${q.query}`, body: "B" }])
+  await srv.listen()
+
+  const results: any[] = []
+  const dec = new (await import("../hub/framing")).LineDecoder()
+  const sock = await Bun.connect({ unix: path, socket: {
+    data(_s, d) { for (const o of dec.push(d.toString())) results.push(o) },
+  } })
+  sock.write(enc({ t: "remember", scope: "global", title: "T", body: "B" }))
+  sock.write(enc({ t: "recall", id: "q1", query: "alpha", scopes: ["global"] }))
+  await Bun.sleep(80)
+
+  se(remembered).toEqual({ scope: "global", title: "T", tags: undefined, body: "B" })
+  se(results[0]).toEqual({ t: "recall_result", id: "q1", notes: [{ title: "for:alpha", body: "B" }] })
+  sock.end(); await srv.close()
+})

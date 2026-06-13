@@ -154,13 +154,24 @@ export class Gateway {
   async start(token: string): Promise<void> {
     this.client.on("messageCreate", (msg: Message) => {
       if (msg.author.bot) return
-      this.onMessage({
-        chatId: msg.channelId, messageId: msg.id, userId: msg.author.id,
-        user: msg.author.username, content: msg.content,
-        ts: msg.createdAt.toISOString(), isDM: msg.channel.type === ChannelType.DM,
-        attachments: [...msg.attachments.values()].map(a => ({
-          name: a.name ?? a.id, type: a.contentType ?? "unknown", size: a.size })),
-      })
+      void (async () => {
+        // Capture a quote-reply target — it isn't visible in fetched history.
+        let quote: { user: string; content: string } | undefined
+        if (msg.reference?.messageId) {
+          try {
+            const ref = await msg.fetchReference()
+            if (ref && !ref.author.bot && ref.content) quote = { user: ref.author.username, content: ref.content }
+          } catch {}
+        }
+        this.onMessage({
+          chatId: msg.channelId, messageId: msg.id, userId: msg.author.id,
+          user: msg.author.username, content: msg.content,
+          ts: msg.createdAt.toISOString(), isDM: msg.channel.type === ChannelType.DM,
+          attachments: [...msg.attachments.values()].map(a => ({
+            name: a.name ?? a.id, type: a.contentType ?? "unknown", size: a.size })),
+          quote,
+        })
+      })()
     })
     this.client.on("interactionCreate", async (interaction: Interaction) => {
       // Modal submissions: collect fields and relay to the owning agent.

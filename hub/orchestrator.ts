@@ -19,6 +19,11 @@ export interface OrchestratorDeps {
   dispatch: (agent: string, chatKey: string, inbound: InboundMessage) => boolean
   isAvailable: (agent: string) => boolean
   sendPlain: (chatId: string, text: string) => Promise<void>
+  /** Optional: enrich the inbound (recent-message context + memory) right before
+   *  dispatch. Returns the message to actually deliver. Absent ⇒ deliver as-is. */
+  prepareDispatch?: (ctx: {
+    agent: string; key: string; inbound: InboundMessage; isSwitch: boolean
+  }) => Promise<InboundMessage>
 }
 
 export class Orchestrator {
@@ -59,7 +64,7 @@ export class Orchestrator {
         return
       }
       this.bindings.set(key, { agent: pinned, sessionId: this.bindings.get(key)?.sessionId, lastActive: Date.parse(inbound.ts) })
-      this.deps.dispatch(pinned, key, inbound)
+      await this.dispatchEnriched(pinned, key, inbound, bound !== pinned)
       return
     }
 
@@ -87,7 +92,19 @@ export class Orchestrator {
       return
     }
     this.bindings.set(key, { agent, sessionId: this.bindings.get(key)?.sessionId, lastActive: Date.parse(inbound.ts) })
-    this.deps.dispatch(agent, key, inbound)
+    await this.dispatchEnriched(agent, key, inbound, bound !== agent)
+  }
+
+  /** Dispatch after an optional context/memory enrichment pass. `isSwitch` is
+   *  true when this turn changed (or freshly bound) the agent — the signal the
+   *  `onSwitch` injection policy keys off, so a newly-bound agent gets caught up. */
+  private async dispatchEnriched(
+    agent: string, key: string, inbound: InboundMessage, isSwitch: boolean,
+  ): Promise<void> {
+    const toSend = this.deps.prepareDispatch
+      ? await this.deps.prepareDispatch({ agent, key, inbound, isSwitch })
+      : inbound
+    this.deps.dispatch(agent, key, toSend)
   }
 
   private async handleControl(
