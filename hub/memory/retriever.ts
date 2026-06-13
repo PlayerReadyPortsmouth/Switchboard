@@ -3,6 +3,7 @@ import type { Embedder } from "./embedder"
 import type { MemoryStore, Note, Scope } from "./store"
 import type { VectorIndex } from "./vectorIndex"
 import { selectNotes, type Candidate } from "./librarian"
+import { entityGate, dedupAction } from "./dedup"
 
 export interface RetrieverOpts {
   store: MemoryStore
@@ -12,6 +13,14 @@ export interface RetrieverOpts {
   librarianModel: string
   recallLimit?: number       // candidates pulled by vector recall (default 20)
   finalLimit?: number        // notes injected after the librarian pass (default 5)
+  dedupThreshold?: number    // cosine ≥ this triggers an entity-gate check (default 0.86)
+  dedupModel?: string        // entity-gate model (default librarianModel)
+}
+
+/** Outcome of a background dedup pass over one just-written note. */
+export interface DedupResult {
+  removed: string[]                                   // distiller dups auto-merged away
+  flagged: { note: string; duplicate: string }[]      // protected dups for human review
 }
 
 function firstLines(body: string, max = 200): string {
@@ -48,6 +57,38 @@ export class MemoryRetriever {
     const vecs = await this.o.embedder.embed(notes.map(embedText))
     const version = this.o.embedder.version
     notes.forEach((n, i) => { if (vecs[i]) this.o.index.set(n.path, n.scope, vecs[i], version) })
+  }
+
+  /** Background dedup for a just-written note. Finds same-scope near-neighbours,
+   *  gates each on an LLM "same fact vs distinct entities?" check (cosine alone
+   *  never merges), then: auto-merges distiller dups (drops the staler note),
+   *  and only FLAGS dups when a protected (agent-authored) note is involved. */
+  async dedupe(note: Note): Promise<DedupResult> {
+    const threshold = this.o.dedupThreshold ?? 0.86
+    const model = this.o.dedupModel ?? this.o.librarianModel
+    const removed: string[] = []
+    const flagged: { note: string; duplicate: string }[] = []
+    const [vec] = await this.o.embedder.embed([embedText(note)])
+    if (!vec) return { removed, flagged }
+    const hits = this.o.index
+      .search(vec, [note.scope], 10, this.o.embedder.version)
+      .filter((h) => h.path !== note.path && h.score >= threshold)
+    for (const h of hits) {
+      let other: Note
+      try { other = this.o.store.read(h.path) } catch { continue }
+      if ((await entityGate(note, other, this.o.run, model)) !== "same") continue
+      if (dedupAction(note.source, other.source) === "flag") {
+        flagged.push({ note: note.path, duplicate: other.path })   // never mutate protected notes
+        continue
+      }
+      // Both distiller-generated → keep the most-recently-updated, drop the staler.
+      const drop = (note.updated || "") >= (other.updated || "") ? other : note
+      this.o.store.remove(drop.path)
+      this.o.index.remove(drop.path)
+      removed.push(drop.path)
+      if (drop.path === note.path) break   // the note we were deduping is gone
+    }
+    return { removed, flagged }
   }
 
   /** Notes relevant to `query` within `scopes`, plus a rendered injection block. */

@@ -106,6 +106,8 @@ export class MemoryStore {
 
   read(path: string): Note { return parseNote(path, readFileSync(path, "utf8")) }
 
+  remove(path: string): void { try { unlinkSync(path) } catch {} }
+
   list(scopes: Scope[]): Note[] {
     const out: Note[] = []
     for (const scope of scopes) {

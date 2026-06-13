@@ -1,5 +1,5 @@
 import { join } from "path"
-import { unlinkSync } from "fs"
+import { unlinkSync, appendFileSync, mkdirSync } from "fs"
 import { config as loadEnv } from "./env"
 import { loadConfigs } from "./config"
 import { BaseGate } from "./baseGate"
@@ -66,6 +66,23 @@ const memoryRetriever = new MemoryRetriever({
 })
 void memoryRetriever.reindexAll().catch((e) => process.stderr.write(`memory: reindex failed: ${e}\n`))
 
+/** Background dedup for a just-written note: auto-merge distiller dups, append
+ *  suspected protected dups to a review log (never silently touch hand-written notes). */
+function runDedup(path: string): void {
+  void (async () => {
+    try {
+      const { removed, flagged } = await memoryRetriever.dedupe(memoryStore.read(path))
+      for (const r of removed) process.stderr.write(`memory: deduped (merged away) ${r}\n`)
+      if (flagged.length) {
+        mkdirSync(memoryDir, { recursive: true })
+        for (const f of flagged) {
+          appendFileSync(join(memoryDir, ".dedup-review.jsonl"), JSON.stringify({ ts: new Date().toISOString(), ...f }) + "\n")
+        }
+      }
+    } catch (e) { process.stderr.write(`memory: dedup failed: ${e}\n`) }
+  })()
+}
+
 // Per-conversation activity clock — drives the background distiller's idle sweep.
 const convActivity = new Map<string, number>()
 const distilledAt = new Map<string, number>()
@@ -86,8 +103,16 @@ async function runDistill(convId: string): Promise<void> {
   )
   for (const u of upserts) {
     try {
+      // Protected: never let the distiller overwrite a hand-written (agent-authored) note.
+      const target = memoryStore.notePath(u.scope as Scope, u.title)
+      try {
+        if (memoryStore.read(target).source.startsWith("agent:")) {
+          process.stderr.write(`distill: skipping protected note ${target}\n`); continue
+        }
+      } catch {}
       const path = memoryStore.write(u.scope as Scope, { title: u.title, tags: u.tags, body: u.body, source: "distiller" })
       await memoryRetriever.indexNote(memoryStore.read(path)).catch(() => {})
+      runDedup(path)
     } catch (e) { process.stderr.write(`distill: write failed: ${e}\n`) }
   }
 }
@@ -115,7 +140,7 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonT
     const s = (scope && /^(global$|users\/|agents\/|channels\/)/.test(scope) ? scope : `agents/${name}`) as Scope
     try {
       const path = memoryStore.write(s, { title, tags, body, source: `agent:${name}` })
-      void memoryRetriever.indexNote(memoryStore.read(path)).catch(() => {})
+      void memoryRetriever.indexNote(memoryStore.read(path)).then(() => runDedup(path)).catch(() => {})
     } catch (e) { process.stderr.write(`memory: remember failed: ${e}\n`) }
   })
   socket.onRecall(async ({ query, scopes }) => {
