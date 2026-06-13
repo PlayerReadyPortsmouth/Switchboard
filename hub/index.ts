@@ -20,7 +20,7 @@ import { matchGatedAction, requiresApprover } from "./gatedActions"
 import { isDeployAuthorized } from "./deployGate"
 import { clearReactionAgent } from "./channelPin"
 import { MessageCache } from "./messageCache"
-import { enrich } from "./enrich"
+import { enrich, foldQuote } from "./enrich"
 import { expandHome } from "./config"
 import { MemoryStore, type Scope } from "./memory/store"
 import { VectorIndex } from "./memory/vectorIndex"
@@ -412,20 +412,22 @@ const orchestrator = new Orchestrator(hub, agents, {
     const policy = rt?.injectContext ?? "onSwitch"
     const wantContext = policy === "always" || (policy === "onSwitch" && isSwitch)
     const context = wantContext ? messageCache.render(inbound.chatId) : ""
+    // Fold any quote-reply target into the live message so the agent sees it.
+    const live = foldQuote(inbound.content, inbound.quote)
     let memory = ""
     if (rt?.useMemory) {
       const scopes: Scope[] = [
         "global", `users/${inbound.userId}`, `agents/${agent}`, `channels/${inbound.chatId}`,
       ]
-      try { memory = (await memoryRetriever.relevant(inbound.content, scopes)).render } catch {}
+      try { memory = (await memoryRetriever.relevant(live, scopes)).render } catch {}
     }
     messageCache.record(inbound.chatId, {
-      role: "user", text: inbound.content, ts: Date.parse(inbound.ts) || Date.now(),
+      role: "user", text: live, ts: Date.parse(inbound.ts) || Date.now(),
       user: inbound.user, userId: inbound.userId,
     })
     convActivity.set(inbound.chatId, Date.now())
-    if (!context && !memory) return inbound
-    return { ...inbound, content: enrich(inbound.content, { memory, context }) }
+    if (!context && !memory && live === inbound.content) return inbound
+    return { ...inbound, content: enrich(live, { memory, context }) }
   },
 })
 

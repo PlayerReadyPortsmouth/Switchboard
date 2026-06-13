@@ -8,6 +8,7 @@ export interface InboundMessage {
   ts: string            // ISO timestamp
   isDM: boolean
   attachments?: { name: string; type: string; size: number }[]
+  quote?: { user: string; content: string }   // the message this one quote-replies to
 }
 
 /** A text-input popup a button can open instead of acting immediately. */
