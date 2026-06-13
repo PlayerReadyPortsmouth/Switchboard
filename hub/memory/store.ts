@@ -118,4 +118,22 @@ export class MemoryStore {
     }
     return out
   }
+
+  /** Every note in the vault (recursive), for index (re)builds at boot. The
+   *  `.index/` sidecar dir is skipped. */
+  allNotes(): Note[] {
+    const out: Note[] = []
+    const walk = (dir: string): void => {
+      let entries: { name: string; isDirectory(): boolean }[] = []
+      try { entries = readdirSync(dir, { withFileTypes: true }) } catch { return }
+      for (const e of entries) {
+        if (e.name.startsWith(".")) continue
+        const full = join(dir, e.name)
+        if (e.isDirectory()) walk(full)
+        else if (e.name.endsWith(".md")) { try { out.push(this.read(full)) } catch {} }
+      }
+    }
+    walk(this.root)
+    return out
+  }
 }

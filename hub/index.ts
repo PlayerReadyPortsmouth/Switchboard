@@ -21,6 +21,11 @@ import { isDeployAuthorized } from "./deployGate"
 import { clearReactionAgent } from "./channelPin"
 import { MessageCache } from "./messageCache"
 import { enrich } from "./enrich"
+import { expandHome } from "./config"
+import { MemoryStore, type Scope } from "./memory/store"
+import { VectorIndex } from "./memory/vectorIndex"
+import { TransformersEmbedder } from "./memory/embedder"
+import { MemoryRetriever } from "./memory/retriever"
 import type { AgentConfig, AgentReply, SpawnTrigger, SpawnCardUpdate, CardSpec } from "./types"
 
 const CONFIG_DIR = process.env.SWITCHBOARD_CONFIG ?? join(import.meta.dir, "..", "config")
@@ -47,6 +52,17 @@ const transports = new Map<string, StreamJsonTransport>()
 // Recent-message cache (per Discord channel), persisted so it survives restarts
 // and feeds the background distiller. Source for "where relevant" context injection.
 const messageCache = new MessageCache(hub.contextCacheSize ?? 20, join(hub.stateDir, "cache"))
+
+// Memory vault: Obsidian-style .md notes + local-embedding recall + Claude
+// librarian. Reindexed once at boot; the embedder loads its model lazily.
+const memoryDir = hub.memoryDir ? expandHome(hub.memoryDir) : join(hub.stateDir, "memory")
+const memoryStore = new MemoryStore(memoryDir)
+const vectorIndex = new VectorIndex(join(memoryDir, ".index", "vectors.json"))
+const memoryRetriever = new MemoryRetriever({
+  store: memoryStore, index: vectorIndex, embedder: new TransformersEmbedder(),
+  run: makeRouterRunner(), librarianModel: hub.librarianModel ?? hub.routerModel,
+})
+void memoryRetriever.reindexAll().catch((e) => process.stderr.write(`memory: reindex failed: ${e}\n`))
 
 const cardRegistry = new CardRegistry()
 const cardLifecycle = new CardLifecycle(cardRegistry, {
@@ -295,12 +311,19 @@ const orchestrator = new Orchestrator(hub, agents, {
     const policy = rt?.injectContext ?? "onSwitch"
     const wantContext = policy === "always" || (policy === "onSwitch" && isSwitch)
     const context = wantContext ? messageCache.render(inbound.chatId) : ""
+    let memory = ""
+    if (rt?.useMemory) {
+      const scopes: Scope[] = [
+        "global", `users/${inbound.userId}`, `agents/${agent}`, `channels/${inbound.chatId}`,
+      ]
+      try { memory = (await memoryRetriever.relevant(inbound.content, scopes)).render } catch {}
+    }
     messageCache.record(inbound.chatId, {
       role: "user", text: inbound.content, ts: Date.parse(inbound.ts) || Date.now(),
       user: inbound.user, userId: inbound.userId,
     })
-    if (!context) return inbound
-    return { ...inbound, content: enrich(inbound.content, { context }) }
+    if (!context && !memory) return inbound
+    return { ...inbound, content: enrich(inbound.content, { memory, context }) }
   },
 })
 
