@@ -26,6 +26,7 @@ import { MemoryStore, type Scope } from "./memory/store"
 import { VectorIndex } from "./memory/vectorIndex"
 import { TransformersEmbedder } from "./memory/embedder"
 import { MemoryRetriever } from "./memory/retriever"
+import { distill } from "./memory/distiller"
 import type { AgentConfig, AgentReply, SpawnTrigger, SpawnCardUpdate, CardSpec } from "./types"
 
 const CONFIG_DIR = process.env.SWITCHBOARD_CONFIG ?? join(import.meta.dir, "..", "config")
@@ -63,6 +64,32 @@ const memoryRetriever = new MemoryRetriever({
   run: makeRouterRunner(), librarianModel: hub.librarianModel ?? hub.routerModel,
 })
 void memoryRetriever.reindexAll().catch((e) => process.stderr.write(`memory: reindex failed: ${e}\n`))
+
+// Per-conversation activity clock — drives the background distiller's idle sweep.
+const convActivity = new Map<string, number>()
+const distilledAt = new Map<string, number>()
+const distillerRunner = makeRouterRunner()
+
+/** Distill one idle conversation's recent cache into memory-vault notes. */
+async function runDistill(convId: string): Promise<void> {
+  const msgs = messageCache.recent(convId)
+  if (msgs.length < 2) return
+  const conversation = msgs
+    .map((m) => `[${m.role === "agent" ? (m.agent ?? "agent") : (m.user ?? "user")}] ${m.text}`)
+    .join("\n")
+  const userIds = [...new Set(msgs.map((m) => m.userId).filter((u): u is string => !!u))]
+  const scopes = ["global", `channels/${convId}`, ...userIds.map((u) => `users/${u}`)] as Scope[]
+  const existing = memoryStore.list(scopes).map((n) => ({ scope: n.scope, title: n.title }))
+  const upserts = await distill(
+    { conversation, existing }, distillerRunner, hub.distillerModel ?? hub.routerModel,
+  )
+  for (const u of upserts) {
+    try {
+      const path = memoryStore.write(u.scope as Scope, { title: u.title, tags: u.tags, body: u.body, source: "distiller" })
+      await memoryRetriever.indexNote(memoryStore.read(path)).catch(() => {})
+    } catch (e) { process.stderr.write(`distill: write failed: ${e}\n`) }
+  }
+}
 
 const cardRegistry = new CardRegistry()
 const cardLifecycle = new CardLifecycle(cardRegistry, {
@@ -132,6 +159,7 @@ async function onAgentReply(reply: AgentReply, key: string): Promise<void> {
     messageCache.record(reply.chatId, {
       role: "agent", text: reply.text, ts: Date.now(), agent: reply.agent,
     })
+    convActivity.set(reply.chatId, Date.now())
   }
   await gateway.sendReply(reply, agents[reply.agent])
 }
@@ -310,6 +338,19 @@ setInterval(() => {
   }
 }, 60_000).unref()
 
+// Background distiller: sweep for conversations idle past distillIdleMs and turn
+// their recent cache into memory notes — once per idle period (until new activity).
+const DISTILL_IDLE_MS = hub.distillIdleMs ?? 600_000
+setInterval(() => {
+  const now = Date.now()
+  for (const [convId, ts] of convActivity) {
+    if (now - ts < DISTILL_IDLE_MS) continue
+    if ((distilledAt.get(convId) ?? 0) >= ts) continue   // already distilled this idle period
+    distilledAt.set(convId, now)
+    void runDistill(convId).catch((e) => process.stderr.write(`distill: ${e}\n`))
+  }
+}, 60_000).unref()
+
 const orchestrator = new Orchestrator(hub, agents, {
   baseGate: (userId, chatId, isDM) => baseGate.gate(userId, chatId, isDM, Date.now()),
   resolvePermission: () => false,   // tool permissions handled by --dangerously-skip-permissions
@@ -337,6 +378,7 @@ const orchestrator = new Orchestrator(hub, agents, {
       role: "user", text: inbound.content, ts: Date.parse(inbound.ts) || Date.now(),
       user: inbound.user, userId: inbound.userId,
     })
+    convActivity.set(inbound.chatId, Date.now())
     if (!context && !memory) return inbound
     return { ...inbound, content: enrich(inbound.content, { memory, context }) }
   },
