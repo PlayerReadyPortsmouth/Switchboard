@@ -185,4 +185,14 @@ export interface HubConfig {
   librarianModel?: string        // model that ranks recalled notes for relevance (default routerModel)
   distillerModel?: string        // model that distills a conversation into notes
   overseerModel?: string         // default judge model for overseen agents
+  memory?: MemoryBackend         // recall index + embedder backend selection (default: all local)
+}
+
+/** Selects the memory recall index and embedder. Defaults are fully local
+ *  (in-process ONNX embeddings + in-memory cosine index, no secrets). */
+export interface MemoryBackend {
+  index?: "local" | "qdrant"     // default local
+  embedder?: "local" | "openai"  // default local
+  qdrant?: { url: string; apiKeyEnv?: string; collection?: string }
+  openai?: { baseUrl: string; apiKeyEnv?: string; model: string }  // OpenAI-compatible /embeddings
 }

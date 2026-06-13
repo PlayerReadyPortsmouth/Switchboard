@@ -24,7 +24,10 @@ import { enrich, foldQuote } from "./enrich"
 import { expandHome } from "./config"
 import { MemoryStore, type Scope } from "./memory/store"
 import { VectorIndex } from "./memory/vectorIndex"
-import { TransformersEmbedder } from "./memory/embedder"
+import type { MemoryIndex } from "./memory/memoryIndex"
+import { TransformersEmbedder, type Embedder } from "./memory/embedder"
+import { HttpEmbedder } from "./memory/httpEmbedder"
+import { QdrantIndex } from "./memory/qdrantIndex"
 import { MemoryRetriever } from "./memory/retriever"
 import { distill } from "./memory/distiller"
 import { Overseer } from "./overseer"
@@ -59,9 +62,24 @@ const messageCache = new MessageCache(hub.contextCacheSize ?? 20, join(hub.state
 // librarian. Reindexed once at boot; the embedder loads its model lazily.
 const memoryDir = hub.memoryDir ? expandHome(hub.memoryDir) : join(hub.stateDir, "memory")
 const memoryStore = new MemoryStore(memoryDir)
-const vectorIndex = new VectorIndex(join(memoryDir, ".index", "vectors.json"))
+
+// Backend selection (default: fully local, no secrets). Hosted options behind
+// the same seams: Qdrant for recall, an OpenAI-compatible endpoint for embeddings.
+const mem = hub.memory ?? {}
+const embedder: Embedder = mem.embedder === "openai" && mem.openai
+  ? new HttpEmbedder({
+      baseUrl: mem.openai.baseUrl, model: mem.openai.model,
+      apiKey: mem.openai.apiKeyEnv ? process.env[mem.openai.apiKeyEnv] : undefined,
+    })
+  : new TransformersEmbedder()
+const vectorIndex: MemoryIndex = mem.index === "qdrant" && mem.qdrant
+  ? new QdrantIndex({
+      url: mem.qdrant.url, collection: mem.qdrant.collection,
+      apiKey: mem.qdrant.apiKeyEnv ? process.env[mem.qdrant.apiKeyEnv] : undefined,
+    })
+  : new VectorIndex(join(memoryDir, ".index", "vectors.json"))
 const memoryRetriever = new MemoryRetriever({
-  store: memoryStore, index: vectorIndex, embedder: new TransformersEmbedder(),
+  store: memoryStore, index: vectorIndex, embedder,
   run: makeRouterRunner(), librarianModel: hub.librarianModel ?? hub.routerModel,
 })
 void memoryRetriever.reindexAll().catch((e) => process.stderr.write(`memory: reindex failed: ${e}\n`))

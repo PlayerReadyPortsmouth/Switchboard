@@ -15,6 +15,12 @@
   "librarianModel": "claude-haiku-4-5",
   "distillerModel": "claude-sonnet-4-6",
   "overseerModel": "claude-haiku-4-5",
+  "memory": {
+    "index": "local",
+    "embedder": "local",
+    "qdrant": { "url": "http://localhost:6333", "apiKeyEnv": "QDRANT_API_KEY", "collection": "switchboard_memory" },
+    "openai": { "baseUrl": "https://api.openai.com/v1", "apiKeyEnv": "OPENAI_API_KEY", "model": "text-embedding-3-small" }
+  },
   "deployApproverUserId": "<USER_ID>",
   "webhookPort": 4400,
   "webhooks": [

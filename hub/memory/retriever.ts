@@ -1,13 +1,13 @@
 import type { ClaudeRunner } from "../router"
 import type { Embedder } from "./embedder"
 import type { MemoryStore, Note, Scope } from "./store"
-import type { VectorIndex } from "./vectorIndex"
+import type { MemoryIndex } from "./memoryIndex"
 import { selectNotes, type Candidate } from "./librarian"
 import { entityGate, dedupAction } from "./dedup"
 
 export interface RetrieverOpts {
   store: MemoryStore
-  index: VectorIndex
+  index: MemoryIndex
   embedder: Embedder
   run: ClaudeRunner          // librarian model runner (injected; like the router)
   librarianModel: string
@@ -47,7 +47,7 @@ export class MemoryRetriever {
    *  embedding version. */
   async indexNote(note: Note): Promise<void> {
     const [vec] = await this.o.embedder.embed([embedText(note)])
-    if (vec) this.o.index.set(note.path, note.scope, vec, this.o.embedder.version)
+    if (vec) await this.o.index.set(note.path, note.scope, vec, this.o.embedder.version)
   }
 
   /** Embed every note currently in the vault (boot / rebuild). */
@@ -56,7 +56,9 @@ export class MemoryRetriever {
     if (!notes.length) return
     const vecs = await this.o.embedder.embed(notes.map(embedText))
     const version = this.o.embedder.version
-    notes.forEach((n, i) => { if (vecs[i]) this.o.index.set(n.path, n.scope, vecs[i], version) })
+    for (let i = 0; i < notes.length; i++) {
+      if (vecs[i]) await this.o.index.set(notes[i].path, notes[i].scope, vecs[i], version)
+    }
   }
 
   /** Background dedup for a just-written note. Finds same-scope near-neighbours,
@@ -70,8 +72,7 @@ export class MemoryRetriever {
     const flagged: { note: string; duplicate: string }[] = []
     const [vec] = await this.o.embedder.embed([embedText(note)])
     if (!vec) return { removed, flagged }
-    const hits = this.o.index
-      .search(vec, [note.scope], 10, this.o.embedder.version)
+    const hits = (await this.o.index.search(vec, [note.scope], 10, this.o.embedder.version))
       .filter((h) => h.path !== note.path && h.score >= threshold)
     for (const h of hits) {
       let other: Note
@@ -84,7 +85,7 @@ export class MemoryRetriever {
       // Both distiller-generated → keep the most-recently-updated, drop the staler.
       const drop = (note.updated || "") >= (other.updated || "") ? other : note
       this.o.store.remove(drop.path)
-      this.o.index.remove(drop.path)
+      await this.o.index.remove(drop.path)
       removed.push(drop.path)
       if (drop.path === note.path) break   // the note we were deduping is gone
     }
@@ -97,7 +98,7 @@ export class MemoryRetriever {
     const finalLimit = this.o.finalLimit ?? 5
     const [qv] = await this.o.embedder.embed([query])
     if (!qv) return { notes: [], render: "" }
-    const hits = this.o.index.search(qv, scopes, recallLimit, this.o.embedder.version)
+    const hits = await this.o.index.search(qv, scopes, recallLimit, this.o.embedder.version)
     if (!hits.length) return { notes: [], render: "" }
 
     const candidates: Candidate[] = []

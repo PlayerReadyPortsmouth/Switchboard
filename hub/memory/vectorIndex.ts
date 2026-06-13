@@ -1,8 +1,9 @@
 import { readFileSync, writeFileSync, mkdirSync, renameSync } from "fs"
 import { dirname } from "path"
+import type { MemoryIndex, SearchHit } from "./memoryIndex"
 
 export interface IndexEntry { path: string; scope: string; vector: number[]; version?: string }
-export interface SearchHit { path: string; scope: string; score: number }
+export type { SearchHit }
 
 /** Cosine similarity; tolerant of length mismatch / zero vectors. */
 export function cosine(a: number[], b: number[]): number {
@@ -15,17 +16,17 @@ export function cosine(a: number[], b: number[]): number {
 }
 
 /** In-memory vector store keyed by note path, with cosine recall filtered by
- *  scope. Small by design (a human-scale vault); persisted as JSON. The recall
- *  seam — swap for an external vector DB without touching the retriever. */
-export class VectorIndex {
+ *  scope. Small by design (a human-scale vault); persisted as JSON. The default
+ *  recall backend — swap for a hosted one (Qdrant) without touching the retriever. */
+export class VectorIndex implements MemoryIndex {
   private entries = new Map<string, IndexEntry>()
   constructor(private file?: string) { this.load() }
 
-  set(path: string, scope: string, vector: number[], version?: string): void {
+  async set(path: string, scope: string, vector: number[], version?: string): Promise<void> {
     this.entries.set(path, { path, scope, vector, version })
     this.persist()
   }
-  remove(path: string): void {
+  async remove(path: string): Promise<void> {
     if (this.entries.delete(path)) this.persist()
   }
   has(path: string): boolean { return this.entries.has(path) }
@@ -34,7 +35,7 @@ export class VectorIndex {
   /** Top-`limit` entries within `scopes`, ranked by cosine to `query`. When
    *  `version` is given, entries stamped with a different embedding version are
    *  excluded (they live in an incompatible vector space until re-embedded). */
-  search(query: number[], scopes: string[], limit: number, version?: string): SearchHit[] {
+  async search(query: number[], scopes: string[], limit: number, version?: string): Promise<SearchHit[]> {
     const wanted = new Set(scopes)
     return [...this.entries.values()]
       .filter((e) => wanted.has(e.scope) && (version === undefined || e.version === version))
