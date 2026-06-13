@@ -6,6 +6,7 @@ import { MemoryStore } from "../hub/memory/store"
 import { VectorIndex } from "../hub/memory/vectorIndex"
 import { MemoryRetriever, renderMemory } from "../hub/memory/retriever"
 import { buildLibrarianPrompt, parseLibrarianOutput, type Candidate } from "../hub/memory/librarian"
+import { AccessStore } from "../hub/memory/accessStore"
 import type { Embedder } from "../hub/memory/embedder"
 
 const cand = (path: string): Candidate => ({ path, title: path, tags: [], summary: "" })
@@ -94,4 +95,36 @@ test("no recall hits in scope ⇒ empty, librarian not consulted", async () => {
   const { notes } = await r.relevant("alpha", ["users/999"])  // empty scope
   expect(notes.length).toBe(0)
   expect(called).toBe(false)
+})
+
+test("injected notes record an access hit", async () => {
+  const { store, index } = setup()
+  const access = new AccessStore(undefined, 1000)
+  const run = async () => '{"picks":[0]}'
+  const r = new MemoryRetriever({ store, index, embedder: fakeEmbedder, run, librarianModel: "m", access })
+  await r.reindexAll()
+  const { notes } = await r.relevant("alpha", ["global"])
+  expect(access.count(notes[0].path)).toBe(1)
+})
+
+test("hot set surfaces a high-importance note even without a semantic match", async () => {
+  const { store, index } = setup()
+  const access = new AccessStore(undefined, 1_000_000)
+  const beta = store.notePath("global", "Beta note")
+  for (let i = 0; i < 5; i++) access.hit(beta)        // make Beta hot
+  const run = async () => '{"picks":[]}'              // librarian selects nothing semantic
+  const r = new MemoryRetriever({ store, index, embedder: fakeEmbedder, run, librarianModel: "m", access, hotSetSize: 1 })
+  await r.reindexAll()
+  const { notes } = await r.relevant("alpha", ["global"])  // query matches Alpha, not Beta
+  expect(notes.map((n) => n.title)).toContain("Beta note")  // injected proactively by importance
+})
+
+test("importanceWeight=0 keeps pure-cosine behaviour", async () => {
+  const { store, index } = setup()
+  const access = new AccessStore(undefined, 1000)
+  const run = async () => '{"picks":[0]}'
+  const r = new MemoryRetriever({ store, index, embedder: fakeEmbedder, run, librarianModel: "m", access, importanceWeight: 0 })
+  await r.reindexAll()
+  const { notes } = await r.relevant("alpha", ["global"])
+  expect(notes[0].title).toBe("Alpha note")
 })

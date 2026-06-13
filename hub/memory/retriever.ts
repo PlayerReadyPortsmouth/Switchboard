@@ -2,6 +2,7 @@ import type { ClaudeRunner } from "../router"
 import type { Embedder } from "./embedder"
 import type { MemoryStore, Note, Scope } from "./store"
 import type { MemoryIndex } from "./memoryIndex"
+import type { AccessStore } from "./accessStore"
 import { selectNotes, type Candidate } from "./librarian"
 import { entityGate, dedupAction } from "./dedup"
 
@@ -15,6 +16,9 @@ export interface RetrieverOpts {
   finalLimit?: number        // notes injected after the librarian pass (default 5)
   dedupThreshold?: number    // cosine ≥ this triggers an entity-gate check (default 0.86)
   dedupModel?: string        // entity-gate model (default librarianModel)
+  access?: AccessStore       // usage stats: records hits, weights recall, drives the hot set
+  importanceWeight?: number  // boost recall rank by usage importance (default 0 → pure cosine)
+  hotSetSize?: number        // notes injected proactively by importance (default 0 → off)
 }
 
 /** Outcome of a background dedup pass over one just-written note. */
@@ -92,28 +96,63 @@ export class MemoryRetriever {
     return { removed, flagged }
   }
 
-  /** Notes relevant to `query` within `scopes`, plus a rendered injection block. */
+  /** The proactively-injected "hot set": top-importance notes in `scopes`,
+   *  surfaced without an explicit recall. Empty unless access + hotSetSize set. */
+  private hotSet(scopes: Scope[], exclude: Set<string>): string[] {
+    const access = this.o.access
+    const n = this.o.hotSetSize ?? 0
+    if (!access || n <= 0) return []
+    return this.o.store.list(scopes)
+      .map((note) => note.path)
+      .filter((p) => !exclude.has(p))
+      .map((p) => ({ p, imp: access.importance(p) }))
+      .filter((x) => x.imp > 0)
+      .sort((a, b) => b.imp - a.imp)
+      .slice(0, n)
+      .map((x) => x.p)
+  }
+
+  /** Notes relevant to `query` within `scopes`, plus a rendered injection block.
+   *  Semantic recall (optionally importance-weighted) + a proactive hot set;
+   *  every injected note records an access hit. */
   async relevant(query: string, scopes: Scope[]): Promise<{ notes: Note[]; render: string }> {
     const recallLimit = this.o.recallLimit ?? 20
     const finalLimit = this.o.finalLimit ?? 5
-    const [qv] = await this.o.embedder.embed([query])
-    if (!qv) return { notes: [], render: "" }
-    const hits = await this.o.index.search(qv, scopes, recallLimit, this.o.embedder.version)
-    if (!hits.length) return { notes: [], render: "" }
+    const weight = this.o.importanceWeight ?? 0
+    const access = this.o.access
 
-    const candidates: Candidate[] = []
-    for (const h of hits) {
-      try {
-        const n = this.o.store.read(h.path)
-        candidates.push({ path: n.path, title: n.title, tags: n.tags, summary: firstLines(n.body) })
-      } catch {}
+    // 1) Semantic recall, optionally re-ranked by usage importance.
+    let selected: string[] = []
+    const [qv] = await this.o.embedder.embed([query])
+    if (qv) {
+      let hits = await this.o.index.search(qv, scopes, recallLimit, this.o.embedder.version)
+      if (access && weight > 0) {
+        hits = hits
+          .map((h) => ({ ...h, score: h.score + weight * access.importance(h.path) }))
+          .sort((a, b) => b.score - a.score)
+      }
+      const candidates: Candidate[] = []
+      for (const h of hits) {
+        try {
+          const n = this.o.store.read(h.path)
+          candidates.push({ path: n.path, title: n.title, tags: n.tags, summary: firstLines(n.body) })
+        } catch {}
+      }
+      if (candidates.length) {
+        const picked = await selectNotes(query, candidates, this.o.run, this.o.librarianModel)
+        // librarian failed/garbled (null) ⇒ top recall order; explicit [] ⇒ nothing relevant.
+        selected = picked ?? candidates.slice(0, finalLimit).map((c) => c.path)
+      }
     }
-    const picked = await selectNotes(query, candidates, this.o.run, this.o.librarianModel)
-    // librarian failed/garbled (null) ⇒ fall back to top recall order; explicit
-    // [] ⇒ respect "nothing relevant".
-    const chosenPaths = (picked ?? candidates.slice(0, finalLimit).map((c) => c.path)).slice(0, finalLimit)
+
+    // 2) Proactive hot set first, then semantic picks, capped at finalLimit.
+    const hot = this.hotSet(scopes, new Set(selected))
+    const chosenPaths = [...hot, ...selected].slice(0, finalLimit)
+
     const notes: Note[] = []
-    for (const p of chosenPaths) { try { notes.push(this.o.store.read(p)) } catch {} }
+    for (const p of chosenPaths) {
+      try { notes.push(this.o.store.read(p)); access?.hit(p) } catch {}
+    }
     return { notes, render: renderMemory(notes) }
   }
 }
