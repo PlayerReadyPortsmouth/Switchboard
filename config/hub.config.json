@@ -18,8 +18,16 @@
   "memory": {
     "index": "local",
     "embedder": "local",
-    "qdrant": { "url": "http://localhost:6333", "apiKeyEnv": "QDRANT_API_KEY", "collection": "switchboard_memory" },
-    "openai": { "baseUrl": "https://api.openai.com/v1", "apiKeyEnv": "OPENAI_API_KEY", "model": "text-embedding-3-small" }
+    "qdrant": {
+      "url": "http://localhost:6333",
+      "apiKeyEnv": "QDRANT_API_KEY",
+      "collection": "switchboard_memory"
+    },
+    "openai": {
+      "baseUrl": "https://api.openai.com/v1",
+      "apiKeyEnv": "OPENAI_API_KEY",
+      "model": "text-embedding-3-small"
+    }
   },
   "gardener": {
     "enabled": false,
@@ -45,10 +53,24 @@
   "schedules": [
     {
       "id": "daily-digest",
-      "hourUtc": 7,
+      "cron": "0 7 * * *",
       "agent": "assistant",
       "channelId": "<channel id>",
       "message": "Post the daily digest."
+    },
+    {
+      "id": "club-checkins",
+      "cron": "*/15 8-21 * * *",
+      "agent": "assistant",
+      "channelId": "<channel id>",
+      "message": "Run the 15-minute club check-in sweep."
+    },
+    {
+      "id": "nightly-backlog-sweep",
+      "hourUtc": 2,
+      "agent": "assistant",
+      "channelId": "<channel id>",
+      "message": "Sweep the overnight backlog."
     }
   ],
   "commands": [
@@ -67,5 +89,6 @@
       "taskTemplate": "Handle task $1. Job id: $jobId.",
       "setupCommand": "git worktree add /tmp/$jobId"
     }
-  ]
+  ],
+  "timezone": "Europe/London"
 }

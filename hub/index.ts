@@ -12,7 +12,7 @@ import { route as routeFn } from "./router"
 import { Orchestrator } from "./orchestrator"
 import { NotifyRouter } from "./notifyRouter"
 import { startWebhookListener, type WebhookHandler } from "./webhookListener"
-import { shouldRunDailyAt, currentBucket } from "./scheduler"
+import { startCron, CronState } from "./scheduler"
 import { drainApprovals } from "./approvals"
 import { CardRegistry } from "./cardRegistry"
 import { CardLifecycle } from "./cardLifecycle"
@@ -380,19 +380,17 @@ const webhookHandlers: WebhookHandler[] = (hub.webhooks ?? []).map((w) => ({
 const listener = startWebhookListener(hub.webhookPort ?? 0, webhookHandlers)
 void listener
 
-// Schedules: fire daily at hourUtc (UTC), once per hour-bucket per id.
-const scheduleBuckets = new Map<string, string | null>()
-const schedules = hub.schedules ?? []
-setInterval(() => {
-  const now = new Date()
-  for (const s of schedules) {
-    const last = scheduleBuckets.get(s.id) ?? null
-    if (shouldRunDailyAt(now, s.hourUtc, last)) {
-      scheduleBuckets.set(s.id, currentBucket(now))
-      deliverToAgent(s.agent, s.channelId, `schedule:${s.id}`, s.message)
-    }
-  }
-}, 5 * 60 * 1000).unref()
+// Schedules: 1-minute tick evaluating each entry's cron (timezone-aware,
+// default Europe/London) or legacy daily hourUtc. Dedupe is persisted per job
+// per UTC minute in cron-state.json (atomic write), so a restart within the
+// same minute never double-fires.
+const cronState = new CronState(join(hub.stateDir, "cron-state.json"))
+const cronTick = startCron(hub.schedules ?? [], hub.timezone ?? "Europe/London", {
+  deliver: (agent, channelId, idTag, message) => deliverToAgent(agent, channelId, idTag, message),
+  state: cronState,
+  onInvalid: (id, expr) => process.stderr.write(`schedule "${id}": invalid cron "${expr}"\n`),
+})
+cronTick.unref()
 
 // Idle backstop: close any ephemeral (spawned) transport with no activity for
 // ephemeralTimeoutMs — guards against an agent that neither finishes nor is

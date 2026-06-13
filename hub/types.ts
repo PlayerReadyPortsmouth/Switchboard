@@ -100,13 +100,20 @@ export interface WebhookRoute {
   prefix?: string       // optional token prepended to the raw body
 }
 
-/** A daily UTC-scheduled message delivered to an agent. */
+/** A scheduled message delivered to an agent.
+ *  Two firing modes (backward-compatible):
+ *   - `cron`: standard 5-field cron "m h dom mon dow", evaluated in `tz`
+ *     (default = hub `timezone`, default "Europe/London"). Takes precedence.
+ *   - `hourUtc`: legacy daily-at-UTC-hour (fires once at HH:00 UTC). Used only
+ *     when `cron` is absent. */
 export interface ScheduleRoute {
-  id: string            // unique id; one run-bucket is tracked per id
-  hourUtc: number       // UTC hour (0–23) to fire at
+  id: string            // unique id; one minute-bucket is tracked per id
   agent: string
   channelId: string
   message: string       // message content delivered at the scheduled time
+  cron?: string         // 5-field cron expression (preferred); overrides hourUtc
+  tz?: string           // IANA tz for this entry (default: hub timezone)
+  hourUtc?: number      // legacy: UTC hour (0–23) to fire at, once daily
 }
 
 /** An exact-match chat command that delivers a canned message to an agent. */
@@ -166,6 +173,7 @@ export interface HubConfig {
   stateDir: string
   routerModel: string
   switchThreshold: number
+  timezone?: string             // default tz for cron schedules (default "Europe/London")
   defaultAgent: string
   ephemeralTimeoutMs: number
   tagStyle: "prefix" | "embed"
