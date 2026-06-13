@@ -36,6 +36,16 @@ test("upsert replaces, remove deletes", () => {
   expect(idx.has("/g/a.md")).toBe(false)
 })
 
+test("search version filter excludes mismatched embedding spaces", () => {
+  const idx = new VectorIndex()
+  idx.set("/g/old.md", "global", [1, 0], "v1")
+  idx.set("/g/new.md", "global", [1, 0], "v2")
+  const hits = idx.search([1, 0], ["global"], 10, "v2")
+  expect(hits.map((h) => h.path)).toEqual(["/g/new.md"])
+  // no filter ⇒ both
+  expect(idx.search([1, 0], ["global"], 10).length).toBe(2)
+})
+
 test("persists and reloads vectors", () => {
   const file = join(mkdtempSync(join(tmpdir(), "sb-vec-")), "vectors.json")
   const a = new VectorIndex(file)

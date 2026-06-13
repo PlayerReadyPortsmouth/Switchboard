@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, mkdirSync, renameSync, readdirSync } from "fs"
+import { readFileSync, writeFileSync, mkdirSync, renameSync, readdirSync, unlinkSync } from "fs"
 import { join } from "path"
 
 /** A memory scope = a folder under the vault root. The four shapes the hub uses. */

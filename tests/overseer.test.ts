@@ -24,23 +24,44 @@ test("judge prompt carries goal, conversation and latest reply", () => {
   expect(user).toContain("i think im done")
 })
 
-test("parseJudgeOutput requires a boolean done", () => {
-  expect(parseJudgeOutput('{"done":true,"reason":"ok"}')).toEqual({ done: true, reason: "ok", nudge: undefined })
-  expect(parseJudgeOutput('{"done":false,"nudge":"keep going"}')?.nudge).toBe("keep going")
+test("judge prompt reserves 'blocked' for genuine human needs and pushes autonomy otherwise", () => {
+  const { system } = buildJudgePrompt("g", "c", "r")
+  expect(system).toContain("GENUINELY required")
+  expect(system).toContain("sensible default")
+})
+
+test("false block ⇒ judge returns working+nudge ⇒ agent is prodded to proceed", async () => {
+  // The intelligence lives in the prompt; here we assert the mechanism: a
+  // working verdict on a "should I proceed?" reply re-prods rather than pausing.
+  const { o, nudges } = harness({
+    run: async () => '{"status":"working","nudge":"You can decide this yourself — pick the sensible default and continue."}',
+  })
+  o.begin("agent", "c1", "tidy up the config")
+  const v = await o.intercept("agent", "c1", "Should I also remove the unused field? Awaiting confirmation.")
+  expect(v.forward).toBe(false)
+  expect(nudges[0].text).toContain("sensible default")
+})
+
+test("parseJudgeOutput reads status, tolerates legacy boolean done", () => {
+  expect(parseJudgeOutput('{"status":"done","reason":"ok"}')).toEqual({ status: "done", reason: "ok", nudge: undefined })
+  expect(parseJudgeOutput('{"status":"working","nudge":"keep going"}')?.nudge).toBe("keep going")
+  expect(parseJudgeOutput('{"status":"blocked"}')?.status).toBe("blocked")
+  expect(parseJudgeOutput('{"done":true}')?.status).toBe("done")     // legacy
+  expect(parseJudgeOutput('{"done":false}')?.status).toBe("working") // legacy
   expect(parseJudgeOutput('{"reason":"x"}')).toBeNull()
   expect(parseJudgeOutput("garbage")).toBeNull()
 })
 
 test("no active goal ⇒ forwards without judging", async () => {
   let called = false
-  const { o } = harness({ run: async () => { called = true; return '{"done":false}' } })
+  const { o } = harness({ run: async () => { called = true; return '{"status":"working"}' } })
   const v = await o.intercept("agent", "c1", "hello")
   expect(v.forward).toBe(true)
   expect(called).toBe(false)
 })
 
 test("done ⇒ forwards and clears the session", async () => {
-  const { o, nudges } = harness({ run: async () => '{"done":true}' })
+  const { o, nudges } = harness({ run: async () => '{"status":"done"}' })
   o.begin("agent", "c1", "the goal")
   const v = await o.intercept("agent", "c1", "all finished")
   expect(v.forward).toBe(true)
@@ -49,16 +70,27 @@ test("done ⇒ forwards and clears the session", async () => {
   expect((await o.intercept("agent", "c1", "again")).forward).toBe(true)
 })
 
-test("not done ⇒ swallows the reply and delivers the nudge", async () => {
-  const { o, nudges } = harness({ run: async () => '{"done":false,"nudge":"fix the failing test"}' })
+test("working ⇒ swallows the reply and delivers the nudge", async () => {
+  const { o, nudges } = harness({ run: async () => '{"status":"working","nudge":"fix the failing test"}' })
   o.begin("agent", "c1", "make tests pass")
   const v = await o.intercept("agent", "c1", "I wrote some code")
   expect(v.forward).toBe(false)
   expect(nudges).toEqual([{ agent: "agent", convId: "c1", text: "fix the failing test" }])
 })
 
+test("blocked ⇒ forwards (paused) and never prods", async () => {
+  const { o, nudges } = harness({ run: async () => '{"status":"blocked","reason":"needs Stephen to decide"}' })
+  o.begin("agent", "c1", "do the risky thing")
+  const v = await o.intercept("agent", "c1", "Should I proceed? Awaiting your call.")
+  expect(v.forward).toBe(true)
+  expect(v.footer).toContain("awaiting a human")
+  expect(nudges.length).toBe(0)
+  // terminal: a follow-up reply isn't re-judged until a new goal begins
+  expect((await o.intercept("agent", "c1", "still waiting")).forward).toBe(true)
+})
+
 test("stops after maxIterations and forwards with a footer", async () => {
-  const { o, nudges } = harness({ run: async () => '{"done":false}', pol: { enabled: true, maxIterations: 2 } })
+  const { o, nudges } = harness({ run: async () => '{"status":"working"}', pol: { enabled: true, maxIterations: 2 } })
   o.begin("agent", "c1", "g")
   expect((await o.intercept("agent", "c1", "r1")).forward).toBe(false)  // nudge 1
   expect((await o.intercept("agent", "c1", "r2")).forward).toBe(false)  // nudge 2
@@ -71,7 +103,7 @@ test("stops after maxIterations and forwards with a footer", async () => {
 test("stops on wallclock budget", async () => {
   let t = 1000
   const { o } = harness({
-    run: async () => '{"done":false,"nudge":"more"}',
+    run: async () => '{"status":"working","nudge":"more"}',
     pol: { enabled: true, maxIterations: 99, maxWallclockMs: 5000 },
     now: () => t,
   })
@@ -90,7 +122,7 @@ test("garbled judge fails open (forwards)", async () => {
 })
 
 test("begin is a no-op for non-overseen agents", async () => {
-  const { o } = harness({ run: async () => '{"done":false}', pol: { enabled: false } })
+  const { o } = harness({ run: async () => '{"status":"working"}', pol: { enabled: false } })
   o.begin("agent", "c1", "g")
   expect((await o.intercept("agent", "c1", "r")).forward).toBe(true)
 })

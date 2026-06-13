@@ -21,21 +21,24 @@ function embedText(n: { title: string; tags: string[]; body: string }): string {
   return `${n.title}\n${n.tags.join(" ")}\n${n.body}`
 }
 
-/** Render chosen notes into a prompt-injectable block; "" when none. */
+/** Render chosen notes into a prompt-injectable block; "" when none. Each note
+ *  carries an "as of" date so the agent knows how fresh the fact is and can
+ *  re-verify stale specifics (file paths, flags) rather than trusting them. */
 export function renderMemory(notes: Note[]): string {
   if (!notes.length) return ""
-  const blocks = notes.map((n) => `## ${n.title}\n${n.body.trim()}`)
-  return `Relevant memory:\n${blocks.join("\n\n")}`
+  const blocks = notes.map((n) => `## ${n.title} _(as of ${(n.updated || "").slice(0, 10) || "unknown"})_\n${n.body.trim()}`)
+  return `Relevant memory (verify anything time-sensitive before relying on it):\n${blocks.join("\n\n")}`
 }
 
 /** Two-stage memory retrieval: local vector recall → Claude librarian precision. */
 export class MemoryRetriever {
   constructor(private o: RetrieverOpts) {}
 
-  /** Embed a note and (re)place it in the recall index. */
+  /** Embed a note and (re)place it in the recall index, stamped with the current
+   *  embedding version. */
   async indexNote(note: Note): Promise<void> {
     const [vec] = await this.o.embedder.embed([embedText(note)])
-    if (vec) this.o.index.set(note.path, note.scope, vec)
+    if (vec) this.o.index.set(note.path, note.scope, vec, this.o.embedder.version)
   }
 
   /** Embed every note currently in the vault (boot / rebuild). */
@@ -43,7 +46,8 @@ export class MemoryRetriever {
     const notes = this.o.store.allNotes()
     if (!notes.length) return
     const vecs = await this.o.embedder.embed(notes.map(embedText))
-    notes.forEach((n, i) => { if (vecs[i]) this.o.index.set(n.path, n.scope, vecs[i]) })
+    const version = this.o.embedder.version
+    notes.forEach((n, i) => { if (vecs[i]) this.o.index.set(n.path, n.scope, vecs[i], version) })
   }
 
   /** Notes relevant to `query` within `scopes`, plus a rendered injection block. */
@@ -52,7 +56,7 @@ export class MemoryRetriever {
     const finalLimit = this.o.finalLimit ?? 5
     const [qv] = await this.o.embedder.embed([query])
     if (!qv) return { notes: [], render: "" }
-    const hits = this.o.index.search(qv, scopes, recallLimit)
+    const hits = this.o.index.search(qv, scopes, recallLimit, this.o.embedder.version)
     if (!hits.length) return { notes: [], render: "" }
 
     const candidates: Candidate[] = []

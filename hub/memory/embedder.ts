@@ -1,6 +1,9 @@
 /** Turns text into vectors for similarity recall. The seam that lets the rest of
- *  the memory system stay agnostic about *how* embeddings are produced. */
+ *  the memory system stay agnostic about *how* embeddings are produced.
+ *  `version` identifies the embedding space — stamped on every stored vector so a
+ *  model swap re-embeds cleanly instead of mixing incompatible vector spaces. */
 export interface Embedder {
+  readonly version: string
   embed(texts: string[]): Promise<number[][]>
 }
 
@@ -11,6 +14,8 @@ export interface Embedder {
 export class TransformersEmbedder implements Embedder {
   private pipe: ((texts: string[], opts: object) => Promise<{ tolist(): number[][] }>) | null = null
   constructor(private model = "Xenova/all-MiniLM-L6-v2") {}
+
+  get version(): string { return this.model }
 
   async embed(texts: string[]): Promise<number[][]> {
     if (!texts.length) return []

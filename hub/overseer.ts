@@ -1,36 +1,52 @@
 import type { ClaudeRunner } from "./router"
 import type { OverseerPolicy } from "./types"
 
-/** A judge's verdict on whether the agent has finished the goal. */
-export interface Verdict { done: boolean; reason?: string; nudge?: string }
+/** A judge's verdict on a finished turn.
+ *  - done    → goal met (or normal chat) → ship it.
+ *  - working → concrete work remains → prod the agent on.
+ *  - blocked → correctly waiting on a human decision/input → terminal; ship the
+ *    reply (it's the question to the human) and DO NOT prod the agent to act alone. */
+export type TurnStatus = "done" | "working" | "blocked"
+export interface Verdict { status: TurnStatus; reason?: string; nudge?: string }
 
 export function buildJudgePrompt(
   goal: string, conversation: string, latestReply: string,
 ): { system: string; user: string } {
   const system =
-    "You are an overseer judging whether an agent has FULLY completed the user's goal. " +
-    'Respond with ONLY JSON: {"done": <bool>, "reason": "...", "nudge": "..."}. ' +
-    "done=true if the goal is fully met, OR the latest reply is a normal conversational " +
-    "answer / question that needs no further work. done=false ONLY if concrete work " +
-    "clearly remains. When done=false, `nudge` is a short, specific instruction telling " +
-    "the agent exactly what to finish next. Be strict about real tasks, but never loop on " +
-    "simple Q&A or chit-chat."
+    "You are an overseer judging an agent's latest turn against the user's goal. " +
+    'Respond with ONLY JSON: {"status": "done"|"working"|"blocked", "reason": "...", "nudge": "..."}. ' +
+    "status=done if the goal is fully met, OR the latest reply is a normal conversational " +
+    "answer/question that needs no further work. " +
+    "status=working if concrete work remains the agent can do itself — then `nudge` is a " +
+    "short, specific instruction for the next step. " +
+    "status=blocked ONLY when a human is GENUINELY required: irreversible or destructive " +
+    "actions, missing information or credentials only a human has, or a high-stakes/ambiguous " +
+    "decision that isn't the agent's to make. " +
+    "CRUCIAL: if the agent has merely stopped to ask permission or is being over-cautious " +
+    "about something it can reasonably decide itself, do NOT mark it blocked — return " +
+    "status=working with a `nudge` telling it to proceed with a sensible default decision " +
+    "(stating its assumption) and continue. Default to autonomous progress; reserve blocked " +
+    "for real human dependencies. Be strict about real tasks, but never loop on simple Q&A."
   const user =
     `Goal:\n${goal}\n\nRecent conversation:\n${conversation || "(none)"}\n\n` +
     `Agent's latest reply:\n${latestReply}`
   return { system, user }
 }
 
-/** Parse the judge's JSON. Returns null when unparseable / missing `done`. */
+/** Parse the judge's JSON. Accepts `status`, and tolerates a legacy boolean
+ *  `done` (true→done, false→working). Returns null when unparseable. */
 export function parseJudgeOutput(raw: string): Verdict | null {
   const start = raw.indexOf("{")
   const end = raw.lastIndexOf("}")
   if (start < 0 || end <= start) return null
-  let obj: { done?: unknown; reason?: unknown; nudge?: unknown }
+  let obj: { status?: unknown; done?: unknown; reason?: unknown; nudge?: unknown }
   try { obj = JSON.parse(raw.slice(start, end + 1)) } catch { return null }
-  if (typeof obj.done !== "boolean") return null
+  let status: TurnStatus
+  if (obj.status === "done" || obj.status === "working" || obj.status === "blocked") status = obj.status
+  else if (typeof obj.done === "boolean") status = obj.done ? "done" : "working"
+  else return null
   return {
-    done: obj.done,
+    status,
     reason: typeof obj.reason === "string" ? obj.reason : undefined,
     nudge: typeof obj.nudge === "string" ? obj.nudge : undefined,
   }
@@ -77,9 +93,11 @@ export class Overseer {
     if (!s) return { forward: true }                       // no active goal → not overseeing
 
     const verdict = await this.judge(s.goal, convId, replyText, policy.model ?? this.deps.defaultModel)
-    if (!verdict || verdict.done) {                        // fail open on garble; done ⇒ ship it
+    // fail open on garble; done ⇒ ship it; blocked ⇒ ship the question to the human
+    // and stop (never prod a blocked agent into acting unilaterally).
+    if (!verdict || verdict.status === "done" || verdict.status === "blocked") {
       this.sessions.delete(this.key(agent, convId))
-      return { forward: true }
+      return { forward: true, footer: verdict?.status === "blocked" ? "⏸ paused — awaiting a human." : undefined }
     }
 
     const maxIter = policy.maxIterations ?? 4

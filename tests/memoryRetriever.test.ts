@@ -27,19 +27,20 @@ test("librarian parse maps indices to paths, dedupes, rejects bad indices", () =
   expect(parseLibrarianOutput('{"nope":1}', cs)).toBeNull()
 })
 
-test("renderMemory builds a labelled block, empty when none", () => {
+test("renderMemory builds a labelled block with an as-of date, empty when none", () => {
   expect(renderMemory([])).toBe("")
   const block = renderMemory([
-    { path: "/a", scope: "global", title: "T1", tags: [], body: "B1", source: "x", created: "", updated: "" },
+    { path: "/a", scope: "global", title: "T1", tags: [], body: "B1", source: "x", created: "", updated: "2026-06-13T12:00:00.000Z" },
   ])
-  expect(block).toContain("Relevant memory:")
-  expect(block).toContain("## T1")
+  expect(block).toContain("Relevant memory")
+  expect(block).toContain("## T1 _(as of 2026-06-13)_")
   expect(block).toContain("B1")
 })
 
 // --- retriever integration with fakes ---
 // A deterministic fake embedder: vector = [matches "alpha", matches "beta"].
 const fakeEmbedder: Embedder = {
+  version: "fake-v1",
   async embed(texts) {
     return texts.map((t) => [/alpha/i.test(t) ? 1 : 0, /beta/i.test(t) ? 1 : 0])
   },
