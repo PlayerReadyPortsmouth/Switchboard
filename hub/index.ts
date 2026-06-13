@@ -27,6 +27,7 @@ import { VectorIndex } from "./memory/vectorIndex"
 import { TransformersEmbedder } from "./memory/embedder"
 import { MemoryRetriever } from "./memory/retriever"
 import { distill } from "./memory/distiller"
+import { Overseer } from "./overseer"
 import type { AgentConfig, AgentReply, SpawnTrigger, SpawnCardUpdate, CardSpec } from "./types"
 
 const CONFIG_DIR = process.env.SWITCHBOARD_CONFIG ?? join(import.meta.dir, "..", "config")
@@ -156,6 +157,13 @@ async function onAgentReply(reply: AgentReply, key: string): Promise<void> {
       const m = trig.re.exec(reply.text)
       if (m) { await runSpawnTrigger(trig, m as unknown as string[], reply.chatId); return }
     }
+    // Overseer: for opt-in agents, judge the turn against the goal and either
+    // swallow it (a nudge was delivered → another turn coming) or ship it.
+    if (agents[reply.agent]?.runtime.overseer?.enabled) {
+      const v = await overseer.intercept(reply.agent, reply.chatId, reply.text)
+      if (!v.forward) return
+      if (v.footer) reply.text = `${reply.text}\n\n${v.footer}`
+    }
     messageCache.record(reply.chatId, {
       role: "agent", text: reply.text, ts: Date.now(), agent: reply.agent,
     })
@@ -275,6 +283,16 @@ function deliverToAgent(agentName: string, channelId: string, idTag: string, con
   if (!ok) process.stderr.write(`deliver: agent "${agentName}" unavailable; skipping\n`)
 }
 
+// Overseer: the "keep prodding until done" loop for opt-in agents. Nudges are
+// delivered back to the agent as a synthesized system message (bypassing routing).
+const overseer = new Overseer({
+  run: makeRouterRunner(),
+  defaultModel: hub.overseerModel ?? hub.routerModel,
+  policyFor: (agent) => agents[agent]?.runtime.overseer,
+  deliverNudge: (agent, convId, text) => deliverToAgent(agent, convId, "overseer:nudge", text),
+  recentConversation: (convId) => messageCache.render(convId),
+})
+
 const baseGate = new BaseGate(join(hub.stateDir, "access.json"))
 
 // Only allowlisted users may press card buttons.
@@ -362,6 +380,8 @@ const orchestrator = new Orchestrator(hub, agents, {
   sendPlain: (chatId, text) => gateway.sendPlain(chatId, text),
   prepareDispatch: async ({ agent, inbound, isSwitch }) => {
     const rt = agents[agent]?.runtime
+    // A genuine user-initiated turn (re)sets the overseer goal for this agent.
+    if (rt?.overseer?.enabled) overseer.begin(agent, inbound.chatId, inbound.content)
     // Render context from PRIOR turns, then record this inbound so it's available
     // next turn (and to the distiller) without duplicating it in this turn's block.
     const policy = rt?.injectContext ?? "onSwitch"
