@@ -186,6 +186,20 @@ export interface HubConfig {
   distillerModel?: string        // model that distills a conversation into notes
   overseerModel?: string         // default judge model for overseen agents
   memory?: MemoryBackend         // recall index + embedder backend selection (default: all local)
+  gardener?: GardenerConfig      // access-weighting + periodic vault hygiene (default: off)
+}
+
+/** Access-weighted recall + the periodic vault-tending pass. Absent ⇒ recall
+ *  stays pure-cosine and no gardening runs (access hits are still recorded). */
+export interface GardenerConfig {
+  enabled?: boolean              // run the periodic gardener pass
+  intervalMs?: number            // gardener cadence (default 6h)
+  importanceWeight?: number      // usage boost on recall rank (default 0.15 when present)
+  hotSetSize?: number            // notes injected proactively by importance (default 3 when present)
+  decayHalfLifeMs?: number       // importance decay half-life (default 14d)
+  staleAfterMs?: number          // age past which a note is flagged stale (default 30d)
+  archiveAfterMs?: number        // cold-for-this-long ⇒ archive candidate (default 90d)
+  scopeBudget?: number           // notes per scope before archival kicks in (default 200)
 }
 
 /** Selects the memory recall index and embedder. Defaults are fully local

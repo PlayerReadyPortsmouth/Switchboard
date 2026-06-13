@@ -21,6 +21,16 @@
     "qdrant": { "url": "http://localhost:6333", "apiKeyEnv": "QDRANT_API_KEY", "collection": "switchboard_memory" },
     "openai": { "baseUrl": "https://api.openai.com/v1", "apiKeyEnv": "OPENAI_API_KEY", "model": "text-embedding-3-small" }
   },
+  "gardener": {
+    "enabled": false,
+    "intervalMs": 21600000,
+    "importanceWeight": 0.15,
+    "hotSetSize": 3,
+    "decayHalfLifeMs": 1209600000,
+    "staleAfterMs": 2592000000,
+    "archiveAfterMs": 7776000000,
+    "scopeBudget": 200
+  },
   "deployApproverUserId": "<USER_ID>",
   "webhookPort": 4400,
   "webhooks": [

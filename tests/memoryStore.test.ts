@@ -60,3 +60,18 @@ test("list gathers notes across multiple scopes, ignoring non-md", () => {
   const titles = s.list(["global", "agents/deploy", "users/none"]).map((n) => n.title).sort()
   expect(titles).toEqual(["D one", "G one"])
 })
+
+test("archive moves a note out of recall and unarchive restores it", () => {
+  const s = newStore()
+  const p = s.write("global", { title: "Cold note", body: "rarely used", source: "distiller" })
+  s.write("global", { title: "Hot note", body: "often used", source: "distiller" })
+  const arch = s.archive(p)
+  expect(arch).toContain(join("global", "archive"))
+  // archived note is excluded from list + allNotes (recall sources)
+  expect(s.list(["global"]).map((n) => n.title).sort()).toEqual(["Hot note"])
+  expect(s.allNotes().map((n) => n.title).sort()).toEqual(["Hot note"])
+  expect(s.read(arch).title).toBe("Cold note")   // still readable on disk
+  const back = s.unarchive(arch)
+  expect(s.list(["global"]).map((n) => n.title).sort()).toEqual(["Cold note", "Hot note"])
+  expect(back).toBe(p)
+})

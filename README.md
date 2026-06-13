@@ -119,6 +119,8 @@ These make the hub more autonomous. All extra model calls reuse **Claude Code au
 - **Formation is two-way.** Agents write/read explicitly via the shim's `remember` / `recall` tools (scope defaults to the agent's own folder), **and** a background **distiller** turns an idle conversation (`distillIdleMs`) into note upserts — non-blocking, never on the hot path.
 - **Dedup is entity-aware and conservative.** After any write, a background pass finds same-scope near-duplicates and gates a merge on an LLM "same fact, or distinct facts about different entities?" check — it **never merges on cosine alone**, and fails safe to "distinct" on uncertainty. Distiller-generated dups auto-merge (the staler note is dropped); **agent-authored notes are sacred** — never overwritten or deleted, only flagged to `<memoryDir>/.dedup-review.jsonl` for human review. The distiller also refuses to overwrite a hand-written note at a colliding title.
 
+**Access-weighting & the gardener.** Each note tracks usage (an `.access.json` sidecar — hits when a note is actually injected/recalled), with an exponentially-decayed importance so once-hot notes cool. When `gardener` is enabled, recall is re-ranked by importance and the top notes for the active scopes are **injected proactively** (a "hot set") so load-bearing facts surface without an explicit `recall`. A periodic background **gardener** then does whole-vault hygiene: cross-scope dedup, staleness flags, and **budgeted archival** of cold distiller notes (reversible; agent-authored notes are never archived/deleted, only flagged). Config: `gardener: { enabled, importanceWeight, hotSetSize, decayHalfLifeMs, staleAfterMs, archiveAfterMs, scopeBudget }`; off by default (access hits are still recorded so the signal is ready when you enable it). See [`docs/superpowers/specs/2026-06-13-vault-gardener-design.md`](docs/superpowers/specs/2026-06-13-vault-gardener-design.md).
+
 **The overseer.** An opt-in per-agent loop (`runtime.overseer: { enabled, maxIterations?, maxWallclockMs?, model? }`). On each finished turn, a judge scores the agent's reply against the goal and returns `done` / `working` / `blocked`:
 
 - `done` → ship the reply (plain chat and Q&A always resolve here, so it never loops on conversation).
@@ -146,7 +148,8 @@ Caps + fail-open (a garbled judge ships the reply rather than looping) bound cos
 - **Daily scheduler** (`schedules[]`): UTC-hour message delivery to an agent, once per day per schedule id.
 - **Config-driven ephemeral spawning** (`spawnTriggers[]`): an outbound-text regex spawns an ephemeral agent with an interpolated task, optional setup + teardown shell steps; spawned agents post cards and receive button clicks like any agent.
 - **Recent-message context cache** + per-agent `injectContext` policy; quote-reply capture.
-- **Memory vault** (`MemoryStore`/`MemoryRetriever`): four-scope Obsidian-style notes, local-embedding recall + Claude librarian, `remember`/`recall` shim tools, background distiller, and entity-aware dedup with protected agent-authored notes.
+- **Memory vault** (`MemoryStore`/`MemoryRetriever`): four-scope Obsidian-style notes, recall via a local-embedding OR hosted (Qdrant + OpenAI-compatible) backend + Claude librarian, `remember`/`recall` shim tools, background distiller, and entity-aware dedup with protected agent-authored notes.
+- **Access-weighting & gardener** (`accessStore.ts`/`gardener.ts`): decayed usage importance, importance-weighted recall + proactive hot-set injection, and a periodic whole-vault dedup/stale/archival pass (opt-in via `gardener`).
 - **Overseer** (`overseer.ts`): opt-in keep-prodding-until-done loop with `done`/`working`/`blocked` verdicts, autonomy bias, and iteration/wallclock caps.
 
 **Known gaps:**
@@ -154,7 +157,7 @@ Caps + fail-open (a garbled judge ships the reply rather than looping) bound cos
 - **Manual full Discord end-to-end** (a live bot in a guild) is the remaining check; the transport itself is proven via the smoke script.
 - **Idle GC of spawned workers**: workers are torn down when their process exits; a long-idle-but-alive worker is not yet reaped on a timer.
 - **Local embedder runtime**: the embedding model downloads on first run and needs the `@huggingface/transformers` native runtime; until it's warmed, memory recall is empty (writes/distillation still work and index as soon as the model loads). Or point `memory.embedder`/`memory.index` at a hosted backend (OpenAI-compatible embeddings + Qdrant) — see above.
-- **Vault gardening**: a periodic merge/prune + access-weighting ("gardener") pass over the whole vault is **specced but not yet built** — see [`docs/superpowers/specs/2026-06-13-vault-gardener-design.md`](docs/superpowers/specs/2026-06-13-vault-gardener-design.md). Dedup currently runs per-write.
+- **Archived-note deep recall**: archived notes have their vector dropped, so they're excluded from recall (and browsable on disk under `<scope>/archive/`); searching archived notes on demand and auto-restoring on a hit is future work.
 
 ## Docs
 

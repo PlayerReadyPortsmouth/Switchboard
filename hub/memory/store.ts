@@ -1,5 +1,5 @@
 import { readFileSync, writeFileSync, mkdirSync, renameSync, readdirSync, unlinkSync } from "fs"
-import { join } from "path"
+import { join, dirname, basename } from "path"
 
 /** A memory scope = a folder under the vault root. The four shapes the hub uses. */
 export type Scope =
@@ -108,6 +108,21 @@ export class MemoryStore {
 
   remove(path: string): void { try { unlinkSync(path) } catch {} }
 
+  /** Move a note into its scope's `archive/` subfolder (excluded from default
+   *  recall, still on disk). Reversible via unarchive. Returns the new path. */
+  archive(path: string): string {
+    const dest = join(dirname(path), "archive", basename(path))
+    mkdirSync(dirname(dest), { recursive: true })
+    renameSync(path, dest)
+    return dest
+  }
+  /** Move an archived note back up into its scope folder. Returns the new path. */
+  unarchive(path: string): string {
+    const dest = join(dirname(dirname(path)), basename(path))
+    renameSync(path, dest)
+    return dest
+  }
+
   list(scopes: Scope[]): Note[] {
     const out: Note[] = []
     for (const scope of scopes) {
@@ -129,7 +144,7 @@ export class MemoryStore {
       let entries: { name: string; isDirectory(): boolean }[] = []
       try { entries = readdirSync(dir, { withFileTypes: true }) } catch { return }
       for (const e of entries) {
-        if (e.name.startsWith(".")) continue
+        if (e.name.startsWith(".") || e.name === "archive") continue   // skip sidecar + archived
         const full = join(dir, e.name)
         if (e.isDirectory()) walk(full)
         else if (e.name.endsWith(".md")) { try { out.push(this.read(full)) } catch {} }

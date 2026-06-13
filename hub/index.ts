@@ -29,6 +29,8 @@ import { TransformersEmbedder, type Embedder } from "./memory/embedder"
 import { HttpEmbedder } from "./memory/httpEmbedder"
 import { QdrantIndex } from "./memory/qdrantIndex"
 import { MemoryRetriever } from "./memory/retriever"
+import { AccessStore } from "./memory/accessStore"
+import { Gardener } from "./memory/gardener"
 import { distill } from "./memory/distiller"
 import { Overseer } from "./overseer"
 import type { AgentConfig, AgentReply, SpawnTrigger, SpawnCardUpdate, CardSpec } from "./types"
@@ -78,9 +80,15 @@ const vectorIndex: MemoryIndex = mem.index === "qdrant" && mem.qdrant
       apiKey: mem.qdrant.apiKeyEnv ? process.env[mem.qdrant.apiKeyEnv] : undefined,
     })
   : new VectorIndex(join(memoryDir, ".index", "vectors.json"))
+// Usage signal: records access hits, weights recall, drives the proactive hot set.
+const garden = hub.gardener ?? {}
+const accessStore = new AccessStore(join(memoryDir, ".access.json"), garden.decayHalfLifeMs)
 const memoryRetriever = new MemoryRetriever({
   store: memoryStore, index: vectorIndex, embedder,
   run: makeRouterRunner(), librarianModel: hub.librarianModel ?? hub.routerModel,
+  access: accessStore,
+  importanceWeight: garden.importanceWeight ?? (garden.enabled ? 0.15 : 0),
+  hotSetSize: garden.hotSetSize ?? (garden.enabled ? 3 : 0),
 })
 void memoryRetriever.reindexAll().catch((e) => process.stderr.write(`memory: reindex failed: ${e}\n`))
 
@@ -411,6 +419,24 @@ setInterval(() => {
     void runDistill(convId).catch((e) => process.stderr.write(`distill: ${e}\n`))
   }
 }, 60_000).unref()
+
+// Periodic vault gardener: whole-vault dedup, staleness flags, budgeted archival.
+if (garden.enabled) {
+  const gardener = new Gardener({
+    store: memoryStore, index: vectorIndex, access: accessStore,
+    dedupe: (note) => memoryRetriever.dedupe(note),
+    staleAfterMs: garden.staleAfterMs, archiveAfterMs: garden.archiveAfterMs, scopeBudget: garden.scopeBudget,
+  })
+  const runGarden = () => gardener.run().then((r) => {
+    if (r.merged.length || r.archived.length || r.stale.length || r.flaggedDups.length) {
+      process.stderr.write(`gardener: merged=${r.merged.length} archived=${r.archived.length} stale=${r.stale.length} flagged=${r.flaggedDups.length}\n`)
+    }
+    for (const f of r.flaggedDups) {
+      try { appendFileSync(join(memoryDir, ".dedup-review.jsonl"), JSON.stringify({ ts: new Date().toISOString(), ...f }) + "\n") } catch {}
+    }
+  }).catch((e) => process.stderr.write(`gardener: ${e}\n`))
+  setInterval(() => void runGarden(), garden.intervalMs ?? 6 * 60 * 60_000).unref()
+}
 
 const orchestrator = new Orchestrator(hub, agents, {
   baseGate: (userId, chatId, isDM) => baseGate.gate(userId, chatId, isDM, Date.now()),
