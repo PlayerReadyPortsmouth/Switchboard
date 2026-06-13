@@ -57,6 +57,15 @@ export interface AgentAccess {
   users?: string[]      // user snowflakes
 }
 
+/** Per-agent overseer policy: keep prodding the agent until a judge says the
+ *  task is done, bounded by hard caps. Opt-in (absent ⇒ disabled). */
+export interface OverseerPolicy {
+  enabled: boolean
+  maxIterations?: number   // default 4 — re-prods before giving up
+  maxWallclockMs?: number  // default 600000 — total time budget per goal
+  model?: string           // judge model; defaults to hub.overseerModel
+}
+
 export interface AgentRuntime {
   cwd: string
   model?: string
@@ -64,6 +73,9 @@ export interface AgentRuntime {
   claudeArgs?: string[]        // extra flags appended to the agent's `claude` invocation
   appendSystemPrompt?: string
   resumable?: boolean        // persistent agent: persist + --resume its CLI session
+  useMemory?: boolean        // inject relevant memory-vault notes as context
+  injectContext?: "always" | "onSwitch" | "never"  // recent-message cache injection (default onSwitch)
+  overseer?: OverseerPolicy  // opt-in autonomous "keep prodding until done" loop
 }
 
 export interface AgentConfig {
@@ -165,4 +177,11 @@ export interface HubConfig {
   deployApproverUserId?: string  // Discord user id allowed to press deploy:* buttons
   gatedActions?: GatedAction[]   // hub-side button handlers that run shell commands
   channelAgents?: ChannelAgent[]  // channels pinned to a specific agent
+  // Memory & context (all optional; sensible defaults applied in index.ts).
+  memoryDir?: string             // Obsidian-style note vault root (default <stateDir>/memory)
+  contextCacheSize?: number      // recent-message ring-buffer cap per conversation (default 20)
+  distillIdleMs?: number         // idle gap before a conversation is distilled to notes (default 600000)
+  librarianModel?: string        // model that ranks recalled notes for relevance (default routerModel)
+  distillerModel?: string        // model that distills a conversation into notes
+  overseerModel?: string         // default judge model for overseen agents
 }

@@ -19,6 +19,8 @@ import { CardLifecycle } from "./cardLifecycle"
 import { matchGatedAction, requiresApprover } from "./gatedActions"
 import { isDeployAuthorized } from "./deployGate"
 import { clearReactionAgent } from "./channelPin"
+import { MessageCache } from "./messageCache"
+import { enrich } from "./enrich"
 import type { AgentConfig, AgentReply, SpawnTrigger, SpawnCardUpdate, CardSpec } from "./types"
 
 const CONFIG_DIR = process.env.SWITCHBOARD_CONFIG ?? join(import.meta.dir, "..", "config")
@@ -41,6 +43,10 @@ const notifyRouter = new NotifyRouter()
 
 // key → live transport (persistent agent name, or jobId for spawned workers).
 const transports = new Map<string, StreamJsonTransport>()
+
+// Recent-message cache (per Discord channel), persisted so it survives restarts
+// and feeds the background distiller. Source for "where relevant" context injection.
+const messageCache = new MessageCache(hub.contextCacheSize ?? 20, join(hub.stateDir, "cache"))
 
 const cardRegistry = new CardRegistry()
 const cardLifecycle = new CardLifecycle(cardRegistry, {
@@ -92,6 +98,9 @@ async function onAgentReply(reply: AgentReply, key: string): Promise<void> {
       const m = trig.re.exec(reply.text)
       if (m) { await runSpawnTrigger(trig, m as unknown as string[], reply.chatId); return }
     }
+    messageCache.record(reply.chatId, {
+      role: "agent", text: reply.text, ts: Date.now(), agent: reply.agent,
+    })
   }
   await gateway.sendReply(reply, agents[reply.agent])
 }
@@ -279,6 +288,20 @@ const orchestrator = new Orchestrator(hub, agents, {
   dispatch: (agent, key, inbound) => dispatcher.dispatch(agent, key, inbound),
   isAvailable: (agent) => dispatcher.isAvailable(agent),
   sendPlain: (chatId, text) => gateway.sendPlain(chatId, text),
+  prepareDispatch: async ({ agent, inbound, isSwitch }) => {
+    const rt = agents[agent]?.runtime
+    // Render context from PRIOR turns, then record this inbound so it's available
+    // next turn (and to the distiller) without duplicating it in this turn's block.
+    const policy = rt?.injectContext ?? "onSwitch"
+    const wantContext = policy === "always" || (policy === "onSwitch" && isSwitch)
+    const context = wantContext ? messageCache.render(inbound.chatId) : ""
+    messageCache.record(inbound.chatId, {
+      role: "user", text: inbound.content, ts: Date.parse(inbound.ts) || Date.now(),
+      user: inbound.user, userId: inbound.userId,
+    })
+    if (!context) return inbound
+    return { ...inbound, content: enrich(inbound.content, { context }) }
+  },
 })
 
 // Commands: an inbound whose trimmed content equals `match` delivers `message`
