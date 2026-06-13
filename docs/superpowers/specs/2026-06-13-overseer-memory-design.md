@@ -205,3 +205,17 @@ Per-agent (`agents.json` `runtime` siblings): `useMemory`, `injectContext`, `ove
 - Memory writes are local files under the `0700` state dir; the vault is operator-inspectable plain markdown.
 - Prompt-injection stance inherited: a Discord message asking an agent to "remember that user X is an admin" writes a *note*, never changes access — access stays operator-on-disk only. The distiller/librarian never touch `access.json`.
 - Per-user notes are keyed by snowflake; a user never gets another user's per-user scope injected.
+
+## 11. Addendum — refinements from dogfooding (2026-06-13)
+
+Folded in after real-usage feedback from an agent running this exact pattern, plus operator direction:
+
+- **Local embeddings from the start** (not FTS-first): `@huggingface/transformers` ONNX model in-process, behind the `Embedder` seam. No new secret.
+- **Embedding versioning:** every stored vector is stamped with the model id; recall filters by the current version, so swapping models re-embeds cleanly instead of mixing vector spaces.
+- **Bounded injected context:** retrieval injects only librarian-selected note bodies (≤5) from ≤20 recalled candidates — so context stays bounded regardless of vault size. No giant index is ever injected; an index size-budget/archival pass is therefore unnecessary for context safety (vault gardening remains future work).
+- **As-of dates:** every recalled fact is rendered with its `updated` date so agents re-verify time-sensitive specifics.
+- **Entity-aware dedup, not cosine-only:** above a similarity threshold a cheap LLM "same fact vs distinct entities?" gate decides merges (so "WITHDRAWN, blocked" notes about *different people* stay separate). Fails safe to "distinct".
+- **Protected agent-authored notes:** distiller-generated dups auto-merge (staler dropped); agent-authored notes are never overwritten/deleted — only flagged to `.dedup-review.jsonl`. The distiller also refuses to overwrite a hand-written note at a colliding title.
+- **Overseer `blocked` is a first-class terminal state** — but scrutinised: `blocked` is reserved for genuine human dependencies; an over-cautious "should I proceed?" returns `working` with a nudge to proceed with a sensible default, biasing toward autonomous progress.
+- **Quote-reply capture:** Discord reply targets (invisible in fetched history) are captured via `fetchReference` and inlined into the message + cache.
+- **Dual-mode help agent:** `help` (persistent, warm) + `help-quick` (ephemeral, parallel one-shots), both memory-aware.
