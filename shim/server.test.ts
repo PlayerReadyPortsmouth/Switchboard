@@ -36,3 +36,12 @@ ut("update_card maps to an update wire message", () => {
 ut("finish maps to a finish wire message", () => {
   ue(wire("finish", {})).toEqual({ t: "finish" } as any)
 })
+
+ut("remember maps to a remember wire message", () => {
+  ue(wire("remember", { scope: "global", title: "T", tags: ["a"], body: "B" }) as any)
+    .toEqual({ t: "remember", scope: "global", title: "T", tags: ["a"], body: "B" })
+})
+
+ut("recall is not a fire-and-forget wire message (handled request/response)", () => {
+  ue(wire("recall", { query: "x" })).toBeNull()
+})

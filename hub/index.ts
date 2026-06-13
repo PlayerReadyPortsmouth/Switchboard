@@ -80,9 +80,24 @@ const cardLifecycle = new CardLifecycle(cardRegistry, {
 /** Build (but do not start) a StreamJsonTransport and register it under `key`. */
 function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonTransport {
   const socketPath = join(hub.stateDir, `${key}.sock`)
+  const socket = new ShimSocketServer(socketPath)
+  // Agent-initiated memory: `remember` writes a note (scope defaults to this
+  // agent's own folder) and indexes it; `recall` searches and returns notes.
+  socket.onRemember(({ scope, title, tags, body }) => {
+    const s = (scope && /^(global$|users\/|agents\/|channels\/)/.test(scope) ? scope : `agents/${name}`) as Scope
+    try {
+      const path = memoryStore.write(s, { title, tags, body, source: `agent:${name}` })
+      void memoryRetriever.indexNote(memoryStore.read(path)).catch(() => {})
+    } catch (e) { process.stderr.write(`memory: remember failed: ${e}\n`) }
+  })
+  socket.onRecall(async ({ query, scopes }) => {
+    const sc = (scopes?.length ? scopes : ["global", `agents/${name}`]) as Scope[]
+    try { return (await memoryRetriever.relevant(query, sc)).notes.map((n) => ({ title: n.title, body: n.body })) }
+    catch { return [] }
+  })
   const t = new StreamJsonTransport(name, cfg, {
     spawner,
-    socket: new ShimSocketServer(socketPath),
+    socket,
     shimPath: SHIM_PATH,
     socketPath,
     mcpConfigPath: join(hub.stateDir, `${key}.mcp.json`),

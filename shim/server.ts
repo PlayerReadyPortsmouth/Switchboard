@@ -2,9 +2,10 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js"
-import { encode } from "../hub/framing"
+import { encode, LineDecoder } from "../hub/framing"
 
-/** Translate an MCP tool call from CC into the wire message for the hub. */
+/** Translate a fire-and-forget MCP tool call from CC into the wire message for
+ *  the hub. `recall` is request/response and handled separately. */
 export function toolCallToWire(name: string, args: Record<string, any>) {
   switch (name) {
     case "react":
@@ -17,6 +18,8 @@ export function toolCallToWire(name: string, args: Record<string, any>) {
       return { t: "update", chatId: args.chat_id, correlationId: args.correlation_id, card: args.card }
     case "finish":
       return { t: "finish" }
+    case "remember":
+      return { t: "remember", scope: args.scope, title: args.title, tags: args.tags, body: args.body }
     default:
       return null
   }
@@ -37,10 +40,26 @@ async function main() {
         "Your normal text response IS your reply to the user — you do not need a separate reply tool." },
   )
 
-  // Connect to the hub socket purely to FORWARD tool calls (agent → hub).
-  // Inbound messages and button interactions reach this agent via its stdin
-  // (the hub owns the process), not through this socket.
-  const sock = await Bun.connect({ unix: SOCKET, socket: { data() {} } })
+  // Connect to the hub socket to FORWARD tool calls (agent → hub) and to read
+  // back `recall` results. Inbound messages and button interactions reach this
+  // agent via its stdin (the hub owns the process), not through this socket.
+  let reqCounter = 0
+  const pending = new Map<string, (notes: { title: string; body: string }[]) => void>()
+  const decoder = new LineDecoder()
+  const sock = await Bun.connect({
+    unix: SOCKET,
+    socket: {
+      data(_s, data) {
+        for (const obj of decoder.push(data.toString())) {
+          const m = obj as { t?: string; id?: string; notes?: { title: string; body: string }[] }
+          if (m.t === "recall_result" && m.id && pending.has(m.id)) {
+            pending.get(m.id)!(m.notes ?? [])
+            pending.delete(m.id)
+          }
+        }
+      },
+    },
+  })
   sock.write(encode({ t: "register", agent: AGENT }))
 
   mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -103,11 +122,40 @@ async function main() {
       { name: "finish",
         description: "Signal you have completed your task and need no further turns. For an ephemeral (spawned) agent this ends and tears down the session; for a persistent agent it simply ends the turn.",
         inputSchema: { type: "object", properties: {} } },
+      { name: "remember",
+        description: "Save a durable note to the memory vault so it can be recalled in future conversations. Use for stable facts, preferences, and learnings — not transient chatter. `scope` defaults to your own agent memory; pass \"global\" for shared knowledge, \"users/<id>\" for a person, or \"channels/<id>\" for a project.",
+        inputSchema: { type: "object", properties: {
+          scope: { type: "string", description: "global | users/<id> | agents/<name> | channels/<id> (default: your own)" },
+          title: { type: "string", description: "Short, stable title — reusing it updates the existing note." },
+          tags: { type: "array", items: { type: "string" } },
+          body: { type: "string", description: "Markdown body; [[wikilinks]] allowed." } },
+          required: ["title", "body"] } },
+      { name: "recall",
+        description: "Search the memory vault for notes relevant to a query and get their contents back. Use before answering when prior context might help.",
+        inputSchema: { type: "object", properties: {
+          query: { type: "string" },
+          scopes: { type: "array", items: { type: "string" }, description: "Scopes to search; defaults to global + your own agent memory." } },
+          required: ["query"] } },
     ],
   }))
 
   mcp.setRequestHandler(CallToolRequestSchema, async req => {
-    const wire = toolCallToWire(req.params.name, (req.params.arguments ?? {}) as any)
+    const args = (req.params.arguments ?? {}) as Record<string, any>
+    // recall is request/response: send, await the hub's result (or time out empty).
+    if (req.params.name === "recall") {
+      const id = `r${++reqCounter}`
+      const notes = await new Promise<{ title: string; body: string }[]>((resolve) => {
+        pending.set(id, resolve)
+        sock.write(encode({ t: "recall", id, query: args.query, scopes: args.scopes }))
+        const timer = setTimeout(() => { if (pending.delete(id)) resolve([]) }, 10000)
+        ;(timer as { unref?: () => void }).unref?.()
+      })
+      const text = notes.length
+        ? notes.map((n) => `## ${n.title}\n${n.body}`).join("\n\n")
+        : "(no relevant memory found)"
+      return { content: [{ type: "text", text }] }
+    }
+    const wire = toolCallToWire(req.params.name, args)
     if (!wire) return { content: [{ type: "text", text: `unknown tool: ${req.params.name}` }], isError: true }
     sock.write(encode(wire))
     return { content: [{ type: "text", text: "sent" }] }
