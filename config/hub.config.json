@@ -74,6 +74,21 @@
       "allowlistOnly": true
     }
   ],
+  "directCommands": [
+    {
+      "match": "!tb status",
+      "exec": { "type": "http", "url": "https://api.example.com/status/$1", "secretEnv": "STATUS_TOKEN" },
+      "render": "card",
+      "cardTitle": "Service status",
+      "template": "**{{service}}**: {{state}} — {{detail}}"
+    },
+    {
+      "match": "!tb digest",
+      "exec": { "type": "shell", "command": "/opt/scripts/digest.sh $args" },
+      "formatAgent": "assistant",
+      "template": "Turn this raw digest into a tidy summary for the channel:"
+    }
+  ],
   "spawnTriggers": [
     {
       "pattern": "SPAWN_WORKER\\s+(\\S+)",

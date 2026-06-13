@@ -33,7 +33,8 @@ import { AccessStore } from "./memory/accessStore"
 import { Gardener } from "./memory/gardener"
 import { distill } from "./memory/distiller"
 import { Overseer } from "./overseer"
-import type { AgentConfig, AgentReply, SpawnTrigger, SpawnCardUpdate, CardSpec } from "./types"
+import { matchDirectCommand, runDirect, interpolateArgs, type DirectExecutor } from "./directCommands"
+import type { AgentConfig, AgentReply, SpawnTrigger, SpawnCardUpdate, CardSpec, DirectCommand } from "./types"
 
 const CONFIG_DIR = process.env.SWITCHBOARD_CONFIG ?? join(import.meta.dir, "..", "config")
 const { hub, agents } = loadConfigs(CONFIG_DIR)
@@ -476,9 +477,43 @@ const orchestrator = new Orchestrator(hub, agents, {
   },
 })
 
+// Direct commands (Tier B): a keyword runs shell/HTTP and formats the result —
+// no model in the loop, unless formatAgent routes the raw result to an agent.
+const directExecutor: DirectExecutor = async (spec, args) => {
+  if (spec.type === "shell") {
+    const proc = Bun.spawn(["sh", "-c", interpolateArgs(spec.command, args)], { stdout: "pipe", stderr: "pipe" })
+    const text = (await new Response(proc.stdout).text()).trim()
+    await proc.exited
+    return { text, json: tryJson(text) }
+  }
+  const headers: Record<string, string> = {}
+  for (const [k, v] of Object.entries(spec.headers ?? {})) headers[k] = interpolateArgs(v, args)
+  if (spec.secretEnv && process.env[spec.secretEnv]) headers["authorization"] = `Bearer ${process.env[spec.secretEnv]}`
+  const res = await fetch(interpolateArgs(spec.url, args), {
+    method: spec.method ?? "GET", headers,
+    body: spec.bodyTemplate ? interpolateArgs(spec.bodyTemplate, args) : undefined,
+  })
+  const text = await res.text()
+  return { text, json: tryJson(text) }
+}
+function tryJson(t: string): any { try { return JSON.parse(t) } catch { return undefined } }
+
+async function runDirectCommand(cmd: DirectCommand, args: string, chatId: string): Promise<void> {
+  try {
+    const outcome = await runDirect(cmd, args, directExecutor)
+    if (outcome.kind === "agent") deliverToAgent(outcome.agent, chatId, `direct:${cmd.match}`, outcome.content)
+    else if (outcome.kind === "card") await gateway.sendCard(chatId, outcome.card)
+    else await gateway.sendPlain(chatId, outcome.text || "(no output)")
+  } catch (e) {
+    process.stderr.write(`directCommand: "${cmd.match}" failed: ${e}\n`)
+    await gateway.sendPlain(chatId, `⚠️ \`${cmd.match}\` failed; see hub logs.`)
+  }
+}
+
 // Commands: an inbound whose trimmed content equals `match` delivers `message`
 // to agent@channel (gated by the base-gate allowlist if allowlistOnly).
 const commands = hub.commands ?? []
+const directCommands = hub.directCommands ?? []
 gateway.handleInbound((m) => {
   const trimmed = m.content.trim()
   const cmd = commands.find((c) => c.match === trimmed)
@@ -486,6 +521,12 @@ gateway.handleInbound((m) => {
     if (cmd.allowlistOnly && !baseGate.listAllowed().includes(m.userId)) return
     deliverToAgent(cmd.agent, cmd.channelId, `command:${cmd.match}`, cmd.message)
     void gateway.sendPlain(m.chatId, `✅ Command \`${cmd.match}\` triggered.`)
+    return
+  }
+  const direct = matchDirectCommand(m.content, directCommands)
+  if (direct) {
+    if (direct.cmd.allowlistOnly && !baseGate.listAllowed().includes(m.userId)) return
+    void runDirectCommand(direct.cmd, direct.args, m.chatId)
     return
   }
   void orchestrator.handleMessage(m)

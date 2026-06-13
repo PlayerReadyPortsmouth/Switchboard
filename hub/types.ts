@@ -161,6 +161,24 @@ export interface ChannelAgent {
   clearReaction?: string;
 }
 
+/** A keyword chat command that runs dedicated code (shell or HTTP) and formats
+ *  the result — no model in the loop, unless `formatAgent` is set (then the raw
+ *  result is handed to that agent to format/reply). The "Tier B" surface that
+ *  ports deterministic monolith commands. */
+export type DirectExec =
+  | { type: "shell"; command: string }   // $args / $1… interpolated
+  | { type: "http"; url: string; method?: string; headers?: Record<string, string>; secretEnv?: string; bodyTemplate?: string }
+
+export interface DirectCommand {
+  match: string             // keyword; matches exact, or as a prefix with trailing args
+  exec: DirectExec
+  render?: "text" | "card"  // default text
+  template?: string         // deterministic formatting: $args/$N + {{json.path}}; omit ⇒ raw output
+  cardTitle?: string        // title when render === "card"
+  formatAgent?: string      // bridge: hand the raw result to this agent to format/reply
+  allowlistOnly?: boolean   // only base-gate-allowlisted users may trigger
+}
+
 export interface HubConfig {
   botTokenEnv: string
   guildIds: string[]
@@ -175,6 +193,7 @@ export interface HubConfig {
   webhooks?: WebhookRoute[]      // inbound HTTP webhooks → agent cards
   schedules?: ScheduleRoute[]    // daily UTC-scheduled agent messages
   commands?: CommandRoute[]      // exact-match chat commands → agent messages
+  directCommands?: DirectCommand[]  // keyword → shell/HTTP exec → formatted reply/card (Tier B)
   spawnTriggers?: SpawnTrigger[] // outbound-text patterns → ephemeral-agent spawns
   webhookPort?: number           // single HTTP listener port for all webhooks[].path
   deployApproverUserId?: string  // Discord user id allowed to press deploy:* buttons
