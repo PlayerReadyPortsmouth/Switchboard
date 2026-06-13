@@ -12,7 +12,7 @@ import { route as routeFn } from "./router"
 import { Orchestrator } from "./orchestrator"
 import { NotifyRouter } from "./notifyRouter"
 import { startWebhookListener, type WebhookHandler } from "./webhookListener"
-import { shouldRunDailyAt, currentBucket } from "./scheduler"
+import { cronMatches, minuteBucket, scheduleCron } from "./scheduler"
 import { drainApprovals } from "./approvals"
 import { CardRegistry } from "./cardRegistry"
 import { CardLifecycle } from "./cardLifecycle"
@@ -380,19 +380,20 @@ const webhookHandlers: WebhookHandler[] = (hub.webhooks ?? []).map((w) => ({
 const listener = startWebhookListener(hub.webhookPort ?? 0, webhookHandlers)
 void listener
 
-// Schedules: fire daily at hourUtc (UTC), once per hour-bucket per id.
+// Schedules: fire on a 5-field cron expression (UTC), once per minute-bucket per
+// id. Checked every 30s; the per-id minute bucket prevents a double-fire.
 const scheduleBuckets = new Map<string, string | null>()
-const schedules = hub.schedules ?? []
+const schedules = (hub.schedules ?? []).map((s) => ({ s, cron: scheduleCron(s) }))
 setInterval(() => {
   const now = new Date()
-  for (const s of schedules) {
-    const last = scheduleBuckets.get(s.id) ?? null
-    if (shouldRunDailyAt(now, s.hourUtc, last)) {
-      scheduleBuckets.set(s.id, currentBucket(now))
-      deliverToAgent(s.agent, s.channelId, `schedule:${s.id}`, s.message)
-    }
+  for (const { s, cron } of schedules) {
+    if (!cron || !cronMatches(cron, now)) continue
+    const bucket = minuteBucket(now)
+    if (scheduleBuckets.get(s.id) === bucket) continue   // already fired this minute
+    scheduleBuckets.set(s.id, bucket)
+    deliverToAgent(s.agent, s.channelId, `schedule:${s.id}`, s.message)
   }
-}, 5 * 60 * 1000).unref()
+}, 30 * 1000).unref()
 
 // Idle backstop: close any ephemeral (spawned) transport with no activity for
 // ephemeralTimeoutMs — guards against an agent that neither finishes nor is

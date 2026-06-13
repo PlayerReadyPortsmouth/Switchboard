@@ -100,10 +100,12 @@ export interface WebhookRoute {
   prefix?: string       // optional token prepended to the raw body
 }
 
-/** A daily UTC-scheduled message delivered to an agent. */
+/** A UTC-scheduled message delivered to an agent. Either a 5-field `cron`
+ *  expression (`min hour dom mon dow`, UTC) or the legacy daily `hourUtc`. */
 export interface ScheduleRoute {
   id: string            // unique id; one run-bucket is tracked per id
-  hourUtc: number       // UTC hour (0–23) to fire at
+  cron?: string         // 5-field cron (UTC); takes precedence over hourUtc
+  hourUtc?: number      // legacy daily shorthand (UTC hour 0–23) ⇒ "0 <hourUtc> * * *"
   agent: string
   channelId: string
   message: string       // message content delivered at the scheduled time

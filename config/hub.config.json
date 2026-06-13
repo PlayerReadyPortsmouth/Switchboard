@@ -45,10 +45,24 @@
   "schedules": [
     {
       "id": "daily-digest",
-      "hourUtc": 7,
+      "cron": "0 7 * * *",
       "agent": "assistant",
       "channelId": "<channel id>",
       "message": "Post the daily digest."
+    },
+    {
+      "id": "hourly-pulse",
+      "cron": "0 * * * *",
+      "agent": "assistant",
+      "channelId": "<channel id>",
+      "message": "Post the hourly pulse."
+    },
+    {
+      "id": "weekday-payroll",
+      "cron": "0 9 * * 1-5",
+      "agent": "assistant",
+      "channelId": "<channel id>",
+      "message": "Run the payroll check."
     }
   ],
   "commands": [
