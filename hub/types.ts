@@ -184,6 +184,22 @@ export interface DirectCommand {
   allowlistOnly?: boolean   // only base-gate-allowlisted users may trigger
 }
 
+/** A named outbound destination the hub can POST to. Agents address it by `id`
+ *  (via the post_webhook tool) — they never supply a URL, so there is no
+ *  arbitrary-URL exfiltration path. An optional `pattern` makes it also fire on
+ *  matching agent outbound text (like spawnTriggers). */
+export interface OutboundRoute {
+  id: string                // address for post_webhook / hub events; the log key
+  url: string               // destination (operator-configured, never agent-supplied)
+  pattern?: string          // optional: agent outbound-text regex trigger ($1.. = groups)
+  secretEnv?: string        // optional: env var holding the HMAC signing secret
+  method?: string           // default POST
+  headers?: Record<string, string>  // optional static headers
+  template?: string         // optional body template ($1.. from groups); omit ⇒ raw text/body
+  consume?: boolean         // text-trigger: if set, the matched text is NOT also sent to Discord
+  requireApproval?: boolean // reserved: gate behind the deploy-approver before firing (future)
+}
+
 export interface HubConfig {
   botTokenEnv: string
   guildIds: string[]
@@ -200,6 +216,9 @@ export interface HubConfig {
   schedules?: ScheduleRoute[]    // daily UTC-scheduled agent messages
   commands?: CommandRoute[]      // exact-match chat commands → agent messages
   directCommands?: DirectCommand[]  // keyword → shell/HTTP exec → formatted reply/card (Tier B)
+  outboundWebhooks?: OutboundRoute[]  // named/text-triggered signed outbound HTTP POSTs
+  outboundAllowedHosts?: string[]   // optional allowlist of destination hosts (defense-in-depth)
+  outboundRetries?: number          // outbound delivery attempts before dead-letter (default 3)
   spawnTriggers?: SpawnTrigger[] // outbound-text patterns → ephemeral-agent spawns
   webhookPort?: number           // single HTTP listener port for all webhooks[].path
   deployApproverUserId?: string  // Discord user id allowed to press deploy:* buttons
