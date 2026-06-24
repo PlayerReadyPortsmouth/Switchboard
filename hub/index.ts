@@ -43,6 +43,7 @@ import { OutboundDelivery } from "./outboundDelivery"
 import { matchOutbound, renderBody } from "./outbound"
 import { AuditLog } from "./auditLog"
 import { parseJsonlTail } from "./audit"
+import { parseAuditCommand, renderAuditLines, renderAuditSummary } from "./auditCommand"
 import type { AgentConfig, AgentReply, SpawnTrigger, SpawnCardUpdate, CardSpec, DirectCommand, OutboundRoute } from "./types"
 
 const CONFIG_DIR = process.env.SWITCHBOARD_CONFIG ?? join(import.meta.dir, "..", "config")
@@ -752,6 +753,18 @@ const commands = hub.commands ?? []
 const directCommands = hub.directCommands ?? []
 gateway.handleInbound((m) => {
   const trimmed = m.content.trim()
+  // Audit ledger query (operator-only): list recent governed effects or a rollup.
+  if (/^!audit\b/i.test(trimmed)) {
+    if (!baseGate.listAllowed().includes(m.userId)) return
+    if (!hub.audit?.enabled) { void gateway.sendPlain(m.chatId, "📜 audit logging is off (set `hub.audit.enabled`)."); return }
+    const q = parseAuditCommand(trimmed.replace(/^!audit\b/i, ""))
+    if (q.summary) void gateway.sendPlain(m.chatId, renderAuditSummary(audit.summary(q.filter)))
+    else void gateway.sendPlain(m.chatId, renderAuditLines(
+      audit.recent({ ...q.filter, limit: q.filter.limit ?? 25 }),
+      (ts) => new Date(ts).toISOString().slice(11, 19),
+    ))
+    return
+  }
   // On-demand status snapshot (operator-only): renders the live board here & now.
   if (/^!(status|usage|health)\b/i.test(trimmed)) {
     if (!baseGate.listAllowed().includes(m.userId)) return
