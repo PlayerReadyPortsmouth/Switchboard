@@ -277,6 +277,7 @@ export interface HubConfig {
   contextWindows?: Record<string, number>  // model id → context window (tokens); `default` is the fallback
   statusChannelId?: string       // channel for the live status embed (absent ⇒ board off)
   statusRefreshMs?: number       // status board heartbeat cadence (default 15000)
+  metricsPort?: number           // port for the Prometheus /metrics + /health listener (absent ⇒ off)
   audit?: AuditConfig            // append-only ledger of every governed effect (default off)
   approvals?: ApprovalConfig     // human-in-the-loop approval gate for requireApproval effects (default off)
 }

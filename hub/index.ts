@@ -45,12 +45,15 @@ import { AuditLog } from "./auditLog"
 import { parseJsonlTail, shouldRotate, rotationsToPrune } from "./audit"
 import { parseAuditCommand, renderAuditLines, renderAuditSummary } from "./auditCommand"
 import { ApprovalRegistry, renderApprovalCard, parseApprovalCustomId, type ApprovalRequest, type ApprovalDecision, type ApprovalFire } from "./approval"
+import { startMetricsServer } from "./metricsServer"
+import { renderHealth, type MetricsInput } from "./metrics"
 import type { AgentConfig, AgentReply, SpawnTrigger, SpawnCardUpdate, CardSpec, DirectCommand, OutboundRoute } from "./types"
 
 const CONFIG_DIR = process.env.SWITCHBOARD_CONFIG ?? join(import.meta.dir, "..", "config")
 const { hub, agents } = loadConfigs(CONFIG_DIR)
 
 loadEnv(join(hub.stateDir, ".env"))   // load DISCORD_BOT_TOKEN + agent env if present
+const startedAt = Date.now()          // for the metrics/health uptime gauge
 const token = process.env[hub.botTokenEnv]
 if (!token) { console.error(`missing ${hub.botTokenEnv}`); process.exit(1) }
 
@@ -842,6 +845,16 @@ gateway.handleInbound((m) => {
     ))
     return
   }
+  // Health rollup (operator-only): the same data /health serves, in chat.
+  if (/^!metrics\b/i.test(trimmed)) {
+    if (!baseGate.listAllowed().includes(m.userId)) return
+    const { body } = renderHealth(collectMetrics())
+    const head = `**health: ${body.status}** · up ${Math.floor(body.uptimeSec / 60)}m · routes/10m ${body.routeRate10m} · pending approvals ${body.pendingApprovals}`
+    const rows = body.agents.map((a) =>
+      `${a.alive ? "🟢" : "🔴"} \`${a.name}\` ${a.busy ? "busy" : "idle"} · q${a.queueDepth} · ctx ${Math.round(a.contextFill * 100)}%`)
+    void gateway.sendPlain(m.chatId, [head, ...rows].join("\n"))
+    return
+  }
   // On-demand status snapshot (operator-only): renders the live board here & now.
   if (/^!(status|usage|health)\b/i.test(trimmed)) {
     if (!baseGate.listAllowed().includes(m.userId)) return
@@ -873,6 +886,23 @@ setInterval(() => {
     void gateway.sendPlain(chatId, "✅ Paired! You can talk to the agents now. Try `!agents`.")
   }
 }, 5000).unref()
+
+// Metrics & health: project the live status snapshot + audit summary onto a
+// Prometheus /metrics scrape and a /health probe (and the !metrics command).
+// Off unless metricsPort is set. Serves only aggregated, non-secret numbers.
+function collectMetrics(): MetricsInput {
+  statusRegistry.setAgents(buildAgentRows())
+  statusRegistry.setOverseers(buildOverseerRows())
+  const now = Date.now()
+  return {
+    now, startedAt,
+    status: statusRegistry.snapshot(now),
+    audit: audit.summary({}),
+    pendingApprovals: approvalRegistry.pendingCount(),
+  }
+}
+const metricsServer = startMetricsServer(hub.metricsPort ?? 0, collectMetrics)
+if (metricsServer) console.error(`switchboard hub: metrics/health on :${hub.metricsPort}`)
 
 // Auto-deny pending approvals past their TTL: edit the card to "Expired" and
 // audit the lapse. The held effect never fires (fail-closed).

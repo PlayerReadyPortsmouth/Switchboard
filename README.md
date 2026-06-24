@@ -159,6 +159,16 @@ Human-in-the-loop for the dangerous stuff. A governed effect marked `requireAppr
 
 The held effect (today, an outbound webhook delivery) is kept in an in-memory `ApprovalRegistry` until resolved. Only configured `approvers` (default `deployApproverUserId`) may press the buttons — enforced at the notify-button gate, so an agent has no path to self-approve. Resolution is **single-shot** (a double-click can't fire twice) and **fail-closed**: deny, a `ttlMs` timeout (a periodic sweep auto-denies), or a hub restart all leave the effect unfired. The card is edited in place to Approved / Denied / Expired. Every step — `request` → `grant`/`deny`/`expire` → the eventual delivery — is an `approval`/`outbound` audit event threaded by the same `corr`, so `!audit` reconstructs exactly who approved what. The registry is generic, so `exec` and other effects can adopt the same gate next.
 
+## Metrics & health
+
+Point Grafana or a load balancer at the hub. Set `metricsPort` and the hub serves two GET endpoints (off when unset). See [`docs/superpowers/specs/2026-06-24-metrics-health-design.md`](docs/superpowers/specs/2026-06-24-metrics-health-design.md).
+
+- **`GET /metrics`** — Prometheus text exposition, *projected from* the live `StatusRegistry` snapshot and the audit summary (no new instrumentation): per-agent `switchboard_agent_{alive,busy,queue_depth,context_fill_ratio,cost_usd,replicas}`, plus `switchboard_{route_rate_10m,ephemerals_active,overseers_active,pending_approvals,uptime_seconds}` and `switchboard_ledger_{events,outcomes,cost_usd}` (gauges over the current `audit.jsonl` window).
+- **`GET /health`** (and `/healthz`) — JSON `{ status, uptimeSec, agents[], pendingApprovals, routeRate10m }`, returning **503 `degraded`** when agents exist but none are alive (a real load-balancer readiness signal), else **200 `ok`**.
+- **`!metrics`** — the same health rollup in chat (operator-only, like `!status`).
+
+The endpoint is unauthenticated (the Prometheus norm) and serves only aggregated, non-secret numbers — no message content, no secrets, no per-user data; bind it on a private network.
+
 ## Status of features
 
 **Working** (covered by the passing unit tests + the real-CLI smoke check):
@@ -184,6 +194,7 @@ The held effect (today, an outbound webhook delivery) is kept in an in-memory `A
 - **Session health, status & scaling** (`usage.ts`/`turnGate.ts`/`sessionGovernor.ts`/`statusRegistry.ts`/`statusBoard.ts`/`agentPool.ts`): per-turn token/cost capture, a one-turn-in-flight queue gate, context-window governance (checkpoint → auto-compact), a live self-editing status embed (+ `!status`), and opt-in replica auto-scaling for a hot agent.
 - **Audit log** (`audit.ts`/`auditLog.ts`/`auditCommand.ts`): one append-only `<stateDir>/audit.jsonl` ledger of every governed effect (route / spawn / exec / outbound / session / access / event), metadata-only with secret redaction, size-rotated, queryable via operator-only `!audit` (+ `!audit cost` rollup). Off unless `audit.enabled`; per-agent opt-out.
 - **Gated actions & approvals** (`approval.ts`): a `requireApproval` effect parks for a human Approve/Deny card and fires only on an authorized approver's grant — fail-closed, single-shot, TTL-swept, audited end-to-end by `corr`. Off unless `approvals.enabled`.
+- **Metrics & health** (`metrics.ts`/`metricsServer.ts`): a Prometheus `GET /metrics` scrape + `GET /health` probe (503 when no agent is alive) on `metricsPort`, projected from the live status snapshot + audit summary, plus a `!metrics` chat rollup. Off unless `metricsPort` is set.
 - **Overseer** (`overseer.ts`): opt-in keep-prodding-until-done loop with `done`/`working`/`blocked` verdicts, autonomy bias, and iteration/wallclock caps.
 
 **Known gaps:**
@@ -203,3 +214,4 @@ The held effect (today, an outbound webhook delivery) is kept in an in-memory `A
 - Outbound webhooks — Spec: [`docs/superpowers/specs/2026-06-24-outbound-webhooks-design.md`](docs/superpowers/specs/2026-06-24-outbound-webhooks-design.md)
 - Audit log — Spec: [`docs/superpowers/specs/2026-06-24-audit-log-design.md`](docs/superpowers/specs/2026-06-24-audit-log-design.md)
 - Gated action catalog — Spec: [`docs/superpowers/specs/2026-06-24-gated-action-catalog-design.md`](docs/superpowers/specs/2026-06-24-gated-action-catalog-design.md)
+- Metrics & health — Spec: [`docs/superpowers/specs/2026-06-24-metrics-health-design.md`](docs/superpowers/specs/2026-06-24-metrics-health-design.md)

@@ -18,6 +18,7 @@
   "contextWindows": { "default": 200000 },
   "statusChannelId": "<channel id for the live status board, or omit to disable>",
   "statusRefreshMs": 15000,
+  "metricsPort": 9090,
   "memory": {
     "index": "local",
     "embedder": "local",
