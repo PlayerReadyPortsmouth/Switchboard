@@ -46,6 +46,17 @@ test("open stamps a mission:<id> channel + deadline; settle is single-shot", () 
   expect(h.r.settle(channel, "again")).toBe(false)   // single-shot
 })
 
+test("drop forgets a pending step without resolving it (single-shot vs settle)", () => {
+  const h = harness()
+  let called = false
+  const { channel } = h.r.open("ship:a", "x", () => { called = true })
+  expect(h.r.drop(channel)).toBe(true)
+  expect(called).toBe(false)               // resolve never fired
+  expect(h.r.isMissionChannel(channel)).toBe(false)
+  expect(h.r.settle(channel, "late")).toBe(false)   // already gone
+  expect(h.r.drop(channel)).toBe(false)
+})
+
 test("sweepExpired returns only past-deadline entries with their resolvers", () => {
   const h = harness(1000)
   h.at(0)

@@ -54,6 +54,13 @@ export class MissionRegistry {
     return true
   }
 
+  /** Forget a pending step WITHOUT resolving it — used when the engine fails a
+   *  step itself (timeout / unavailable agent) and resolves the awaited promise
+   *  on its own. Returns false if already gone. */
+  drop(channel: string): boolean {
+    return this.byChannel.delete(channel)
+  }
+
   /** Past-deadline steps, removed and returned so the caller resolves each with a
    *  timeout note (and fails the run). */
   sweepExpired(): PendingStep[] {
