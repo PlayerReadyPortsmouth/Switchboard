@@ -8,7 +8,7 @@
   "research": {
     "emoji": "🔬", "description": "web research, deep multi-source dives",
     "mode": "persistent",
-    "access": { "roles": ["dev", "admin"], "users": [] },
+    "access": { "roles": ["dev", "admin"], "users": [], "consultableBy": ["assistant", "help"] },
     "runtime": { "cwd": "~", "model": "claude-sonnet-4-6" }
   },
   "assistant": {

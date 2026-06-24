@@ -62,13 +62,14 @@ export function buildClaudeArgv(o: ClaudeArgvOpts): string[] {
   return argv
 }
 
-/** The --mcp-config object registering the shim as a normal MCP server. */
-export function buildShimMcpConfig(shimPath: string, socketPath: string, agentName: string) {
+/** The --mcp-config object registering the shim as a normal MCP server.
+ *  `consultEnabled` sets CONSULT=1 so the shim exposes the ask_agent tool. */
+export function buildShimMcpConfig(shimPath: string, socketPath: string, agentName: string, consultEnabled = false) {
   return {
     mcpServers: {
       "switchboard-shim": {
         command: "bun", args: ["run", shimPath],
-        env: { HUB_SOCKET: socketPath, AGENT_NAME: agentName },
+        env: { HUB_SOCKET: socketPath, AGENT_NAME: agentName, ...(consultEnabled ? { CONSULT: "1" } : {}) },
       },
     },
   }

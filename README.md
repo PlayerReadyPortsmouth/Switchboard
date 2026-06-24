@@ -109,6 +109,7 @@ These optional arrays in `config/hub.config.json` wire the hub to the outside wo
 - **`audit`** — `{ enabled?, file?, kinds?, redactEnv?, maxBytes?, keepFiles? }`. One append-only ledger (`<stateDir>/audit.jsonl`) of every governed effect — `route`, `spawn`, `exec`, `outbound`, `session`, `access`, `event` (and `approval`/`card` as those land), each row `{ ts, kind, actor, action, target?, chat?, outcome, detail?, cost?, corr? }`. **Metadata only** (no message bodies); secrets in `detail` are redacted. Off unless `enabled`; a per-agent `runtime.audit: false` opts an agent out. Optional `kinds[]` allowlist, `redactEnv[]` extra secrets, and size-based rotation (`maxBytes` → `audit-<ts>.jsonl`, oldest pruned to `keepFiles`). Operators query it with **`!audit [kind|actor <a>|chat <c>] [n]`** and **`!audit cost`** (a rollup).
 - **`deployApproverUserId`** — only this Discord user may press buttons in the `deploy:` namespace.
 - **`approvals`** — `{ enabled?, channelId?, approvers?, ttlMs? }`. Human-in-the-loop gate: a `requireApproval` effect (today, an `outboundWebhooks[]` route) **parks instead of firing** and posts an **Approve / Deny** card; only a configured `approver` (default the deploy approver) may resolve it, and the effect runs **only on grant** — deny, a `ttlMs` timeout, or a hub restart all leave it unfired (fail-closed). Every step (`request`/`grant`/`deny`/`expire`) is an `approval` audit event threaded by `corr`. Off unless `enabled`; with it off, `requireApproval` is inert.
+- **`consult`** — `{ enabled?, timeoutMs? }`. Inter-agent consult: exposes an **`ask_agent`** MCP tool so one agent can ask another (by name) a question and get its reply back. An agent is consultable only if its `access.consultableBy` lists the requester (or `"*"`); a self-consult is always denied. Each consult is a `consult` audit event. Off unless `enabled` (with it off the tool isn't even exposed).
 
 ## Memory, context & the overseer
 
@@ -169,6 +170,12 @@ Point Grafana or a load balancer at the hub. Set `metricsPort` and the hub serve
 
 The endpoint is unauthenticated (the Prometheus norm) and serves only aggregated, non-secret numbers — no message content, no secrets, no per-user data; bind it on a private network.
 
+## Inter-agent consult
+
+Agents aren't islands. With `consult.enabled`, each agent gets an **`ask_agent`** tool: it names another agent and a question, and the hub runs that agent and returns its reply text into the tool call — so a coding agent can ask the ops agent "is prod healthy?" and use the answer mid-turn. See [`docs/superpowers/specs/2026-06-24-inter-agent-consult-design.md`](docs/superpowers/specs/2026-06-24-inter-agent-consult-design.md).
+
+Built on the same request/response seam as `recall`: the target runs on a virtual `consult:<id>` channel, its reply is intercepted before Discord and returned to the caller. **Governed** — an agent answers only if its `access.consultableBy` permits the requester (`"*"` = any; self-consult always denied); the tool is exposed only when `consult.enabled`. **Bounded** — the caller waits up to `timeoutMs` (then gets a timeout note), and every consult (`ask`/`answer`/`deny`/`timeout`) is a `consult` audit event threaded by `corr`. *Boundaries:* the call is synchronous (the caller holds its turn while waiting) and runs in the target's shared session; a mutual cycle is broken by the timeout.
+
 ## Status of features
 
 **Working** (covered by the passing unit tests + the real-CLI smoke check):
@@ -195,6 +202,7 @@ The endpoint is unauthenticated (the Prometheus norm) and serves only aggregated
 - **Audit log** (`audit.ts`/`auditLog.ts`/`auditCommand.ts`): one append-only `<stateDir>/audit.jsonl` ledger of every governed effect (route / spawn / exec / outbound / session / access / event), metadata-only with secret redaction, size-rotated, queryable via operator-only `!audit` (+ `!audit cost` rollup). Off unless `audit.enabled`; per-agent opt-out.
 - **Gated actions & approvals** (`approval.ts`): a `requireApproval` effect parks for a human Approve/Deny card and fires only on an authorized approver's grant — fail-closed, single-shot, TTL-swept, audited end-to-end by `corr`. Off unless `approvals.enabled`.
 - **Metrics & health** (`metrics.ts`/`metricsServer.ts`): a Prometheus `GET /metrics` scrape + `GET /health` probe (503 when no agent is alive) on `metricsPort`, projected from the live status snapshot + audit summary, plus a `!metrics` chat rollup. Off unless `metricsPort` is set.
+- **Inter-agent consult** (`consult.ts`): an `ask_agent` tool lets one agent ask another (by name) and get its reply back, via the recall request/response seam on a virtual channel — governed by `access.consultableBy` (default deny, no self-consult), bounded by `timeoutMs`, audited as `consult`. Off unless `consult.enabled`.
 - **Overseer** (`overseer.ts`): opt-in keep-prodding-until-done loop with `done`/`working`/`blocked` verdicts, autonomy bias, and iteration/wallclock caps.
 
 **Known gaps:**
@@ -215,3 +223,4 @@ The endpoint is unauthenticated (the Prometheus norm) and serves only aggregated
 - Audit log — Spec: [`docs/superpowers/specs/2026-06-24-audit-log-design.md`](docs/superpowers/specs/2026-06-24-audit-log-design.md)
 - Gated action catalog — Spec: [`docs/superpowers/specs/2026-06-24-gated-action-catalog-design.md`](docs/superpowers/specs/2026-06-24-gated-action-catalog-design.md)
 - Metrics & health — Spec: [`docs/superpowers/specs/2026-06-24-metrics-health-design.md`](docs/superpowers/specs/2026-06-24-metrics-health-design.md)
+- Inter-agent consult — Spec: [`docs/superpowers/specs/2026-06-24-inter-agent-consult-design.md`](docs/superpowers/specs/2026-06-24-inter-agent-consult-design.md)

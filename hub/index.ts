@@ -47,6 +47,7 @@ import { parseAuditCommand, renderAuditLines, renderAuditSummary } from "./audit
 import { ApprovalRegistry, renderApprovalCard, parseApprovalCustomId, type ApprovalRequest, type ApprovalDecision, type ApprovalFire } from "./approval"
 import { startMetricsServer } from "./metricsServer"
 import { renderHealth, type MetricsInput } from "./metrics"
+import { ConsultRegistry, mayConsult } from "./consult"
 import type { AgentConfig, AgentReply, SpawnTrigger, SpawnCardUpdate, CardSpec, DirectCommand, OutboundRoute } from "./types"
 
 const CONFIG_DIR = process.env.SWITCHBOARD_CONFIG ?? join(import.meta.dir, "..", "config")
@@ -196,6 +197,25 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonT
   })
   // Agent-initiated outbound: fire a named (operator-configured) outbound route.
   socket.onPostWebhook(({ target, body }) => { fireOutboundNamed(target, body, `agent:${name}`, name) })
+  // Agent-initiated consult: ask another agent and get its reply back. Gated by
+  // consult.enabled + the target's access.consultableBy; recorded as a `consult`
+  // event. The target runs on a virtual channel so its reply is intercepted in
+  // onAgentReply and returned here, not posted to Discord.
+  socket.onAskAgent(({ agent: targetName, message }) => new Promise<string>((resolveAnswer) => {
+    const requester = name
+    if (!hub.consult?.enabled || !mayConsult(requester, targetName, agents[targetName])) {
+      audit.record({ kind: "consult", actor: `agent:${requester}`, action: "ask", target: targetName, outcome: "deny" })
+      resolveAnswer(`(not permitted to consult "${targetName}")`)
+      return
+    }
+    const e = consultRegistry.open(requester, targetName, resolveAnswer)
+    audit.record({ kind: "consult", actor: `agent:${requester}`, action: "ask", target: targetName, chat: e.channel, outcome: "ok", corr: e.id })
+    const ok = dispatcher.dispatch(targetName, e.channel, {
+      chatId: e.channel, messageId: `consult:${requester}`, userId: "system", user: "hub",
+      content: message, ts: new Date().toISOString(), isDM: false,
+    })
+    if (!ok) consultRegistry.settle(e.channel, `(agent "${targetName}" is unavailable)`)
+  }))
   const t = new StreamJsonTransport(name, cfg, {
     spawner,
     socket,
@@ -204,6 +224,7 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonT
     mcpConfigPath: join(hub.stateDir, `${key}.mcp.json`),
     resumable: cfg.runtime.resumable === true,
     sessionPath: join(hub.stateDir, `${key}.session`),
+    consultEnabled: !!hub.consult?.enabled,
     onOverflow: (inbound) => {
       void gateway.sendPlain(inbound.chatId, `${cfg.emoji} ${name} is busy — please resend in a moment.`)
     },
@@ -291,6 +312,15 @@ const approvalRegistry = new ApprovalRegistry(
   hub.approvals?.ttlMs ?? 3_600_000,
 )
 const approvalCards = new Map<string, { chatId: string; messageId: string }>()
+// Inter-agent consult: ask_agent dispatches the question to the target on a
+// virtual "consult:<id>" channel; the target's reply is intercepted in
+// onAgentReply and returned to the caller. Off unless consult.enabled.
+let consultCounter = 0
+const consultRegistry = new ConsultRegistry(
+  () => Date.now(),
+  () => `c${++consultCounter}`,
+  hub.consult?.timeoutMs ?? 90_000,
+)
 /** Park an effect for human approval: record the request, post the card, and
  *  remember it for editing on resolution. */
 async function requestApproval(req: ApprovalRequest, fire: ApprovalFire): Promise<void> {
@@ -375,6 +405,19 @@ function emitHubEvent(event: string, data: Record<string, unknown>): void {
 /** Handle one reply from a transport: cards → Discord card (+ register buttons);
  *  text → spawn-trigger match or a plain reply; react/edit → passthrough. */
 async function onAgentReply(reply: AgentReply, key: string): Promise<void> {
+  // Inter-agent consult: a reply on a virtual consult channel is the answer to a
+  // pending ask_agent — settle it (return the text to the caller) and never post
+  // it to Discord or run the normal reply pipeline.
+  if (consultRegistry.isConsultChannel(reply.chatId)) {
+    if (reply.kind === "reply" && reply.text !== undefined) {
+      const settled = consultRegistry.settle(reply.chatId, reply.text)
+      if (settled) audit.record({
+        kind: "consult", actor: `agent:${settled.target}`, action: "answer",
+        target: settled.requester, chat: reply.chatId, outcome: "ok", corr: settled.id,
+      })
+    }
+    return
+  }
   if (reply.kind === "card" && reply.card) {
     await cardLifecycle.onCard(reply, key)
     return
@@ -914,4 +957,15 @@ if (approvalsEnabled) {
       if (loc) void gateway.editCard(loc.chatId, loc.messageId, renderApprovalCard(e))
     }
   }, 60_000).unref()
+}
+
+// Time out consults whose target never answered: resolve the caller's tool call
+// with a note and audit the lapse.
+if (hub.consult?.enabled) {
+  setInterval(() => {
+    for (const e of consultRegistry.sweepExpired()) {
+      e.resolve(`(agent "${e.target}" did not respond in time)`)
+      audit.record({ kind: "consult", actor: "hub", action: "timeout", target: e.requester, outcome: "error", corr: e.id })
+    }
+  }, 10_000).unref()
 }

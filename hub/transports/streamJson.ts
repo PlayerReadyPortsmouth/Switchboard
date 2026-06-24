@@ -53,6 +53,8 @@ export interface StreamJsonOpts {
   mcpConfigPath: string
   /** Seam for tests; defaults to writing the file. */
   writeMcpConfig?: (path: string, contents: string) => void
+  /** Expose the ask_agent inter-agent consult tool to this agent (CONSULT=1). */
+  consultEnabled?: boolean
   /** Persist+resume the CLI session across restarts (persistent agents). */
   resumable?: boolean
   /** Path to read/write the captured session id. */
@@ -124,7 +126,7 @@ export class StreamJsonTransport implements AgentTransport {
     await socket.listen()
 
     const write = this.opts.writeMcpConfig ?? ((p, c) => writeFileSync(p, c))
-    write(mcpConfigPath, JSON.stringify(buildShimMcpConfig(shimPath, socketPath, this.name)))
+    write(mcpConfigPath, JSON.stringify(buildShimMcpConfig(shimPath, socketPath, this.name, this.opts.consultEnabled)))
 
     const resumeSessionId = this.opts.resumable
       ? (this.opts.readSession?.() ?? (this.opts.sessionPath ? readSessionFile(this.opts.sessionPath) : undefined))
