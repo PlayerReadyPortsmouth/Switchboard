@@ -282,8 +282,28 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonT
   })
   socket.onRecall(async ({ query, scopes }) => {
     const sc = (scopes?.length ? scopes : ["global", `agents/${name}`]) as Scope[]
-    try { return (await memoryRetriever.relevant(query, sc)).notes.map((n) => ({ title: n.title, body: n.body })) }
-    catch { return [] }
+    // Exact-title fallback: find notes whose title matches the query string directly,
+    // without needing the embedder. Runs when vector search returns nothing or fails —
+    // critical on first boot before the embedding model has been indexed.
+    function byTitle(): { title: string; body: string }[] {
+      try {
+        return memoryStore.list(sc)
+          .filter((n) => n.title.toLowerCase() === query.toLowerCase())
+          .flatMap((n) => {
+            try {
+              const path = memoryStore.notePath(n.scope as Scope, n.title)
+              const note = memoryStore.read(path)
+              return [{ title: note.title, body: note.body }]
+            } catch { return [] }
+          })
+      } catch { return [] }
+    }
+    try {
+      const result = await memoryRetriever.relevant(query, sc)
+      const notes = result.notes.map((n) => ({ title: n.title, body: n.body }))
+      return notes.length > 0 ? notes : byTitle()
+    }
+    catch { return byTitle() }
   })
   // Agent-initiated outbound: fire a named (operator-configured) outbound route.
   socket.onPostWebhook(({ target, body }) => { fireOutboundNamed(target, body, `agent:${name}`, name) })
