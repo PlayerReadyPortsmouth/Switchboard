@@ -631,6 +631,14 @@ const commands = hub.commands ?? []
 const directCommands = hub.directCommands ?? []
 gateway.handleInbound((m) => {
   const trimmed = m.content.trim()
+  // On-demand status snapshot (operator-only): renders the live board here & now.
+  if (/^!(status|usage|health)\b/i.test(trimmed)) {
+    if (!baseGate.listAllowed().includes(m.userId)) return
+    statusRegistry.setAgents(buildAgentRows())
+    statusRegistry.setOverseers(buildOverseerRows())
+    void gateway.sendCard(m.chatId, renderBoard(statusRegistry.snapshot(Date.now())))
+    return
+  }
   const cmd = commands.find((c) => c.match === trimmed)
   if (cmd) {
     if (cmd.allowlistOnly && !baseGate.listAllowed().includes(m.userId)) return

@@ -15,6 +15,9 @@
   "librarianModel": "claude-haiku-4-5",
   "distillerModel": "claude-sonnet-4-6",
   "overseerModel": "claude-haiku-4-5",
+  "contextWindows": { "default": 200000 },
+  "statusChannelId": "<channel id for the live status board, or omit to disable>",
+  "statusRefreshMs": 15000,
   "memory": {
     "index": "local",
     "embedder": "local",

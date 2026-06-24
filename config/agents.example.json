@@ -20,7 +20,9 @@
       "cwd": "<path to a checkout the agent can read>",
       "model": "claude-sonnet-4-6",
       "appendSystemPrompt": "<optional extra system prompt for this agent>",
-      "claudeArgs": ["--add-dir", "<extra dir>"]
+      "claudeArgs": ["--add-dir", "<extra dir>"],
+      "sessionGovernor": { "enabled": true, "softPct": 0.75, "hardPct": 0.9, "strategy": "restart" },
+      "maxQueueDepth": 8
     }
   },
   "worker": {
@@ -45,7 +47,8 @@
       "cwd": "~",
       "model": "claude-sonnet-4-6",
       "useMemory": true,
-      "injectContext": "onSwitch"
+      "injectContext": "onSwitch",
+      "pool": { "min": 1, "max": 3, "scaleUpQueue": 2, "scaleUpSustainMs": 30000, "replicaIdleMs": 600000 }
     }
   },
   "help-quick": {
