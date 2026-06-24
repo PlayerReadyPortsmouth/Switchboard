@@ -234,6 +234,13 @@ function fireOutboundNamed(id: string, body?: string): boolean {
   void outboundDelivery.deliver(route, renderBody(route.template, { body }))
   return true
 }
+/** Fire a hub lifecycle event as an outbound route, if a route with `event` as
+ *  its id is configured. Lets external systems observe the hub (schedules, etc). */
+function emitHubEvent(event: string, data: Record<string, unknown>): void {
+  if (outboundRoutes.some((r) => r.id === event)) {
+    fireOutboundNamed(event, JSON.stringify({ event, ts: Date.now(), ...data }))
+  }
+}
 
 /** Handle one reply from a transport: cards → Discord card (+ register buttons);
  *  text → spawn-trigger match or a plain reply; react/edit → passthrough. */
@@ -432,7 +439,10 @@ void listener
 // same minute never double-fires.
 const cronState = new CronState(join(hub.stateDir, "cron-state.json"))
 const cronTick = startCron(hub.schedules ?? [], hub.timezone ?? "Europe/London", {
-  deliver: (agent, channelId, idTag, message) => deliverToAgent(agent, channelId, idTag, message),
+  deliver: (agent, channelId, idTag, message) => {
+    deliverToAgent(agent, channelId, idTag, message)
+    emitHubEvent("schedule.fired", { id: idTag, agent, channelId })
+  },
   state: cronState,
   onInvalid: (id, expr) => process.stderr.write(`schedule "${id}": invalid cron "${expr}"\n`),
 })
