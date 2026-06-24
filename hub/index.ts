@@ -1,5 +1,5 @@
 import { join, dirname } from "path"
-import { unlinkSync, appendFileSync, mkdirSync } from "fs"
+import { unlinkSync, appendFileSync, mkdirSync, readFileSync } from "fs"
 import { config as loadEnv } from "./env"
 import { loadConfigs } from "./config"
 import { BaseGate } from "./baseGate"
@@ -41,6 +41,8 @@ import { renderBoard, Throttle } from "./statusBoard"
 import { matchDirectCommand, runDirect, interpolateArgs, type DirectExecutor } from "./directCommands"
 import { OutboundDelivery } from "./outboundDelivery"
 import { matchOutbound, renderBody } from "./outbound"
+import { AuditLog } from "./auditLog"
+import { parseJsonlTail } from "./audit"
 import type { AgentConfig, AgentReply, SpawnTrigger, SpawnCardUpdate, CardSpec, DirectCommand, OutboundRoute } from "./types"
 
 const CONFIG_DIR = process.env.SWITCHBOARD_CONFIG ?? join(import.meta.dir, "..", "config")
@@ -225,6 +227,32 @@ const outboundDelivery = new OutboundDelivery({
   retries: hub.outboundRetries,
   allowedHosts: hub.outboundAllowedHosts,
 })
+
+// Audit log: one append-only ledger of every governed effect (route, spawn,
+// exec, outbound, session, access, event, …). Off unless `hub.audit.enabled`.
+// Secrets — outbound + direct-command env values, plus any `audit.redactEnv` —
+// are masked in `detail` before append. `record()` never throws.
+const auditFile = join(hub.stateDir, hub.audit?.file ?? "audit.jsonl")
+const auditSecrets = [
+  ...(hub.outboundWebhooks ?? []).map((r) => r.secretEnv),
+  ...(hub.directCommands ?? []).map((c) => (c.exec.type === "http" ? c.exec.secretEnv : undefined)),
+  ...(hub.audit?.redactEnv ?? []),
+]
+  .filter((n): n is string => !!n)
+  .map((n) => process.env[n])
+  .filter((v): v is string => !!v)
+const audit = new AuditLog({
+  append: (e) => appendJsonl(auditFile, e),
+  readTail: (n) => { try { return parseJsonlTail(readFileSync(auditFile, "utf8"), n) } catch { return [] } },
+  now: () => Date.now(),
+  secrets: auditSecrets,
+  enabled: hub.audit?.enabled ?? false,
+  kinds: hub.audit?.kinds,
+})
+/** Per-agent audit opt-out: an agent with `runtime.audit === false` is excluded
+ *  from agent-attributed events even when the hub master switch is on. */
+const auditOptedOut = (agent?: string): boolean =>
+  !!agent && agents[agent]?.runtime.audit === false
 /** Fire any text-triggered outbound routes for `text`. Returns true if a matched
  *  route asked to `consume` the text (suppress the Discord post). */
 function fireOutboundText(text: string): boolean {
@@ -399,8 +427,9 @@ if (pools.size) {
 // Dispatcher and keep the onReply set in makeTransport, keyed by jobId.)
 dispatcher.onReply((reply) => { void onAgentReply(reply, reply.agent) })
 
-/** Clear a persistent agent's context: drop its session file + respawn fresh. */
-async function resetAgentSession(name: string, channelId: string): Promise<void> {
+/** Clear a persistent agent's context: drop its session file + respawn fresh.
+ *  `reason` distinguishes a manual reset from a governor auto-compaction. */
+async function resetAgentSession(name: string, channelId: string, reason = "manual"): Promise<void> {
   const cfg = agents[name]
   if (!cfg) return
   try { unlinkSync(join(hub.stateDir, `${name}.session`)) } catch {}
@@ -409,6 +438,9 @@ async function resetAgentSession(name: string, channelId: string): Promise<void>
   const fresh = makeTransport(name, name, cfg)   // resumable, but the session file is now gone → fresh session
   await fresh.start()
   dispatcher.replace(name, fresh)
+  if (!auditOptedOut(name)) audit.record({
+    kind: "session", actor: "hub", action: "reset", target: name, chat: channelId, detail: { reason },
+  })
   void gateway.sendPlain(channelId, "🧹 context cleared — fresh session.")
 }
 
@@ -437,9 +469,12 @@ const overseer = new Overseer({
 const governor = new SessionGovernor({
   policyFor: (agent) => agents[agent]?.runtime.sessionGovernor,
   windowFor: (agent) => contextWindow(agents[agent]?.runtime.model, hub.contextWindows),
-  deliver: (agent, convId, text) => deliverToAgent(agent, convId, "governor:checkpoint", text),
+  deliver: (agent, convId, text) => {
+    if (!auditOptedOut(agent)) audit.record({ kind: "session", actor: "hub", action: "checkpoint", target: agent, chat: convId })
+    deliverToAgent(agent, convId, "governor:checkpoint", text)
+  },
   notify: (convId, text) => { void gateway.sendPlain(convId, text) },
-  reset: (agent, convId) => resetAgentSession(agent, convId),
+  reset: (agent, convId) => resetAgentSession(agent, convId, "compact"),
   recordHandoff: (agent, convId, summary) =>
     messageCache.record(convId, { role: "agent", text: summary, ts: Date.now(), agent }),
 })
@@ -619,6 +654,10 @@ const orchestrator = new Orchestrator(hub, agents, {
     if (rt?.overseer?.enabled) overseer.begin(agent, inbound.chatId, inbound.content)
     // Record the routing decision for the status board (the Haiku resolver's pick).
     statusRegistry.recordRoute({ ts: Date.now(), conv: inbound.chatId, chosen: agent, switched: isSwitch })
+    if (!auditOptedOut(agent)) audit.record({
+      kind: "route", actor: `user:${inbound.userId}`, action: "route",
+      target: agent, chat: inbound.chatId, detail: { switched: isSwitch },
+    })
     // Render context from PRIOR turns, then record this inbound so it's available
     // next turn (and to the distiller) without duplicating it in this turn's block.
     const policy = rt?.injectContext ?? "onSwitch"

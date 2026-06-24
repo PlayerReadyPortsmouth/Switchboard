@@ -62,6 +62,23 @@ export function matchAudit(events: AuditEvent[], f: AuditFilter): AuditEvent[] {
   return out
 }
 
+/** Parse the last `n` non-empty lines of a JSONL ledger into events (malformed
+ *  lines skipped; `n <= 0` ⇒ all). Pure — the caller supplies file contents so
+ *  the read stays injectable/testable. */
+export function parseJsonlTail(raw: string, n: number): AuditEvent[] {
+  const out: AuditEvent[] = []
+  for (const l of raw.split("\n")) {
+    if (!l) continue
+    try {
+      out.push(JSON.parse(l) as AuditEvent)
+    } catch {
+      /* skip a torn/partial line rather than fail the whole read */
+    }
+  }
+  // take the last n *valid* events, so a torn final line never reduces the count
+  return n > 0 ? out.slice(-n) : out
+}
+
 /** Roll up counts by kind & outcome, total cost, and distinct actor count. Pure. */
 export function summarize(events: AuditEvent[]): AuditSummary {
   const byKind: Record<string, number> = {}

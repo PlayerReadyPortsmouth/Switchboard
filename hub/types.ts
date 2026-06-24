@@ -116,7 +116,7 @@ export interface AgentRuntime {
   maxQueueDepth?: number     // turn-gate inbound queue cap (default 8); past it, submissions overflow
   coalesceBurst?: boolean    // fold consecutive same-conversation queued messages into one turn
   pool?: PoolPolicy          // opt-in replica auto-scaling for a hot persistent agent
-  audit?: boolean            // per-agent audit opt-out/in (default: inherit hub.audit.enabled)
+  audit?: boolean            // per-agent audit opt-out: false ⇒ skip this agent's events even when hub audit is on
 }
 
 export interface AgentConfig {

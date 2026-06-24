@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test"
-import { auditEvent, redactDetail, matchAudit, summarize } from "../hub/audit"
+import { auditEvent, redactDetail, matchAudit, summarize, parseJsonlTail } from "../hub/audit"
 import type { AuditEvent } from "../hub/types"
 
 // ---- auditEvent (normalize) ----
@@ -99,4 +99,16 @@ test("summarize rolls up counts, cost, and distinct actors", () => {
 
 test("summarize of an empty list is all-zero", () => {
   expect(summarize([])).toEqual({ total: 0, byKind: {}, byOutcome: {}, costUsd: 0, actors: 0 })
+})
+
+// ---- parseJsonlTail ----
+
+test("parseJsonlTail returns the last n events, skipping a torn final line", () => {
+  const raw =
+    '{"ts":1,"kind":"route","actor":"u","action":"route","outcome":"ok"}\n' +
+    '{"ts":2,"kind":"exec","actor":"u","action":"direct","outcome":"ok"}\n' +
+    '{"ts":3,"kind":"acce'  // torn write, no newline
+  expect(parseJsonlTail(raw, 10).map((e) => e.ts)).toEqual([1, 2])
+  expect(parseJsonlTail(raw, 1).map((e) => e.ts)).toEqual([2])
+  expect(parseJsonlTail("", 10)).toEqual([])
 })
