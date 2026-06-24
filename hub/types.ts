@@ -278,6 +278,7 @@ export interface HubConfig {
   statusChannelId?: string       // channel for the live status embed (absent ⇒ board off)
   statusRefreshMs?: number       // status board heartbeat cadence (default 15000)
   audit?: AuditConfig            // append-only ledger of every governed effect (default off)
+  approvals?: ApprovalConfig     // human-in-the-loop approval gate for requireApproval effects (default off)
 }
 
 // Audit log — one append-only ledger of every governed effect (hub/audit.ts).
@@ -333,6 +334,16 @@ export interface AuditSummary {
   byOutcome: Record<string, number>
   costUsd: number
   actors: number
+}
+
+/** Approval-gate config (all optional; absent/disabled ⇒ `requireApproval` is
+ *  inert, no behaviour change). When enabled, a `requireApproval` effect parks
+ *  for an authorized human's grant before it fires. */
+export interface ApprovalConfig {
+  enabled?: boolean              // master switch; off ⇒ requireApproval flags are inert
+  channelId?: string             // channel for approval cards (default: the effect's origin chat)
+  approvers?: string[]           // Discord user ids who may approve (default: [deployApproverUserId])
+  ttlMs?: number                 // pending approval timeout → auto-deny (default 3600000 = 1h)
 }
 
 /** Audit-log config (all optional; absent ⇒ no ledger, no behaviour change). */
