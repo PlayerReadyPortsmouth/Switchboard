@@ -1,5 +1,5 @@
 import { join, dirname } from "path"
-import { unlinkSync, appendFileSync, mkdirSync } from "fs"
+import { unlinkSync, appendFileSync, mkdirSync, readFileSync, existsSync, statSync, renameSync, readdirSync } from "fs"
 import { config as loadEnv } from "./env"
 import { loadConfigs } from "./config"
 import { BaseGate } from "./baseGate"
@@ -41,6 +41,9 @@ import { renderBoard, Throttle } from "./statusBoard"
 import { matchDirectCommand, runDirect, interpolateArgs, type DirectExecutor } from "./directCommands"
 import { OutboundDelivery } from "./outboundDelivery"
 import { matchOutbound, renderBody } from "./outbound"
+import { AuditLog } from "./auditLog"
+import { parseJsonlTail, shouldRotate, rotationsToPrune } from "./audit"
+import { parseAuditCommand, renderAuditLines, renderAuditSummary } from "./auditCommand"
 import type { AgentConfig, AgentReply, SpawnTrigger, SpawnCardUpdate, CardSpec, DirectCommand, OutboundRoute } from "./types"
 
 const CONFIG_DIR = process.env.SWITCHBOARD_CONFIG ?? join(import.meta.dir, "..", "config")
@@ -183,7 +186,7 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonT
     catch { return [] }
   })
   // Agent-initiated outbound: fire a named (operator-configured) outbound route.
-  socket.onPostWebhook(({ target, body }) => { fireOutboundNamed(target, body) })
+  socket.onPostWebhook(({ target, body }) => { fireOutboundNamed(target, body, `agent:${name}`, name) })
   const t = new StreamJsonTransport(name, cfg, {
     spawner,
     socket,
@@ -225,26 +228,82 @@ const outboundDelivery = new OutboundDelivery({
   retries: hub.outboundRetries,
   allowedHosts: hub.outboundAllowedHosts,
 })
+
+// Audit log: one append-only ledger of every governed effect (route, spawn,
+// exec, outbound, session, access, event, …). Off unless `hub.audit.enabled`.
+// Secrets — outbound + direct-command env values, plus any `audit.redactEnv` —
+// are masked in `detail` before append. `record()` never throws.
+const auditFile = join(hub.stateDir, hub.audit?.file ?? "audit.jsonl")
+const auditSecrets = [
+  ...(hub.outboundWebhooks ?? []).map((r) => r.secretEnv),
+  ...(hub.directCommands ?? []).map((c) => (c.exec.type === "http" ? c.exec.secretEnv : undefined)),
+  ...(hub.audit?.redactEnv ?? []),
+]
+  .filter((n): n is string => !!n)
+  .map((n) => process.env[n])
+  .filter((v): v is string => !!v)
+/** Append one event, rotating the ledger first when it reaches `audit.maxBytes`
+ *  (renamed to audit-<ts>.jsonl, oldest rotations pruned to `keepFiles`). */
+function appendAudit(e: unknown): void {
+  try {
+    const max = hub.audit?.maxBytes
+    if (existsSync(auditFile) && shouldRotate(statSync(auditFile).size, max)) {
+      renameSync(auditFile, join(hub.stateDir, `audit-${Date.now()}.jsonl`))
+      const rotated = readdirSync(hub.stateDir).filter((f) => /^audit-\d+\.jsonl$/.test(f))
+      for (const f of rotationsToPrune(rotated, hub.audit?.keepFiles)) {
+        try { unlinkSync(join(hub.stateDir, f)) } catch {}
+      }
+    }
+  } catch (err) { process.stderr.write(`audit rotate failed: ${err}\n`) }
+  appendJsonl(auditFile, e)
+}
+const audit = new AuditLog({
+  append: appendAudit,
+  readTail: (n) => { try { return parseJsonlTail(readFileSync(auditFile, "utf8"), n) } catch { return [] } },
+  now: () => Date.now(),
+  secrets: auditSecrets,
+  enabled: hub.audit?.enabled ?? false,
+  kinds: hub.audit?.kinds,
+})
+/** Per-agent audit opt-out: an agent with `runtime.audit === false` is excluded
+ *  from agent-attributed events even when the hub master switch is on. */
+const auditOptedOut = (agent?: string): boolean =>
+  !!agent && agents[agent]?.runtime.audit === false
+/** Deliver an outbound route (fire-and-forget) and record its resolution to the
+ *  ledger. `actor` is who triggered it (agent:<name> | hub); `agent`, if any,
+ *  honors per-agent audit opt-out. */
+function deliverAudited(route: OutboundRoute, body: string, actor: string, agent?: string): void {
+  void outboundDelivery.deliver(route, body)
+    .then((res) => {
+      if (!auditOptedOut(agent)) audit.record({
+        kind: "outbound", actor, action: "deliver", target: route.id,
+        outcome: res.ok ? "ok" : "error", detail: { status: res.status, attempts: res.attempts },
+      })
+    })
+    .catch((e) => process.stderr.write(`outbound deliver failed: ${e}\n`))
+}
 /** Fire any text-triggered outbound routes for `text`. Returns true if a matched
  *  route asked to `consume` the text (suppress the Discord post). */
-function fireOutboundText(text: string): boolean {
+function fireOutboundText(text: string, agent: string): boolean {
   let consume = false
   for (const { route, groups } of matchOutbound(text, outboundRoutes)) {
-    void outboundDelivery.deliver(route, renderBody(route.template, { groups }))
+    deliverAudited(route, renderBody(route.template, { groups }), `agent:${agent}`, agent)
     if (route.consume) consume = true
   }
   return consume
 }
 /** Deliver to a named route by id (the post_webhook tool path). Unknown ⇒ false. */
-function fireOutboundNamed(id: string, body?: string): boolean {
+function fireOutboundNamed(id: string, body?: string, actor = "hub", agent?: string): boolean {
   const route = outboundRoutes.find((r) => r.id === id)
   if (!route) { process.stderr.write(`post_webhook: unknown route "${id}"\n`); return false }
-  void outboundDelivery.deliver(route, renderBody(route.template, { body }))
+  deliverAudited(route, renderBody(route.template, { body }), actor, agent)
   return true
 }
-/** Fire a hub lifecycle event as an outbound route, if a route with `event` as
- *  its id is configured. Lets external systems observe the hub (schedules, etc). */
+/** Fire a hub lifecycle event: record it to the ledger, and if a route with
+ *  `event` as its id is configured, deliver it so external systems observe the
+ *  hub (schedules, etc). */
 function emitHubEvent(event: string, data: Record<string, unknown>): void {
+  audit.record({ kind: "event", actor: "hub", action: event, detail: data })
   if (outboundRoutes.some((r) => r.id === event)) {
     fireOutboundNamed(event, JSON.stringify({ event, ts: Date.now(), ...data }))
   }
@@ -264,11 +323,11 @@ async function onAgentReply(reply: AgentReply, key: string): Promise<void> {
   if (reply.kind === "reply" && reply.text) {
     for (const trig of spawnTriggers) {
       const m = trig.re.exec(reply.text)
-      if (m) { await runSpawnTrigger(trig, m as unknown as string[], reply.chatId); return }
+      if (m) { await runSpawnTrigger(trig, m as unknown as string[], reply.chatId, reply.agent); return }
     }
     // Outbound webhooks: fire any text-triggered routes (fire-and-forget). A
     // `consume` route suppresses the Discord post; otherwise the text still ships.
-    if (fireOutboundText(reply.text)) return
+    if (fireOutboundText(reply.text, reply.agent)) return
     // Session governor: inspect this turn's context usage. May swallow the reply
     // (when it's a compaction handoff) or annotate it, and signals whether the
     // overseer should stand down (don't add a turn mid-compaction).
@@ -332,7 +391,7 @@ function scheduleTeardown(jobId: string, t: StreamJsonTransport, teardownCmd: ()
 
 /** Spawn an ephemeral agent (a full stream-json session) to run a task, optionally
  *  after a setup shell command, and clean up when it exits. */
-async function runSpawnTrigger(trig: SpawnTrigger, groups: string[], chatId: string): Promise<void> {
+async function runSpawnTrigger(trig: SpawnTrigger, groups: string[], chatId: string, parent: string): Promise<void> {
   const cfg = agents[trig.agent]
   if (!cfg) { process.stderr.write(`spawn-trigger: agent "${trig.agent}" not found\n`); return }
   const jobId = nextJobId()
@@ -360,6 +419,9 @@ async function runSpawnTrigger(trig: SpawnTrigger, groups: string[], chatId: str
     content: interpolate(trig.taskTemplate, groups, jobId), ts: new Date().toISOString(), isDM: false,
   })
   statusRegistry.setEphemeral({ jobId, agent: trig.agent, task: interpolate(trig.taskTemplate, groups, jobId), startedAt: Date.now() })
+  if (!auditOptedOut(parent)) audit.record({
+    kind: "spawn", actor: `agent:${parent}`, action: "spawn", target: trig.agent, chat: chatId, detail: { jobId },
+  })
   // The matched trigger text is consumed (not shown); confirm the spawn to the channel.
   if (!trig.onSpawnCard) void gateway.sendPlain(chatId, `🔧 \`${trig.agent}\` agent dispatched (job ${jobId}).`)
   scheduleTeardown(jobId, t, () => (trig.teardownCommand ? interpolate(trig.teardownCommand, groups, jobId) : undefined))
@@ -399,8 +461,9 @@ if (pools.size) {
 // Dispatcher and keep the onReply set in makeTransport, keyed by jobId.)
 dispatcher.onReply((reply) => { void onAgentReply(reply, reply.agent) })
 
-/** Clear a persistent agent's context: drop its session file + respawn fresh. */
-async function resetAgentSession(name: string, channelId: string): Promise<void> {
+/** Clear a persistent agent's context: drop its session file + respawn fresh.
+ *  `reason` distinguishes a manual reset from a governor auto-compaction. */
+async function resetAgentSession(name: string, channelId: string, reason = "manual"): Promise<void> {
   const cfg = agents[name]
   if (!cfg) return
   try { unlinkSync(join(hub.stateDir, `${name}.session`)) } catch {}
@@ -409,6 +472,9 @@ async function resetAgentSession(name: string, channelId: string): Promise<void>
   const fresh = makeTransport(name, name, cfg)   // resumable, but the session file is now gone → fresh session
   await fresh.start()
   dispatcher.replace(name, fresh)
+  if (!auditOptedOut(name)) audit.record({
+    kind: "session", actor: "hub", action: "reset", target: name, chat: channelId, detail: { reason },
+  })
   void gateway.sendPlain(channelId, "🧹 context cleared — fresh session.")
 }
 
@@ -437,9 +503,12 @@ const overseer = new Overseer({
 const governor = new SessionGovernor({
   policyFor: (agent) => agents[agent]?.runtime.sessionGovernor,
   windowFor: (agent) => contextWindow(agents[agent]?.runtime.model, hub.contextWindows),
-  deliver: (agent, convId, text) => deliverToAgent(agent, convId, "governor:checkpoint", text),
+  deliver: (agent, convId, text) => {
+    if (!auditOptedOut(agent)) audit.record({ kind: "session", actor: "hub", action: "checkpoint", target: agent, chat: convId })
+    deliverToAgent(agent, convId, "governor:checkpoint", text)
+  },
   notify: (convId, text) => { void gateway.sendPlain(convId, text) },
-  reset: (agent, convId) => resetAgentSession(agent, convId),
+  reset: (agent, convId) => resetAgentSession(agent, convId, "compact"),
   recordHandoff: (agent, convId, summary) =>
     messageCache.record(convId, { role: "agent", text: summary, ts: Date.now(), agent }),
 })
@@ -605,7 +674,13 @@ if (garden.enabled) {
 }
 
 const orchestrator = new Orchestrator(hub, agents, {
-  baseGate: (userId, chatId, isDM) => baseGate.gate(userId, chatId, isDM, Date.now()),
+  baseGate: (userId, chatId, isDM) => {
+    const r = baseGate.gate(userId, chatId, isDM, Date.now())
+    if (r.action === "drop") audit.record({
+      kind: "access", actor: `user:${userId}`, action: "deny", chat: chatId, outcome: "deny", detail: { isDM },
+    })
+    return r
+  },
   resolvePermission: () => false,   // tool permissions handled by --dangerously-skip-permissions
   resolveRoles: (id) => gateway.resolveRoles(id),
   route: (msg, permitted, current) =>
@@ -619,6 +694,10 @@ const orchestrator = new Orchestrator(hub, agents, {
     if (rt?.overseer?.enabled) overseer.begin(agent, inbound.chatId, inbound.content)
     // Record the routing decision for the status board (the Haiku resolver's pick).
     statusRegistry.recordRoute({ ts: Date.now(), conv: inbound.chatId, chosen: agent, switched: isSwitch })
+    if (!auditOptedOut(agent)) audit.record({
+      kind: "route", actor: `user:${inbound.userId}`, action: "route",
+      target: agent, chat: inbound.chatId, detail: { switched: isSwitch },
+    })
     // Render context from PRIOR turns, then record this inbound so it's available
     // next turn (and to the distiller) without duplicating it in this turn's block.
     const policy = rt?.injectContext ?? "onSwitch"
@@ -668,16 +747,19 @@ const directExecutor: DirectExecutor = async (spec, args) => {
 }
 function tryJson(t: string): any { try { return JSON.parse(t) } catch { return undefined } }
 
-async function runDirectCommand(cmd: DirectCommand, args: string, chatId: string): Promise<void> {
+async function runDirectCommand(cmd: DirectCommand, args: string, chatId: string, userId: string): Promise<void> {
+  let status: "ok" | "error" = "ok"
   try {
     const outcome = await runDirect(cmd, args, directExecutor)
     if (outcome.kind === "agent") deliverToAgent(outcome.agent, chatId, `direct:${cmd.match}`, outcome.content)
     else if (outcome.kind === "card") await gateway.sendCard(chatId, outcome.card)
     else await gateway.sendPlain(chatId, outcome.text || "(no output)")
   } catch (e) {
+    status = "error"
     process.stderr.write(`directCommand: "${cmd.match}" failed: ${e}\n`)
     await gateway.sendPlain(chatId, `⚠️ \`${cmd.match}\` failed; see hub logs.`)
   }
+  audit.record({ kind: "exec", actor: `user:${userId}`, action: "direct", target: cmd.match, chat: chatId, outcome: status })
 }
 
 // Commands: an inbound whose trimmed content equals `match` delivers `message`
@@ -686,6 +768,18 @@ const commands = hub.commands ?? []
 const directCommands = hub.directCommands ?? []
 gateway.handleInbound((m) => {
   const trimmed = m.content.trim()
+  // Audit ledger query (operator-only): list recent governed effects or a rollup.
+  if (/^!audit\b/i.test(trimmed)) {
+    if (!baseGate.listAllowed().includes(m.userId)) return
+    if (!hub.audit?.enabled) { void gateway.sendPlain(m.chatId, "📜 audit logging is off (set `hub.audit.enabled`)."); return }
+    const q = parseAuditCommand(trimmed.replace(/^!audit\b/i, ""))
+    if (q.summary) void gateway.sendPlain(m.chatId, renderAuditSummary(audit.summary(q.filter)))
+    else void gateway.sendPlain(m.chatId, renderAuditLines(
+      audit.recent({ ...q.filter, limit: q.filter.limit ?? 25 }),
+      (ts) => new Date(ts).toISOString().slice(11, 19),
+    ))
+    return
+  }
   // On-demand status snapshot (operator-only): renders the live board here & now.
   if (/^!(status|usage|health)\b/i.test(trimmed)) {
     if (!baseGate.listAllowed().includes(m.userId)) return
@@ -704,7 +798,7 @@ gateway.handleInbound((m) => {
   const direct = matchDirectCommand(m.content, directCommands)
   if (direct) {
     if (direct.cmd.allowlistOnly && !baseGate.listAllowed().includes(m.userId)) return
-    void runDirectCommand(direct.cmd, direct.args, m.chatId)
+    void runDirectCommand(direct.cmd, direct.args, m.chatId, m.userId)
     return
   }
   void orchestrator.handleMessage(m)

@@ -129,5 +129,11 @@
   ],
   "outboundAllowedHosts": ["hooks.example.com"],
   "outboundRetries": 3,
+  "audit": {
+    "enabled": true,
+    "kinds": ["route", "exec", "outbound", "access", "session", "approval"],
+    "maxBytes": 10485760,
+    "keepFiles": 5
+  },
   "timezone": "Europe/London"
 }
