@@ -79,6 +79,20 @@ export function parseJsonlTail(raw: string, n: number): AuditEvent[] {
   return n > 0 ? out.slice(-n) : out
 }
 
+/** Should the ledger roll over? True once it reaches `maxBytes` (a positive cap). */
+export function shouldRotate(sizeBytes: number, maxBytes?: number): boolean {
+  return !!maxBytes && maxBytes > 0 && sizeBytes >= maxBytes
+}
+
+/** Of the existing rotated files, which to delete to keep at most `keepFiles`.
+ *  Names embed a fixed-width ms timestamp, so lexical order is chronological;
+ *  the oldest beyond the keep window are returned. `undefined` keep ⇒ prune none. */
+export function rotationsToPrune(rotated: string[], keepFiles?: number): string[] {
+  if (keepFiles === undefined || keepFiles < 0) return []
+  const sorted = [...rotated].sort()
+  return sorted.slice(0, Math.max(0, sorted.length - keepFiles))
+}
+
 /** Roll up counts by kind & outcome, total cost, and distinct actor count. Pure. */
 export function summarize(events: AuditEvent[]): AuditSummary {
   const byKind: Record<string, number> = {}

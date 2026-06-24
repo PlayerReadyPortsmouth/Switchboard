@@ -1,5 +1,5 @@
 import { join, dirname } from "path"
-import { unlinkSync, appendFileSync, mkdirSync, readFileSync } from "fs"
+import { unlinkSync, appendFileSync, mkdirSync, readFileSync, existsSync, statSync, renameSync, readdirSync } from "fs"
 import { config as loadEnv } from "./env"
 import { loadConfigs } from "./config"
 import { BaseGate } from "./baseGate"
@@ -42,7 +42,7 @@ import { matchDirectCommand, runDirect, interpolateArgs, type DirectExecutor } f
 import { OutboundDelivery } from "./outboundDelivery"
 import { matchOutbound, renderBody } from "./outbound"
 import { AuditLog } from "./auditLog"
-import { parseJsonlTail } from "./audit"
+import { parseJsonlTail, shouldRotate, rotationsToPrune } from "./audit"
 import { parseAuditCommand, renderAuditLines, renderAuditSummary } from "./auditCommand"
 import type { AgentConfig, AgentReply, SpawnTrigger, SpawnCardUpdate, CardSpec, DirectCommand, OutboundRoute } from "./types"
 
@@ -242,8 +242,23 @@ const auditSecrets = [
   .filter((n): n is string => !!n)
   .map((n) => process.env[n])
   .filter((v): v is string => !!v)
+/** Append one event, rotating the ledger first when it reaches `audit.maxBytes`
+ *  (renamed to audit-<ts>.jsonl, oldest rotations pruned to `keepFiles`). */
+function appendAudit(e: unknown): void {
+  try {
+    const max = hub.audit?.maxBytes
+    if (existsSync(auditFile) && shouldRotate(statSync(auditFile).size, max)) {
+      renameSync(auditFile, join(hub.stateDir, `audit-${Date.now()}.jsonl`))
+      const rotated = readdirSync(hub.stateDir).filter((f) => /^audit-\d+\.jsonl$/.test(f))
+      for (const f of rotationsToPrune(rotated, hub.audit?.keepFiles)) {
+        try { unlinkSync(join(hub.stateDir, f)) } catch {}
+      }
+    }
+  } catch (err) { process.stderr.write(`audit rotate failed: ${err}\n`) }
+  appendJsonl(auditFile, e)
+}
 const audit = new AuditLog({
-  append: (e) => appendJsonl(auditFile, e),
+  append: appendAudit,
   readTail: (n) => { try { return parseJsonlTail(readFileSync(auditFile, "utf8"), n) } catch { return [] } },
   now: () => Date.now(),
   secrets: auditSecrets,

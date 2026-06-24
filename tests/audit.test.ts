@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test"
-import { auditEvent, redactDetail, matchAudit, summarize, parseJsonlTail } from "../hub/audit"
+import { auditEvent, redactDetail, matchAudit, summarize, parseJsonlTail, shouldRotate, rotationsToPrune } from "../hub/audit"
 import type { AuditEvent } from "../hub/types"
 
 // ---- auditEvent (normalize) ----
@@ -111,4 +111,20 @@ test("parseJsonlTail returns the last n events, skipping a torn final line", () 
   expect(parseJsonlTail(raw, 10).map((e) => e.ts)).toEqual([1, 2])
   expect(parseJsonlTail(raw, 1).map((e) => e.ts)).toEqual([2])
   expect(parseJsonlTail("", 10)).toEqual([])
+})
+
+// ---- rotation helpers ----
+
+test("shouldRotate triggers at/over the cap, never without one", () => {
+  expect(shouldRotate(100, 100)).toBe(true)
+  expect(shouldRotate(99, 100)).toBe(false)
+  expect(shouldRotate(1e9, undefined)).toBe(false)
+  expect(shouldRotate(1e9, 0)).toBe(false)
+})
+
+test("rotationsToPrune keeps the newest keepFiles, deletes the rest", () => {
+  const files = ["audit-1000.jsonl", "audit-3000.jsonl", "audit-2000.jsonl"]
+  expect(rotationsToPrune(files, 2)).toEqual(["audit-1000.jsonl"])
+  expect(rotationsToPrune(files, 0)).toEqual(["audit-1000.jsonl", "audit-2000.jsonl", "audit-3000.jsonl"])
+  expect(rotationsToPrune(files, undefined)).toEqual([])  // no keep configured ⇒ prune none
 })
