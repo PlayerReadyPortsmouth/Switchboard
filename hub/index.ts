@@ -4,8 +4,9 @@ import { config as loadEnv } from "./env"
 import { loadConfigs } from "./config"
 import { BaseGate } from "./baseGate"
 import { Gateway } from "./gateway"
-import { Dispatcher } from "./transports/index"
+import { Dispatcher, type AgentTransport } from "./transports/index"
 import { StreamJsonTransport, makeBunProcessSpawner } from "./transports/streamJson"
+import { ReplicaPool } from "./agentPool"
 import { ShimSocketServer } from "./transports/shimSocket"
 import { makeRouterRunner } from "./transports/spawnClaude"
 import { route as routeFn } from "./router"
@@ -313,15 +314,33 @@ async function runSpawnTrigger(trig: SpawnTrigger, groups: string[], chatId: str
 }
 
 // Persistent agents: spawn at boot; they receive webhook/schedule/command/interaction deliveries.
-const dispatchTransports: StreamJsonTransport[] = []
+// A `pool` policy backs the agent with a ReplicaPool that scales out under load;
+// without one it's a single transport exactly as before.
+const dispatchTransports: AgentTransport[] = []
+const pools = new Map<string, ReplicaPool>()
 for (const [name, cfg] of Object.entries(agents)) {
-  if (cfg.mode === "persistent") {
-    const t = makeTransport(name, name, cfg)
-    await t.start()
-    dispatchTransports.push(t)
+  if (cfg.mode !== "persistent") continue
+  const primary = makeTransport(name, name, cfg)
+  await primary.start()
+  const pol = cfg.runtime.pool
+  if (pol) {
+    const pool = new ReplicaPool(name, primary, {
+      min: pol.min ?? 1, max: pol.max ?? 3,
+      scaleUpQueue: pol.scaleUpQueue ?? 2, scaleUpSustainMs: pol.scaleUpSustainMs ?? 30_000,
+      replicaIdleMs: pol.replicaIdleMs ?? 600_000,
+      spawn: async (replicaKey) => { const t = makeTransport(name, replicaKey, cfg); await t.start(); return t },
+    })
+    pools.set(name, pool)
+    dispatchTransports.push(pool)
+  } else {
+    dispatchTransports.push(primary)
   }
 }
 const dispatcher = new Dispatcher(dispatchTransports)
+// Scaling monitor: each pool periodically checks load and scales replicas.
+if (pools.size) {
+  setInterval(() => { for (const p of pools.values()) void p.tick() }, 10_000).unref()
+}
 // Dispatcher's constructor re-binds each transport's onReply to its own aggregator,
 // so route that aggregator back to onAgentReply. For persistent agents the routing
 // key is the agent name (== reply.agent). (Ephemeral spawn transports are not in the
@@ -403,15 +422,17 @@ function buildAgentRows(): AgentStatus[] {
   const rows: AgentStatus[] = []
   for (const [name, cfg] of Object.entries(agents)) {
     if (cfg.mode !== "persistent") continue
-    const t = transports.get(name)
+    const pool = pools.get(name)
+    const src = pool ?? transports.get(name)   // pool aggregates across replicas
     rows.push({
       name, emoji: cfg.emoji, mode: "persistent",
-      alive: t?.isAvailable() ?? false,
-      busy: t?.isBusy() ?? false,
-      queueDepth: t?.queueDepth() ?? 0,
-      fillPct: t?.fillPct(hub.contextWindows) ?? 0,
-      costUsd: t?.lastUsageInfo()?.costUsd,
-      lastActivityMs: t?.lastActivityMs() ?? 0,
+      alive: src?.isAvailable() ?? false,
+      busy: src?.isBusy() ?? false,
+      queueDepth: src?.queueDepth() ?? 0,
+      fillPct: src?.fillPct(hub.contextWindows) ?? 0,
+      costUsd: src?.lastUsageInfo()?.costUsd,
+      replicas: pool?.replicaCount(),
+      lastActivityMs: src?.lastActivityMs() ?? 0,
     })
   }
   return rows

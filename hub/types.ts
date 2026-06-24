@@ -90,6 +90,18 @@ export interface GovernorPolicy {
   strategy?: "restart" | "cli"  // compaction mechanism (default "restart")
 }
 
+/** Per-agent auto-scaling pool: back a logical persistent agent with 1..N
+ *  replicas that scale out under sustained queue pressure. Opt-in (absent ⇒ a
+ *  single transport, exactly as before). */
+export interface PoolPolicy {
+  min?: number              // floor on live replicas (default 1 — the primary)
+  max?: number              // cap on replicas (default 3)
+  scaleUpQueue?: number     // total queued across replicas that signals pressure (default 2)
+  scaleUpSustainMs?: number // pressure must hold this long before scaling up (default 30000)
+  replicaIdleMs?: number    // idle this long ⇒ a spare replica retires (default 600000)
+  isolateCwd?: boolean      // give each replica its own worktree (writers; default false)
+}
+
 export interface AgentRuntime {
   cwd: string
   model?: string
@@ -103,6 +115,7 @@ export interface AgentRuntime {
   sessionGovernor?: GovernorPolicy  // opt-in context-window governance (checkpoint + auto-compact)
   maxQueueDepth?: number     // turn-gate inbound queue cap (default 8); past it, submissions overflow
   coalesceBurst?: boolean    // fold consecutive same-conversation queued messages into one turn
+  pool?: PoolPolicy          // opt-in replica auto-scaling for a hot persistent agent
 }
 
 export interface AgentConfig {
