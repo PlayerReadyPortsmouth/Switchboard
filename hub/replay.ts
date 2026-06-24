@@ -19,6 +19,10 @@ export interface ReplayTimeline {
   rows: ReplayRow[]     // ordered by ts, corr threads kept contiguous
 }
 
+// A ledger row read via the unvalidated JSONL tail could (if hand-edited or
+// truncated) lack ts/outcome — coerce so the timeline never renders NaN/undefined.
+const tsOf = (e: AuditEvent): number => (typeof e.ts === "number" && Number.isFinite(e.ts) ? e.ts : 0)
+
 /** Reconstruct the effect-chain for `id` — selecting every event whose `chat` OR
  *  `corr` equals `id`, ordering by time with each `corr` thread kept contiguous
  *  (sorted at the thread's earliest event). Pure. */
@@ -29,20 +33,36 @@ export function buildReplay(events: AuditEvent[], id: string): ReplayTimeline {
   for (const e of sel) {
     if (!e.corr) continue
     const t = groupTime.get(e.corr)
-    if (t === undefined || e.ts < t) groupTime.set(e.corr, e.ts)
+    const et = tsOf(e)
+    if (t === undefined || et < t) groupTime.set(e.corr, et)
   }
   const ordered = sel
-    .map((e) => ({ e, gt: e.corr ? groupTime.get(e.corr)! : e.ts }))
-    .sort((a, b) => a.gt - b.gt || a.e.ts - b.e.ts)
+    .map((e) => ({ e, gt: e.corr ? groupTime.get(e.corr)! : tsOf(e) }))
+    .sort((a, b) => a.gt - b.gt || tsOf(a.e) - tsOf(b.e))
   const seen = new Set<string>()
   const rows: ReplayRow[] = ordered.map(({ e }) => {
     const groupHead = !!e.corr && !seen.has(e.corr)
     if (e.corr) seen.add(e.corr)
-    return { ts: e.ts, kind: e.kind, actor: e.actor, action: e.action, target: e.target, outcome: e.outcome, corr: e.corr, groupHead }
+    return { ts: tsOf(e), kind: e.kind, actor: e.actor, action: e.action, target: e.target, outcome: e.outcome ?? "?", corr: e.corr, groupHead }
   })
-  const span = sel.length ? Math.max(...sel.map((e) => e.ts)) - Math.min(...sel.map((e) => e.ts)) : 0
+  const span = sel.length ? Math.max(...sel.map(tsOf)) - Math.min(...sel.map(tsOf)) : 0
   const costUsd = sel.reduce((s, e) => s + (e.cost ?? 0), 0)
   return { id, count: sel.length, spanMs: span, costUsd, rows }
+}
+
+/** Split a rendered message into chunks no longer than `maxLen`, breaking on
+ *  newline boundaries (hard-splitting any single over-long line) so a long replay
+ *  stays under Discord's 2000-char limit instead of being rejected whole. Pure. */
+export function chunkLines(text: string, maxLen: number): string[] {
+  const out: string[] = []
+  let buf = ""
+  for (const line of text.split("\n")) {
+    if (buf && buf.length + 1 + line.length > maxLen) { out.push(buf); buf = "" }
+    buf = buf ? `${buf}\n${line}` : line
+    while (buf.length > maxLen) { out.push(buf.slice(0, maxLen)); buf = buf.slice(maxLen) }
+  }
+  if (buf) out.push(buf)
+  return out
 }
 
 function humanizeMs(ms: number): string {

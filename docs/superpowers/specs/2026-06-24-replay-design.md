@@ -73,10 +73,10 @@ export function renderReplay(timeline: ReplayTimeline, fmtTime: (ts: number) => 
 
 ## 3. The command
 
-`!replay <id> [n]` (operator-gated, same `baseGate.listAllowed()` as `!audit`):
-1. `audit.recent({ limit: n ?? 200 })` — a generous tail (replay needs more rows than the default 25 to capture a full conversation).
+`!replay <id> [scan]` (operator-gated, same `baseGate.listAllowed()` as `!audit`):
+1. `audit.recent({ limit: scan })` with `scan` defaulting to **2000** (clamped 200–20000). This matters: an *unfiltered* `recent()` reads exactly `scan` raw rows **before** `buildReplay` selects by chat/corr, so the window must be wide enough that a busy ledger doesn't bury the conversation. `scan` lets an operator widen it further.
 2. `buildReplay(events, id)` → `renderReplay(timeline, hh:mm:ss)`.
-3. `gateway.sendPlain` the result (chunked if long).
+3. `chunkLines(out, 1900)` → `gateway.sendPlain` each chunk — a long timeline is split on newline boundaries so Discord's 2000-char limit can't reject the whole message.
 
 Reuses the audit reader and the operator gate verbatim — no new config, no new state.
 

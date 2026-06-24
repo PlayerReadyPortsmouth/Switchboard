@@ -44,7 +44,7 @@ import { matchOutbound, renderBody } from "./outbound"
 import { AuditLog } from "./auditLog"
 import { parseJsonlTail, shouldRotate, rotationsToPrune } from "./audit"
 import { parseAuditCommand, renderAuditLines, renderAuditSummary } from "./auditCommand"
-import { buildReplay, renderReplay } from "./replay"
+import { buildReplay, renderReplay, chunkLines } from "./replay"
 import { ApprovalRegistry, renderApprovalCard, parseApprovalCustomId, type ApprovalRequest, type ApprovalDecision, type ApprovalFire } from "./approval"
 import { startMetricsServer } from "./metricsServer"
 import { renderHealth, type MetricsInput } from "./metrics"
@@ -1022,9 +1022,15 @@ gateway.handleInbound((m) => {
     const rest = trimmed.replace(/^!replay\b/i, "").trim()
     const sp = rest.indexOf(" ")
     const id = sp === -1 ? rest : rest.slice(0, sp)
-    const n = sp === -1 ? 200 : Math.max(1, Math.min(1000, parseInt(rest.slice(sp + 1), 10) || 200))
-    if (!id) { void gateway.sendPlain(m.chatId, "usage: `!replay <chat-id|corr-id> [n]`"); return }
-    void gateway.sendPlain(m.chatId, renderReplay(buildReplay(audit.recent({ limit: n }), id), (ts) => new Date(ts).toISOString().slice(11, 19)))
+    if (!id) { void gateway.sendPlain(m.chatId, "usage: `!replay <chat-id|corr-id> [scan]`"); return }
+    // `scan` = how many recent ledger rows to read. An unfiltered recent() reads
+    // exactly this many raw rows BEFORE buildReplay selects by chat/corr, so it
+    // must be wide enough that a busy ledger doesn't bury the conversation.
+    const parsed = sp === -1 ? NaN : parseInt(rest.slice(sp + 1), 10)
+    const scan = Number.isFinite(parsed) ? Math.max(200, Math.min(20_000, parsed)) : 2_000
+    const timeline = buildReplay(audit.recent({ limit: scan }), id)
+    const out = renderReplay(timeline, (ts) => new Date(ts).toISOString().slice(11, 19))
+    for (const chunk of chunkLines(out, 1_900)) void gateway.sendPlain(m.chatId, chunk)
     return
   }
   // Health rollup (operator-only): the same data /health serves, in chat.

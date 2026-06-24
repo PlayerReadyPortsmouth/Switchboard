@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test"
-import { buildReplay, renderReplay } from "../hub/replay"
+import { buildReplay, renderReplay, chunkLines } from "../hub/replay"
 import type { AuditEvent } from "../hub/types"
 
 const ev = (over: Partial<AuditEvent>): AuditEvent => ({ ts: 0, kind: "route", actor: "hub", action: "x", outcome: "ok", ...over })
@@ -63,4 +63,27 @@ test("renders a header with count/span/cost and the grouped rows", () => {
 
 test("count === 0 renders a friendly empty message", () => {
   expect(renderReplay(buildReplay(events, "nope"), fmt)).toContain("nothing recorded")
+})
+
+test("coerces a malformed row (missing ts/outcome) — never renders NaN/undefined", () => {
+  const bad = [{ kind: "route", actor: "hub", action: "x", chat: "C" } as unknown as AuditEvent]
+  const out = renderReplay(buildReplay(bad, "C"), fmt)
+  expect(out).not.toContain("NaN")
+  expect(out).not.toContain("undefined")
+  expect(out).toContain("[?]")       // outcome coerced
+  expect(out).toContain("· 0s ·")    // span coerced to 0, not NaN
+})
+
+// ---- chunkLines ----
+
+test("chunkLines keeps each chunk under maxLen, splitting on newlines", () => {
+  const text = ["aaaa", "bbbb", "cccc", "dddd"].join("\n")   // 4 lines of 4
+  const chunks = chunkLines(text, 10)                          // fits ~2 lines/chunk
+  expect(chunks.every((c) => c.length <= 10)).toBe(true)
+  expect(chunks.join("\n")).toBe(text)                         // lossless join
+})
+
+test("chunkLines hard-splits a single over-long line", () => {
+  const chunks = chunkLines("x".repeat(25), 10)
+  expect(chunks).toEqual(["xxxxxxxxxx", "xxxxxxxxxx", "xxxxx"])
 })
