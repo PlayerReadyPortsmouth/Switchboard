@@ -35,6 +35,8 @@ import { distill } from "./memory/distiller"
 import { Overseer } from "./overseer"
 import { SessionGovernor } from "./sessionGovernor"
 import { contextWindow } from "./usage"
+import { StatusRegistry, type AgentStatus, type OverseerStatus } from "./statusRegistry"
+import { renderBoard, Throttle } from "./statusBoard"
 import { matchDirectCommand, runDirect, interpolateArgs, type DirectExecutor } from "./directCommands"
 import type { AgentConfig, AgentReply, SpawnTrigger, SpawnCardUpdate, CardSpec, DirectCommand } from "./types"
 
@@ -267,6 +269,7 @@ function scheduleTeardown(jobId: string, t: StreamJsonTransport, teardownCmd: ()
       clearInterval(tick)
       void t.close()
       transports.delete(jobId)
+      statusRegistry.removeEphemeral(jobId)
       const cmd = teardownCmd()
       if (cmd) void Bun.spawn(["sh", "-c", cmd], { stdout: "inherit", stderr: "inherit" }).exited
     }
@@ -303,6 +306,7 @@ async function runSpawnTrigger(trig: SpawnTrigger, groups: string[], chatId: str
     chatId, messageId: `spawn:${jobId}`, userId: "system", user: "hub",
     content: interpolate(trig.taskTemplate, groups, jobId), ts: new Date().toISOString(), isDM: false,
   })
+  statusRegistry.setEphemeral({ jobId, agent: trig.agent, task: interpolate(trig.taskTemplate, groups, jobId), startedAt: Date.now() })
   // The matched trigger text is consumed (not shown); confirm the spawn to the channel.
   if (!trig.onSpawnCard) void gateway.sendPlain(chatId, `🔧 \`${trig.agent}\` agent dispatched (job ${jobId}).`)
   scheduleTeardown(jobId, t, () => (trig.teardownCommand ? interpolate(trig.teardownCommand, groups, jobId) : undefined))
@@ -368,6 +372,69 @@ const governor = new SessionGovernor({
   recordHandoff: (agent, convId, summary) =>
     messageCache.record(convId, { role: "agent", text: summary, ts: Date.now(), agent }),
 })
+
+// Live status board: one self-editing embed in `statusChannelId` showing every
+// persistent agent (alive/busy/context%/queue/cost), what the overseer/governor
+// is doing, the router's recent picks, and live ephemeral agents. Read-only.
+const statusRegistry = new StatusRegistry()
+const boardThrottle = new Throttle(5_000)   // ≤1 Discord edit per 5s
+let boardMsgId: string | undefined
+let boardSnapshotPending = false
+async function flushBoard(): Promise<void> {
+  if (!hub.statusChannelId) return
+  const card = renderBoard(statusRegistry.snapshot(Date.now()))
+  if (boardMsgId == null) boardMsgId = await gateway.sendCard(hub.statusChannelId, card)
+  else await gateway.editCard(hub.statusChannelId, boardMsgId, card)
+}
+function requestBoardUpdate(): void {
+  if (!hub.statusChannelId) return
+  const { emit, scheduleInMs } = boardThrottle.request(Date.now())
+  if (emit) void flushBoard()
+  else if (scheduleInMs != null && !boardSnapshotPending) {
+    boardSnapshotPending = true
+    setTimeout(() => {
+      boardSnapshotPending = false
+      boardThrottle.fire(Date.now())
+      void flushBoard()
+    }, scheduleInMs).unref()
+  }
+}
+function buildAgentRows(): AgentStatus[] {
+  const rows: AgentStatus[] = []
+  for (const [name, cfg] of Object.entries(agents)) {
+    if (cfg.mode !== "persistent") continue
+    const t = transports.get(name)
+    rows.push({
+      name, emoji: cfg.emoji, mode: "persistent",
+      alive: t?.isAvailable() ?? false,
+      busy: t?.isBusy() ?? false,
+      queueDepth: t?.queueDepth() ?? 0,
+      fillPct: t?.fillPct(hub.contextWindows) ?? 0,
+      costUsd: t?.lastUsageInfo()?.costUsd,
+      lastActivityMs: t?.lastActivityMs() ?? 0,
+    })
+  }
+  return rows
+}
+function buildOverseerRows(): OverseerStatus[] {
+  const prodding = overseer.snapshot().map((o): OverseerStatus => ({
+    agent: o.agent, goal: o.goal, round: o.iterations,
+    max: agents[o.agent]?.runtime.overseer?.maxIterations ?? 4, state: "prodding",
+  }))
+  const compacting = governor.activeCompactions().map((c): OverseerStatus => ({
+    agent: c.agent, goal: "", round: 0, max: 0, state: "compacting",
+  }))
+  return [...prodding, ...compacting]
+}
+if (hub.statusChannelId) {
+  const refresh = hub.statusRefreshMs ?? 15_000
+  setInterval(() => {
+    statusRegistry.setAgents(buildAgentRows())
+    statusRegistry.setOverseers(buildOverseerRows())
+    requestBoardUpdate()
+  }, refresh).unref()
+  setTimeout(() => { statusRegistry.setAgents(buildAgentRows()); requestBoardUpdate() }, 2_000).unref()
+}
 
 const baseGate = new BaseGate(join(hub.stateDir, "access.json"))
 
@@ -474,6 +541,8 @@ const orchestrator = new Orchestrator(hub, agents, {
     const rt = agents[agent]?.runtime
     // A genuine user-initiated turn (re)sets the overseer goal for this agent.
     if (rt?.overseer?.enabled) overseer.begin(agent, inbound.chatId, inbound.content)
+    // Record the routing decision for the status board (the Haiku resolver's pick).
+    statusRegistry.recordRoute({ ts: Date.now(), conv: inbound.chatId, chosen: agent, switched: isSwitch })
     // Render context from PRIOR turns, then record this inbound so it's available
     // next turn (and to the distiller) without duplicating it in this turn's block.
     const policy = rt?.injectContext ?? "onSwitch"

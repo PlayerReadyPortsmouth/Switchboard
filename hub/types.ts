@@ -242,6 +242,8 @@ export interface HubConfig {
   gardener?: GardenerConfig      // access-weighting + periodic vault hygiene (default: off)
   // Session health, live status & scaling (all optional; default off/derived).
   contextWindows?: Record<string, number>  // model id → context window (tokens); `default` is the fallback
+  statusChannelId?: string       // channel for the live status embed (absent ⇒ board off)
+  statusRefreshMs?: number       // status board heartbeat cadence (default 15000)
 }
 
 /** Access-weighted recall + the periodic vault-tending pass. Absent ⇒ recall

@@ -106,4 +106,11 @@ export class SessionGovernor {
   isCompacting(agent: string, convId: string): boolean {
     return this.sessions.get(this.key(agent, convId))?.phase === "awaiting-handoff"
   }
+
+  /** Agents mid-compaction, for the status board. */
+  activeCompactions(): { agent: string; convId: string }[] {
+    return [...this.sessions.entries()]
+      .filter(([, s]) => s.phase === "awaiting-handoff")
+      .map(([k]) => { const i = k.indexOf("::"); return { agent: k.slice(0, i), convId: k.slice(i + 2) } })
+  }
 }
