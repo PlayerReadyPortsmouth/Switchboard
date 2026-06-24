@@ -116,6 +116,7 @@ export interface AgentRuntime {
   maxQueueDepth?: number     // turn-gate inbound queue cap (default 8); past it, submissions overflow
   coalesceBurst?: boolean    // fold consecutive same-conversation queued messages into one turn
   pool?: PoolPolicy          // opt-in replica auto-scaling for a hot persistent agent
+  audit?: boolean            // per-agent audit opt-out/in (default: inherit hub.audit.enabled)
 }
 
 export interface AgentConfig {
@@ -276,6 +277,72 @@ export interface HubConfig {
   contextWindows?: Record<string, number>  // model id → context window (tokens); `default` is the fallback
   statusChannelId?: string       // channel for the live status embed (absent ⇒ board off)
   statusRefreshMs?: number       // status board heartbeat cadence (default 15000)
+  audit?: AuditConfig            // append-only ledger of every governed effect (default off)
+}
+
+// Audit log — one append-only ledger of every governed effect (hub/audit.ts).
+export type AuditKind =
+  | "route" | "spawn" | "exec" | "outbound"
+  | "session" | "access" | "approval" | "event" | "card"
+
+/** One ledger record: who (`actor`) did what (`kind`/`action`) to what (`target`)
+ *  in which conversation (`chat`), and how it resolved (`outcome`). Metadata only
+ *  — never message bodies; secrets in `detail` are redacted before append. */
+export interface AuditEvent {
+  ts: number                     // ms epoch
+  kind: AuditKind                // category
+  actor: string                  // "user:<id>" | "agent:<name>" | "hub" | "schedule:<id>"
+  action: string                 // verb within the kind
+  outcome: "ok" | "deny" | "error" | "pending"
+  target?: string                // agent name / route id / command id / channel
+  chat?: string                  // chat key — threads a conversation's effects together
+  detail?: Record<string, unknown>  // kind-specific, redacted, no message content
+  cost?: number                  // optional usd (turn cost) for rollups
+  corr?: string                  // optional correlation id across a multi-step action
+}
+
+/** Input to `auditEvent` / `AuditLog.record` — `ts` and `outcome` are defaulted. */
+export interface AuditInput {
+  kind: AuditKind
+  actor: string
+  action: string
+  outcome?: AuditEvent["outcome"]
+  target?: string
+  chat?: string
+  detail?: Record<string, unknown>
+  cost?: number
+  corr?: string
+  ts?: number
+}
+
+/** Query filter for `!audit`. Equality on every field except `actor` (exact, or
+ *  prefix when it ends in `:`) and `since` (a `ts` lower bound). */
+export interface AuditFilter {
+  kind?: AuditKind
+  actor?: string
+  chat?: string
+  action?: string
+  outcome?: AuditEvent["outcome"]
+  since?: number
+  limit?: number
+}
+
+export interface AuditSummary {
+  total: number
+  byKind: Record<string, number>
+  byOutcome: Record<string, number>
+  costUsd: number
+  actors: number
+}
+
+/** Audit-log config (all optional; absent ⇒ no ledger, no behaviour change). */
+export interface AuditConfig {
+  enabled?: boolean              // default false
+  file?: string                 // default <stateDir>/audit.jsonl
+  kinds?: AuditKind[]            // optional allowlist of kinds to record (omit ⇒ all)
+  redactEnv?: string[]          // extra secret env names whose values are masked in detail
+  maxBytes?: number             // optional size-based rotation threshold
+  keepFiles?: number            // optional rotated-file retention count
 }
 
 /** Access-weighted recall + the periodic vault-tending pass. Absent ⇒ recall
