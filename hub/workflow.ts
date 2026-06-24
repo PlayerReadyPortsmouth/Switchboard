@@ -12,64 +12,44 @@ export function findWorkflow(workflows: WorkflowRoute[], id: string): WorkflowRo
   return workflows.find((w) => w.id === id)
 }
 
-interface PendingStep {
-  id: string
-  channel: string                    // the virtual channel "mission:<id>"
-  label: string                      // "<workflowId>:<stepId>" for tracing
-  agent: string
-  createdAt: number
-  expiresAt: number
-  resolve: (output: string) => void  // resolves the step's awaited output
-}
+/** Resolves a step's awaited outcome: `ok` distinguishes a real reply (true)
+ *  from a failure — busy/unavailable/timeout (false). */
+type StepResolve = (ok: boolean, output: string) => void
 
 /** Run-and-capture registry for mission steps — the consult primitive applied to
- *  workflows: a step runs on a virtual `mission:<id>` channel, its reply settles
- *  the pending entry, stragglers are TTL-swept. Deterministic (injected now/genId). */
+ *  workflows: a step runs on a virtual `mission:<id>` channel; its reply `settle`s
+ *  the pending entry (success), while busy/unavailable/timeout `fail` it. Both are
+ *  single-shot (first wins, the rest no-op). The engine owns the per-step timeout. */
 export class MissionRegistry {
-  private byChannel = new Map<string, PendingStep>()
-  constructor(
-    private now: () => number,
-    private genId: () => string,
-    private ttlMs: number,
-  ) {}
+  private byChannel = new Map<string, StepResolve>()
+  constructor(private genId: () => string) {}
 
-  open(label: string, agent: string, resolve: (output: string) => void): { id: string; channel: string } {
-    const id = this.genId()
-    const channel = `mission:${id}`
-    const createdAt = this.now()
-    this.byChannel.set(channel, { id, channel, label, agent, createdAt, expiresAt: createdAt + this.ttlMs, resolve })
-    return { id, channel }
+  open(resolve: StepResolve): { channel: string } {
+    const channel = `mission:${this.genId()}`
+    this.byChannel.set(channel, resolve)
+    return { channel }
   }
 
   isMissionChannel(channel: string): boolean {
     return this.byChannel.has(channel)
   }
 
-  /** Settle a step with the agent's captured output. Single-shot. */
+  /** Settle a step with the agent's captured output (success). Single-shot. */
   settle(channel: string, output: string): boolean {
-    const e = this.byChannel.get(channel)
-    if (!e) return false
+    const resolve = this.byChannel.get(channel)
+    if (!resolve) return false
     this.byChannel.delete(channel)
-    e.resolve(output)
+    resolve(true, output)
     return true
   }
 
-  /** Forget a pending step WITHOUT resolving it — used when the engine fails a
-   *  step itself (timeout / unavailable agent) and resolves the awaited promise
-   *  on its own. Returns false if already gone. */
-  drop(channel: string): boolean {
-    return this.byChannel.delete(channel)
-  }
-
-  /** Past-deadline steps, removed and returned so the caller resolves each with a
-   *  timeout note (and fails the run). */
-  sweepExpired(): PendingStep[] {
-    const t = this.now()
-    const out: PendingStep[] = []
-    for (const [channel, e] of this.byChannel) {
-      if (e.expiresAt <= t) { this.byChannel.delete(channel); out.push(e) }
-    }
-    return out
+  /** Fail a step (busy / unavailable / timed out). Single-shot. */
+  fail(channel: string, reason: string): boolean {
+    const resolve = this.byChannel.get(channel)
+    if (!resolve) return false
+    this.byChannel.delete(channel)
+    resolve(false, reason)
+    return true
   }
 }
 

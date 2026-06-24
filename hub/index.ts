@@ -235,6 +235,12 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonT
         consultRegistry.settle(inbound.chatId, `(agent "${name}" is busy)`)
         return
       }
+      // Likewise a mission step: fail it now so the run aborts promptly instead of
+      // posting a "busy" notice to the virtual channel and hanging to the timeout.
+      if (missionRegistry.isMissionChannel(inbound.chatId)) {
+        missionRegistry.fail(inbound.chatId, `agent "${name}" is busy`)
+        return
+      }
       void gateway.sendPlain(inbound.chatId, `${cfg.emoji} ${name} is busy — please resend in a moment.`)
     },
   })
@@ -344,24 +350,25 @@ const consultRegistry = new ConsultRegistry(
 const missionStepTimeoutMs = hub.workflow?.stepTimeoutMs ?? 120_000
 let missionStepCounter = 0
 let missionRunCounter = 0
-const missionRegistry = new MissionRegistry(() => Date.now(), () => `s${++missionStepCounter}`, missionStepTimeoutMs)
+const missionRegistry = new MissionRegistry(() => `s${++missionStepCounter}`)
 const missionCards = new Map<string, { chatId: string; messageId: string }>()
 
 /** Run one mission step: dispatch the prompt to `agent` on a hidden channel and
- *  await the captured reply. Resolves {ok:false} if the agent is unavailable or
- *  the step exceeds its timeout (the engine, not the registry, owns the failure). */
+ *  await the captured reply. Resolves {ok:false} on an unavailable/busy agent or
+ *  a per-step timeout. The registry is single-shot, so whichever of settle (real
+ *  reply), fail (busy via onOverflow / timeout), or the unavailable path fires
+ *  first wins; the timer is cleared on resolve. */
 function runMissionStep(label: string, agent: string, prompt: string): Promise<{ ok: boolean; output: string }> {
   return new Promise((resolve) => {
-    let settled = false
-    const done = (ok: boolean, output: string) => { if (!settled) { settled = true; resolve({ ok, output }) } }
-    const { channel } = missionRegistry.open(label, agent, (output) => done(true, output))
-    const timer = setTimeout(() => { missionRegistry.drop(channel); done(false, "(step timed out)") }, missionStepTimeoutMs)
+    let timer: ReturnType<typeof setTimeout>
+    const { channel } = missionRegistry.open((ok, output) => { clearTimeout(timer); resolve({ ok, output }) })
+    timer = setTimeout(() => missionRegistry.fail(channel, "(step timed out)"), missionStepTimeoutMs)
     ;(timer as { unref?: () => void }).unref?.()
     const ok = dispatcher.dispatch(agent, channel, {
       chatId: channel, messageId: `mission:${label}`, userId: "system", user: "hub",
       content: prompt, ts: new Date().toISOString(), isDM: false,
     })
-    if (!ok) { missionRegistry.drop(channel); clearTimeout(timer); done(false, `agent "${agent}" is unavailable`) }
+    if (!ok) missionRegistry.fail(channel, `agent "${agent}" is unavailable`)
   })
 }
 
@@ -382,26 +389,30 @@ async function runWorkflow(workflowId: string, input: string, chatId: string, ac
   if (msgId) missionCards.set(runId, { chatId, messageId: msgId })
   const editCard = () => { const loc = missionCards.get(runId); if (loc) void gateway.editCard(loc.chatId, loc.messageId, renderMissionCard(run)) }
 
-  const outputs: Record<string, string> = {}
-  for (let i = 0; i < wf.steps.length; i++) {
-    const step = wf.steps[i]
-    run.steps[i].state = "running"; editCard()
-    const res = await runMissionStep(`${workflowId}:${step.id}`, step.agent, renderStepPrompt(step.prompt, { input, steps: outputs }))
-    if (!res.ok) {
-      run.steps[i].state = "failed"; run.steps[i].output = res.output; run.state = "failed"; editCard()
-      audit.record({ kind: "mission", actor: "hub", action: "error", target: workflowId, chat: chatId, outcome: "error", corr: runId, detail: { step: step.id, agent: step.agent } })
-      void gateway.sendPlain(chatId, `❌ mission \`${workflowId}\` failed at step \`${step.id}\`: ${res.output}`)
-      missionCards.delete(runId)
-      return
+  // try/finally guarantees the card entry is reclaimed on every exit path —
+  // success, an aborted step, or an unexpected throw (the call is fire-and-forget).
+  try {
+    const outputs: Record<string, string> = {}
+    for (let i = 0; i < wf.steps.length; i++) {
+      const step = wf.steps[i]
+      run.steps[i].state = "running"; editCard()
+      const res = await runMissionStep(`${workflowId}:${step.id}`, step.agent, renderStepPrompt(step.prompt, { input, steps: outputs }))
+      if (!res.ok) {
+        run.steps[i].state = "failed"; run.steps[i].output = res.output; run.state = "failed"; editCard()
+        audit.record({ kind: "mission", actor: "hub", action: "error", target: workflowId, chat: chatId, outcome: "error", corr: runId, detail: { step: step.id, agent: step.agent } })
+        void gateway.sendPlain(chatId, `❌ mission \`${workflowId}\` failed at step \`${step.id}\`: ${res.output}`)
+        return
+      }
+      outputs[step.id] = res.output
+      run.steps[i].state = "done"; run.steps[i].output = res.output; editCard()
+      audit.record({ kind: "mission", actor: "hub", action: "step", target: step.agent, chat: chatId, outcome: "ok", corr: runId, detail: { step: step.id } })
     }
-    outputs[step.id] = res.output
-    run.steps[i].state = "done"; run.steps[i].output = res.output; editCard()
-    audit.record({ kind: "mission", actor: "hub", action: "step", target: step.agent, chat: chatId, outcome: "ok", corr: runId, detail: { step: step.id } })
+    run.state = "done"; editCard()
+    audit.record({ kind: "mission", actor: "hub", action: "done", target: workflowId, chat: chatId, outcome: "ok", corr: runId })
+    void gateway.sendPlain(chatId, `✅ mission \`${workflowId}\` complete:\n\n${outputs[wf.steps[wf.steps.length - 1].id]}`)
+  } finally {
+    missionCards.delete(runId)
   }
-  run.state = "done"; editCard()
-  audit.record({ kind: "mission", actor: "hub", action: "done", target: workflowId, chat: chatId, outcome: "ok", corr: runId })
-  void gateway.sendPlain(chatId, `✅ mission \`${workflowId}\` complete:\n\n${outputs[wf.steps[wf.steps.length - 1].id]}`)
-  missionCards.delete(runId)
 }
 /** Park an effect for human approval: record the request, post the card, and
  *  remember it for editing on resolution. */

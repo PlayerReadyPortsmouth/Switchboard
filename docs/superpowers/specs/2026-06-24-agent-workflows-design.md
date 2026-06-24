@@ -60,14 +60,16 @@ export function renderStepPrompt(template: string, ctx: { input: string; steps: 
 export function findWorkflow(workflows: WorkflowRoute[], id: string): WorkflowRoute | undefined
 
 /** Run-and-capture registry for mission steps — mirrors ConsultRegistry: open a
- *  pending step on a virtual `mission:<id>` channel, settle it from the agent's
- *  reply, TTL-sweep stragglers. Injected now/genId. */
+ *  pending step on a virtual `mission:<id>` channel; the agent's reply `settle`s it
+ *  (success) while busy/unavailable/timeout `fail`s it. Both single-shot (first
+ *  wins). The engine owns the per-step timeout (a cleared setTimeout per step), so
+ *  the registry needs no clock/TTL — just an injected genId. */
 export class MissionRegistry {
-  constructor(now: () => number, genId: () => string, ttlMs: number)
-  open(label: string, agent: string, resolve: (out: string) => void): { id: string; channel: string }
+  constructor(genId: () => string)
+  open(resolve: (ok: boolean, output: string) => void): { channel: string }
   isMissionChannel(channel: string): boolean
-  settle(channel: string, output: string): boolean    // single-shot
-  sweepExpired(): { channel: string; resolve: (out: string) => void; label: string }[]
+  settle(channel: string, output: string): boolean    // success, single-shot
+  fail(channel: string, reason: string): boolean       // busy/unavailable/timeout, single-shot
 }
 
 /** A run's live state — the engine mutates it and re-renders the card. */
@@ -98,7 +100,7 @@ export function renderMissionCard(run: MissionRun): CardSpec   // pure → the p
 
 1. **`runWorkflow(id, input, chatId)`** — looks up the workflow, builds a `MissionRun`, posts the card, then runs steps sequentially via an internal `runStep(agent, prompt)` that opens a `MissionRegistry` entry, `dispatcher.dispatch`es the prompt on the virtual channel, and returns a promise the reply resolves. Each step: interpolate → run → capture → record → re-render.
 2. **Interception** — `onAgentReply` gains a sibling of the consult check: `if (missionRegistry.isMissionChannel(reply.chatId)) { settle with consultAnswerFromReply(reply); return }` — a step reply never posts to Discord or runs the normal pipeline.
-3. **Failure/timeout** — an unavailable agent or a step that exceeds `stepTimeoutMs` (the sweep) fails the step, marks the run failed, edits the card, and posts what completed. Steps are a fixed list, so no iteration cap is needed.
+3. **Failure/timeout** — an unavailable/busy agent (the latter via the transport's `onOverflow`) or a step that exceeds `stepTimeoutMs` (a per-step `setTimeout` that `fail`s the registry entry) fails the step, marks the run failed, edits the card, and posts what completed. Steps are a fixed list, so no iteration cap is needed.
 4. **Audit** — `mission/start`, `mission/step` (per step, `target: agent`), `mission/done` / `mission/error`, all `corr = runId`, **metadata only** (step ids/agents/outcomes, never the prompt or output text).
 
 ## 4. Triggers
@@ -111,7 +113,7 @@ export function renderMissionCard(run: MissionRun): CardSpec   // pure → the p
 
 - **Operator-defined & operator-triggered.** Workflows live in hub config; `!run` is allowlist-gated. The config *is* the authorization — steps don't go through the per-agent consult gate (that's for agent-initiated calls).
 - **No agent-supplied routing.** Step agents/prompts are fixed in config; `{{...}}` only interpolates the run input and prior step outputs — no arbitrary agent selection at runtime.
-- **Bounded.** Each step has a TTL; a stuck step fails the run rather than hanging. Concurrent runs are isolated by distinct virtual channels.
+- **Bounded.** Each step has a per-step timeout; a stuck step fails the run rather than hanging. Concurrent runs are isolated by distinct virtual channels.
 - **Audited end-to-end.** The whole pipeline is one `corr`-threaded story in the ledger — exactly what replay (the next feature) will reconstruct.
 - **Off by default** — `workflow.enabled` gates the engine; absent config = inert.
 
@@ -130,12 +132,12 @@ export function renderMissionCard(run: MissionRun): CardSpec   // pure → the p
 ## 8. Testing
 
 - **renderStepPrompt:** interpolates `{{input}}` and `{{steps.id}}`; unknown refs → ""; leaves other text intact.
-- **MissionRegistry:** open stamps a `mission:<id>` channel + deadline; settle is single-shot; isMissionChannel; sweepExpired returns only past-deadline entries with their resolvers.
+- **MissionRegistry:** open stamps a unique `mission:<id>` channel; settle resolves `ok=true` and is single-shot; fail resolves `ok=false`; whichever of settle/fail fires first wins.
 - **renderMissionCard:** pending/running/done/failed glyphs; final result shown when done; truncation.
 - **findWorkflow:** by id; undefined on miss.
 
 ## 9. Build order (each increment shippable, leaves the system working)
 
 1. **workflow core** (`hub/workflow.ts`) — types + `renderStepPrompt` + `findWorkflow` + `MissionRegistry` + `renderMissionCard`; `WorkflowConfig`/`HubConfig.workflows`; `mission` audit kind. Pure, unit-tested.
-2. **mission engine** — `runWorkflow` sequential executor, `onAgentReply` interception, the TTL sweep, the live card, audit threading.
+2. **mission engine** — `runWorkflow` sequential executor, `onAgentReply` interception, `onOverflow` busy-fail, the per-step timeout, the live card, audit threading.
 3. **triggers + docs** — `!run` / `!workflows` commands; example `workflows` config; README + PR.

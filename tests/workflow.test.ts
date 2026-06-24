@@ -26,48 +26,33 @@ test("findWorkflow returns by id, undefined on miss", () => {
 
 // ---- MissionRegistry ----
 
-function harness(ttl = 1000) {
-  let now = 0
+function harness() {
   let n = 0
-  const r = new MissionRegistry(() => now, () => `m${++n}`, ttl)
-  return { r, at: (v: number) => { now = v } }
+  return new MissionRegistry(() => `m${++n}`)
 }
 
-test("open stamps a mission:<id> channel + deadline; settle is single-shot", () => {
-  const h = harness(1000)
-  h.at(500)
-  let got: string | undefined
-  const { channel } = h.r.open("ship:a", "x", (out) => { got = out })
+test("open stamps a unique mission:<id> channel; settle resolves ok=true, single-shot", () => {
+  const r = harness()
+  let got: { ok: boolean; output: string } | undefined
+  const { channel } = r.open((ok, output) => { got = { ok, output } })
   expect(channel).toBe("mission:m1")
-  expect(h.r.isMissionChannel("mission:m1")).toBe(true)
-  expect(h.r.isMissionChannel("consult:m1")).toBe(false)
-  expect(h.r.settle(channel, "result")).toBe(true)
-  expect(got).toBe("result")
-  expect(h.r.settle(channel, "again")).toBe(false)   // single-shot
+  expect(r.isMissionChannel("mission:m1")).toBe(true)
+  expect(r.isMissionChannel("consult:m1")).toBe(false)
+  expect(r.open(() => {}).channel).toBe("mission:m2")   // monotonic, no collision
+  expect(r.settle(channel, "result")).toBe(true)
+  expect(got).toEqual({ ok: true, output: "result" })
+  expect(r.settle(channel, "again")).toBe(false)        // single-shot
+  expect(r.fail(channel, "late")).toBe(false)           // already settled
 })
 
-test("drop forgets a pending step without resolving it (single-shot vs settle)", () => {
-  const h = harness()
-  let called = false
-  const { channel } = h.r.open("ship:a", "x", () => { called = true })
-  expect(h.r.drop(channel)).toBe(true)
-  expect(called).toBe(false)               // resolve never fired
-  expect(h.r.isMissionChannel(channel)).toBe(false)
-  expect(h.r.settle(channel, "late")).toBe(false)   // already gone
-  expect(h.r.drop(channel)).toBe(false)
-})
-
-test("sweepExpired returns only past-deadline entries with their resolvers", () => {
-  const h = harness(1000)
-  h.at(0)
-  const a = h.r.open("ship:a", "x", () => {})
-  h.at(600)
-  const b = h.r.open("ship:b", "y", () => {})   // expires 1600
-  h.at(1200)
-  const expired = h.r.sweepExpired()
-  expect(expired.map((e) => e.channel)).toEqual([a.channel])
-  expect(typeof expired[0].resolve).toBe("function")
-  expect(h.r.isMissionChannel(b.channel)).toBe(true)
+test("fail resolves ok=false (busy/unavailable/timeout) and is single-shot vs settle", () => {
+  const r = harness()
+  let got: { ok: boolean; output: string } | undefined
+  const { channel } = r.open((ok, output) => { got = { ok, output } })
+  expect(r.fail(channel, "(agent busy)")).toBe(true)
+  expect(got).toEqual({ ok: false, output: "(agent busy)" })
+  expect(r.isMissionChannel(channel)).toBe(false)
+  expect(r.settle(channel, "too late")).toBe(false)     // fail won the race
 })
 
 // ---- renderMissionCard ----
