@@ -49,7 +49,7 @@ import { startMetricsServer } from "./metricsServer"
 import { renderHealth, type MetricsInput } from "./metrics"
 import { startWebServer } from "./webServer"
 import { type WebInput } from "./web"
-import { ConsultRegistry, mayConsult } from "./consult"
+import { ConsultRegistry, mayConsult, consultAnswerFromReply } from "./consult"
 import type { AgentConfig, AgentReply, SpawnTrigger, SpawnCardUpdate, CardSpec, DirectCommand, OutboundRoute } from "./types"
 
 const CONFIG_DIR = process.env.SWITCHBOARD_CONFIG ?? join(import.meta.dir, "..", "config")
@@ -228,6 +228,12 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonT
     sessionPath: join(hub.stateDir, `${key}.session`),
     consultEnabled: !!hub.consult?.enabled,
     onOverflow: (inbound) => {
+      // A consult that overflows the target's queue must settle the caller's
+      // ask_agent now (not post a "busy" notice to the virtual channel and hang).
+      if (consultRegistry.isConsultChannel(inbound.chatId)) {
+        consultRegistry.settle(inbound.chatId, `(agent "${name}" is busy)`)
+        return
+      }
       void gateway.sendPlain(inbound.chatId, `${cfg.emoji} ${name} is busy — please resend in a moment.`)
     },
   })
@@ -267,6 +273,7 @@ const outboundDelivery = new OutboundDelivery({
 // are masked in `detail` before append. `record()` never throws.
 const auditFile = join(hub.stateDir, hub.audit?.file ?? "audit.jsonl")
 const auditSecrets = [
+  hub.botTokenEnv,
   ...(hub.outboundWebhooks ?? []).map((r) => r.secretEnv),
   ...(hub.directCommands ?? []).map((c) => (c.exec.type === "http" ? c.exec.secretEnv : undefined)),
   ...(hub.audit?.redactEnv ?? []),
@@ -307,6 +314,12 @@ const auditOptedOut = (agent?: string): boolean =>
 // restart). Off unless approvals.enabled. Every step is an `approval` audit event
 // threaded by the approval id as `corr`.
 const approvalsEnabled = !!hub.approvals?.enabled
+if (approvalsEnabled) {
+  if (approvalApprovers.length === 0)
+    console.error("switchboard hub: approvals enabled but no approver configured — every requireApproval effect will expire unapproved")
+  if (!hub.approvals?.channelId)
+    console.error("switchboard hub: approvals enabled with no channelId — approvals for routes lacking an origin chat (post_webhook / events) cannot post a card and will expire")
+}
 let approvalCounter = 0
 const approvalRegistry = new ApprovalRegistry(
   () => Date.now(),
@@ -408,11 +421,14 @@ function emitHubEvent(event: string, data: Record<string, unknown>): void {
  *  text → spawn-trigger match or a plain reply; react/edit → passthrough. */
 async function onAgentReply(reply: AgentReply, key: string): Promise<void> {
   // Inter-agent consult: a reply on a virtual consult channel is the answer to a
-  // pending ask_agent — settle it (return the text to the caller) and never post
-  // it to Discord or run the normal reply pipeline.
+  // pending ask_agent — settle it (return the answer to the caller) and never post
+  // it to Discord or run the normal reply pipeline. Settle on the first text OR
+  // card reply (an agent that answers with a card would otherwise never settle and
+  // the consult would time out); a card is serialized to its title + body.
   if (consultRegistry.isConsultChannel(reply.chatId)) {
-    if (reply.kind === "reply" && reply.text !== undefined) {
-      const settled = consultRegistry.settle(reply.chatId, reply.text)
+    const answer = consultAnswerFromReply(reply)
+    if (answer !== undefined) {
+      const settled = consultRegistry.settle(reply.chatId, answer)
       if (settled) audit.record({
         kind: "consult", actor: `agent:${settled.target}`, action: "answer",
         target: settled.requester, chat: reply.chatId, outcome: "ok", corr: settled.id,
@@ -946,16 +962,16 @@ function collectMetrics(): MetricsInput {
     pendingApprovals: approvalRegistry.pendingCount(),
   }
 }
-const metricsServer = startMetricsServer(hub.metricsPort ?? 0, collectMetrics)
-if (metricsServer) console.error(`switchboard hub: metrics/health on :${hub.metricsPort}`)
+const metricsServer = startMetricsServer(hub.metricsPort ?? 0, collectMetrics, hub.metricsHost)
+if (metricsServer) console.error(`switchboard hub: metrics/health on ${hub.metricsHost ?? "127.0.0.1"}:${hub.metricsPort}`)
 
 // Read-only web dashboard: the same data, plus a recent-activity feed, as a page
 // on webPort. Off unless webPort is set. Serves only aggregated, non-secret data.
 function collectWeb(): WebInput {
   return { ...collectMetrics(), recent: audit.recent({ limit: 30 }) }
 }
-const webServer = startWebServer(hub.webPort ?? 0, collectWeb)
-if (webServer) console.error(`switchboard hub: web dashboard on :${hub.webPort}`)
+const webServer = startWebServer(hub.webPort ?? 0, collectWeb, hub.webHost)
+if (webServer) console.error(`switchboard hub: web dashboard on ${hub.webHost ?? "127.0.0.1"}:${hub.webPort}`)
 
 // Auto-deny pending approvals past their TTL: edit the card to "Expired" and
 // audit the lapse. The held effect never fires (fail-closed).

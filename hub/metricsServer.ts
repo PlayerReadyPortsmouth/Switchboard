@@ -21,9 +21,11 @@ export function handleMetricsRequest(req: Request, collect: () => MetricsInput):
 }
 
 /** Start the metrics/health listener on `port`; returns a stop fn, or null
- *  (no-op) when `port` is unset — off by default. */
-export function startMetricsServer(port: number, collect: () => MetricsInput): { stop: () => void } | null {
+ *  (no-op) when `port` is unset — off by default. Binds `host` (default
+ *  127.0.0.1 — loopback-only unless an operator opts into a wider interface),
+ *  since the endpoint is unauthenticated. */
+export function startMetricsServer(port: number, collect: () => MetricsInput, host = "127.0.0.1"): { stop: () => void } | null {
   if (!port) return null
-  const server = Bun.serve({ port, fetch: (req) => handleMetricsRequest(req, collect) })
+  const server = Bun.serve({ port, hostname: host, fetch: (req) => handleMetricsRequest(req, collect) })
   return { stop: () => server.stop(true) }
 }

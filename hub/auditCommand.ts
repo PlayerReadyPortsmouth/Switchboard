@@ -1,7 +1,7 @@
 import type { AuditEvent, AuditFilter, AuditKind, AuditSummary } from "./types"
 
 const KINDS = new Set<AuditKind>([
-  "route", "spawn", "exec", "outbound", "session", "access", "approval", "event", "card",
+  "route", "spawn", "exec", "outbound", "session", "access", "approval", "event", "card", "consult",
 ])
 
 export interface AuditQuery {

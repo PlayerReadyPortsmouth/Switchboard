@@ -36,7 +36,8 @@ export function renderDashboardJson(i: WebInput): DashboardJson {
       name: a.name, alive: a.alive, busy: a.busy, contextFill: a.fillPct,
       queueDepth: a.queueDepth, costUsd: a.costUsd ?? 0, replicas: a.replicas ?? 1,
     })),
-    ephemerals: i.status.ephemerals.map((e) => ({ jobId: e.jobId, agent: e.agent, task: e.task })),
+    // `task` is agent-output-derived free text — truncate so the payload stays bounded metadata.
+    ephemerals: i.status.ephemerals.map((e) => ({ jobId: e.jobId, agent: e.agent, task: e.task.slice(0, 120) })),
     audit: i.audit,
     recent: i.recent.map((e) => ({ ts: e.ts, kind: e.kind, actor: e.actor, action: e.action, target: e.target, outcome: e.outcome })),
   }

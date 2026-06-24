@@ -17,9 +17,10 @@ export function handleWebRequest(req: Request, collect: () => WebInput): Respons
 }
 
 /** Start the dashboard listener on `port`; returns a stop fn, or null (no-op)
- *  when `port` is unset — off by default. */
-export function startWebServer(port: number, collect: () => WebInput): { stop: () => void } | null {
+ *  when `port` is unset — off by default. Binds `host` (default 127.0.0.1 —
+ *  loopback-only unless an operator opts in), since the page is unauthenticated. */
+export function startWebServer(port: number, collect: () => WebInput, host = "127.0.0.1"): { stop: () => void } | null {
   if (!port) return null
-  const server = Bun.serve({ port, fetch: (req) => handleWebRequest(req, collect) })
+  const server = Bun.serve({ port, hostname: host, fetch: (req) => handleWebRequest(req, collect) })
   return { stop: () => server.stop(true) }
 }

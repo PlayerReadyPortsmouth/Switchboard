@@ -1,6 +1,6 @@
 import { test, expect } from "bun:test"
-import { mayConsult, ConsultRegistry } from "../hub/consult"
-import type { AgentConfig } from "../hub/types"
+import { mayConsult, ConsultRegistry, consultAnswerFromReply } from "../hub/consult"
+import type { AgentConfig, AgentReply } from "../hub/types"
 
 const target = (consultableBy?: string[]): AgentConfig => ({
   emoji: "🤖", description: "t", mode: "persistent",
@@ -64,6 +64,22 @@ test("settle resolves once with the answer (single-shot)", () => {
 test("settle of an unknown channel is a no-op", () => {
   const h = harness()
   expect(h.r.settle("consult:nope", "x")).toBeNull()
+})
+
+// ---- consultAnswerFromReply (a card answer must still settle the consult) ----
+
+const reply = (over: Partial<AgentReply>): AgentReply => ({ agent: "b", kind: "reply", chatId: "consult:q1", ...over })
+
+test("consultAnswerFromReply returns text for a text reply and serializes a card", () => {
+  expect(consultAnswerFromReply(reply({ kind: "reply", text: "hello" }))).toBe("hello")
+  expect(consultAnswerFromReply(reply({ kind: "card", card: { title: "Result", body: "all good", buttons: [] } }))).toBe("Result\n\nall good")
+  expect(consultAnswerFromReply(reply({ kind: "update", card: { title: "T", body: "B", buttons: [] } }))).toBe("T\n\nB")
+})
+
+test("consultAnswerFromReply ignores non-answering reply kinds (consult keeps waiting)", () => {
+  expect(consultAnswerFromReply(reply({ kind: "react", emoji: "✅" }))).toBeUndefined()
+  expect(consultAnswerFromReply(reply({ kind: "reply", text: undefined }))).toBeUndefined()
+  expect(consultAnswerFromReply(reply({ kind: "card", card: undefined }))).toBeUndefined()
 })
 
 test("sweepExpired returns only past-deadline consults", () => {
