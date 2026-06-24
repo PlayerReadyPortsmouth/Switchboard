@@ -50,6 +50,7 @@ import { renderHealth, type MetricsInput } from "./metrics"
 import { startWebServer } from "./webServer"
 import { type WebInput } from "./web"
 import { ConsultRegistry, mayConsult, consultAnswerFromReply } from "./consult"
+import { MissionRegistry, findWorkflow, renderStepPrompt, renderMissionCard, type MissionRun } from "./workflow"
 import type { AgentConfig, AgentReply, SpawnTrigger, SpawnCardUpdate, CardSpec, DirectCommand, OutboundRoute } from "./types"
 
 const CONFIG_DIR = process.env.SWITCHBOARD_CONFIG ?? join(import.meta.dir, "..", "config")
@@ -234,6 +235,12 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonT
         consultRegistry.settle(inbound.chatId, `(agent "${name}" is busy)`)
         return
       }
+      // Likewise a mission step: fail it now so the run aborts promptly instead of
+      // posting a "busy" notice to the virtual channel and hanging to the timeout.
+      if (missionRegistry.isMissionChannel(inbound.chatId)) {
+        missionRegistry.fail(inbound.chatId, `agent "${name}" is busy`)
+        return
+      }
       void gateway.sendPlain(inbound.chatId, `${cfg.emoji} ${name} is busy — please resend in a moment.`)
     },
   })
@@ -336,6 +343,77 @@ const consultRegistry = new ConsultRegistry(
   () => `c${++consultCounter}`,
   hub.consult?.timeoutMs ?? 90_000,
 )
+
+// Agent workflows / missions: a mission runs a workflow's steps in order, each on
+// a hidden mission:<id> channel (captured like a consult) whose output feeds the
+// next step's prompt, with a live progress card. Off unless workflow.enabled.
+const missionStepTimeoutMs = hub.workflow?.stepTimeoutMs ?? 120_000
+let missionStepCounter = 0
+let missionRunCounter = 0
+const missionRegistry = new MissionRegistry(() => `s${++missionStepCounter}`)
+const missionCards = new Map<string, { chatId: string; messageId: string }>()
+
+/** Run one mission step: dispatch the prompt to `agent` on a hidden channel and
+ *  await the captured reply. Resolves {ok:false} on an unavailable/busy agent or
+ *  a per-step timeout. The registry is single-shot, so whichever of settle (real
+ *  reply), fail (busy via onOverflow / timeout), or the unavailable path fires
+ *  first wins; the timer is cleared on resolve. */
+function runMissionStep(label: string, agent: string, prompt: string): Promise<{ ok: boolean; output: string }> {
+  return new Promise((resolve) => {
+    let timer: ReturnType<typeof setTimeout>
+    const { channel } = missionRegistry.open((ok, output) => { clearTimeout(timer); resolve({ ok, output }) })
+    timer = setTimeout(() => missionRegistry.fail(channel, "(step timed out)"), missionStepTimeoutMs)
+    ;(timer as { unref?: () => void }).unref?.()
+    const ok = dispatcher.dispatch(agent, channel, {
+      chatId: channel, messageId: `mission:${label}`, userId: "system", user: "hub",
+      content: prompt, ts: new Date().toISOString(), isDM: false,
+    })
+    if (!ok) missionRegistry.fail(channel, `agent "${agent}" is unavailable`)
+  })
+}
+
+/** Run a workflow as a mission: execute steps in order, feeding each output into
+ *  the next step's prompt, with a live progress card and per-step audit (corr =
+ *  runId). Aborts the run on the first failed step. */
+async function runWorkflow(workflowId: string, input: string, chatId: string, actor: string): Promise<void> {
+  const wf = findWorkflow(hub.workflows ?? [], workflowId)
+  if (!wf || wf.enabled === false) { void gateway.sendPlain(chatId, `⚠️ unknown workflow "${workflowId}" — try \`!workflows\``); return }
+  if (!wf.steps.length) { void gateway.sendPlain(chatId, `⚠️ workflow "${workflowId}" has no steps`); return }
+  const runId = `run-${++missionRunCounter}`
+  const run: MissionRun = {
+    runId, workflowId, input, chatId, state: "running",
+    steps: wf.steps.map((s) => ({ id: s.id, agent: s.agent, state: "pending" })),
+  }
+  audit.record({ kind: "mission", actor, action: "start", target: workflowId, chat: chatId, outcome: "ok", corr: runId, detail: { steps: wf.steps.length } })
+  const msgId = await gateway.sendCard(chatId, renderMissionCard(run))
+  if (msgId) missionCards.set(runId, { chatId, messageId: msgId })
+  const editCard = () => { const loc = missionCards.get(runId); if (loc) void gateway.editCard(loc.chatId, loc.messageId, renderMissionCard(run)) }
+
+  // try/finally guarantees the card entry is reclaimed on every exit path —
+  // success, an aborted step, or an unexpected throw (the call is fire-and-forget).
+  try {
+    const outputs: Record<string, string> = {}
+    for (let i = 0; i < wf.steps.length; i++) {
+      const step = wf.steps[i]
+      run.steps[i].state = "running"; editCard()
+      const res = await runMissionStep(`${workflowId}:${step.id}`, step.agent, renderStepPrompt(step.prompt, { input, steps: outputs }))
+      if (!res.ok) {
+        run.steps[i].state = "failed"; run.steps[i].output = res.output; run.state = "failed"; editCard()
+        audit.record({ kind: "mission", actor: "hub", action: "error", target: workflowId, chat: chatId, outcome: "error", corr: runId, detail: { step: step.id, agent: step.agent } })
+        void gateway.sendPlain(chatId, `❌ mission \`${workflowId}\` failed at step \`${step.id}\`: ${res.output}`)
+        return
+      }
+      outputs[step.id] = res.output
+      run.steps[i].state = "done"; run.steps[i].output = res.output; editCard()
+      audit.record({ kind: "mission", actor: "hub", action: "step", target: step.agent, chat: chatId, outcome: "ok", corr: runId, detail: { step: step.id } })
+    }
+    run.state = "done"; editCard()
+    audit.record({ kind: "mission", actor: "hub", action: "done", target: workflowId, chat: chatId, outcome: "ok", corr: runId })
+    void gateway.sendPlain(chatId, `✅ mission \`${workflowId}\` complete:\n\n${outputs[wf.steps[wf.steps.length - 1].id]}`)
+  } finally {
+    missionCards.delete(runId)
+  }
+}
 /** Park an effect for human approval: record the request, post the card, and
  *  remember it for editing on resolution. */
 async function requestApproval(req: ApprovalRequest, fire: ApprovalFire): Promise<void> {
@@ -434,6 +512,13 @@ async function onAgentReply(reply: AgentReply, key: string): Promise<void> {
         target: settled.requester, chat: reply.chatId, outcome: "ok", corr: settled.id,
       })
     }
+    return
+  }
+  // Mission step: a reply on a virtual mission channel is a workflow step's output
+  // — capture it (text or card) for the engine and never post it to Discord.
+  if (missionRegistry.isMissionChannel(reply.chatId)) {
+    const out = consultAnswerFromReply(reply)
+    if (out !== undefined) missionRegistry.settle(reply.chatId, out)
     return
   }
   if (reply.kind === "card" && reply.card) {
@@ -895,6 +980,28 @@ const directCommands = hub.directCommands ?? []
 gateway.handleInbound((m) => {
   const trimmed = m.content.trim()
   // Audit ledger query (operator-only): list recent governed effects or a rollup.
+  // Workflows: list configured missions (operator-only).
+  if (/^!workflows\b/i.test(trimmed)) {
+    if (!baseGate.listAllowed().includes(m.userId)) return
+    if (!hub.workflow?.enabled) { void gateway.sendPlain(m.chatId, "🧩 workflows are off (set `hub.workflow.enabled`)."); return }
+    const list = (hub.workflows ?? []).filter((w) => w.enabled !== false)
+    if (!list.length) { void gateway.sendPlain(m.chatId, "no workflows configured."); return }
+    const lines = list.map((w) => `• \`${w.id}\` — ${w.description ?? `${w.steps.length} step(s)`}  (${w.steps.map((s) => s.agent).join(" → ")})`)
+    void gateway.sendPlain(m.chatId, ["**workflows** (run with `!run <id> [input]`):", ...lines].join("\n"))
+    return
+  }
+  // Run a workflow as a mission (operator-only).
+  if (/^!run\b/i.test(trimmed)) {
+    if (!baseGate.listAllowed().includes(m.userId)) return
+    if (!hub.workflow?.enabled) { void gateway.sendPlain(m.chatId, "🧩 workflows are off (set `hub.workflow.enabled`)."); return }
+    const rest = trimmed.replace(/^!run\b/i, "").trim()
+    const sp = rest.indexOf(" ")
+    const id = sp === -1 ? rest : rest.slice(0, sp)
+    const input = sp === -1 ? "" : rest.slice(sp + 1).trim()
+    if (!id) { void gateway.sendPlain(m.chatId, "usage: `!run <workflow-id> [input]`"); return }
+    void runWorkflow(id, input, m.chatId, `user:${m.userId}`)
+    return
+  }
   if (/^!audit\b/i.test(trimmed)) {
     if (!baseGate.listAllowed().includes(m.userId)) return
     if (!hub.audit?.enabled) { void gateway.sendPlain(m.chatId, "📜 audit logging is off (set `hub.audit.enabled`)."); return }

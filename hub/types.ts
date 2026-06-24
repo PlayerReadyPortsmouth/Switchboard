@@ -285,6 +285,31 @@ export interface HubConfig {
   audit?: AuditConfig            // append-only ledger of every governed effect (default off)
   approvals?: ApprovalConfig     // human-in-the-loop approval gate for requireApproval effects (default off)
   consult?: ConsultConfig        // inter-agent ask_agent tool (default off; per-agent access via consultableBy)
+  workflows?: WorkflowRoute[]    // declarative multi-step agent missions (run via !run)
+  workflow?: WorkflowConfig      // workflow engine config (default off)
+}
+
+/** One step of a workflow: run `agent` with a templated `prompt` ({{input}} and
+ *  {{steps.<id>}} interpolate the run input and prior step outputs). */
+export interface WorkflowStep {
+  id: string
+  agent: string
+  prompt: string
+}
+
+/** A declarative multi-step agent mission. Steps run in order; each step's output
+ *  feeds the next. Steps target persistent (registered) agents. */
+export interface WorkflowRoute {
+  id: string
+  description?: string
+  enabled?: boolean              // default true (when the engine is enabled)
+  steps: WorkflowStep[]
+}
+
+/** Workflow engine config. Absent/disabled ⇒ no missions run. */
+export interface WorkflowConfig {
+  enabled?: boolean              // master switch (default off)
+  stepTimeoutMs?: number         // per-step hub-side wait (default 120000)
 }
 
 /** Inter-agent consult config. Absent/disabled ⇒ the ask_agent tool isn't even
@@ -297,7 +322,7 @@ export interface ConsultConfig {
 // Audit log — one append-only ledger of every governed effect (hub/audit.ts).
 export type AuditKind =
   | "route" | "spawn" | "exec" | "outbound"
-  | "session" | "access" | "approval" | "event" | "card" | "consult"
+  | "session" | "access" | "approval" | "event" | "card" | "consult" | "mission"
 
 /** One ledger record: who (`actor`) did what (`kind`/`action`) to what (`target`)
  *  in which conversation (`chat`), and how it resolved (`outcome`). Metadata only
