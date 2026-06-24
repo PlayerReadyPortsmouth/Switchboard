@@ -47,6 +47,8 @@ import { parseAuditCommand, renderAuditLines, renderAuditSummary } from "./audit
 import { ApprovalRegistry, renderApprovalCard, parseApprovalCustomId, type ApprovalRequest, type ApprovalDecision, type ApprovalFire } from "./approval"
 import { startMetricsServer } from "./metricsServer"
 import { renderHealth, type MetricsInput } from "./metrics"
+import { startWebServer } from "./webServer"
+import { type WebInput } from "./web"
 import { ConsultRegistry, mayConsult } from "./consult"
 import type { AgentConfig, AgentReply, SpawnTrigger, SpawnCardUpdate, CardSpec, DirectCommand, OutboundRoute } from "./types"
 
@@ -946,6 +948,14 @@ function collectMetrics(): MetricsInput {
 }
 const metricsServer = startMetricsServer(hub.metricsPort ?? 0, collectMetrics)
 if (metricsServer) console.error(`switchboard hub: metrics/health on :${hub.metricsPort}`)
+
+// Read-only web dashboard: the same data, plus a recent-activity feed, as a page
+// on webPort. Off unless webPort is set. Serves only aggregated, non-secret data.
+function collectWeb(): WebInput {
+  return { ...collectMetrics(), recent: audit.recent({ limit: 30 }) }
+}
+const webServer = startWebServer(hub.webPort ?? 0, collectWeb)
+if (webServer) console.error(`switchboard hub: web dashboard on :${hub.webPort}`)
 
 // Auto-deny pending approvals past their TTL: edit the card to "Expired" and
 // audit the lapse. The held effect never fires (fail-closed).

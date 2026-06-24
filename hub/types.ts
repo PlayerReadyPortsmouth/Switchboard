@@ -279,6 +279,7 @@ export interface HubConfig {
   statusChannelId?: string       // channel for the live status embed (absent ⇒ board off)
   statusRefreshMs?: number       // status board heartbeat cadence (default 15000)
   metricsPort?: number           // port for the Prometheus /metrics + /health listener (absent ⇒ off)
+  webPort?: number               // port for the read-only web dashboard (absent ⇒ off)
   audit?: AuditConfig            // append-only ledger of every governed effect (default off)
   approvals?: ApprovalConfig     // human-in-the-loop approval gate for requireApproval effects (default off)
   consult?: ConsultConfig        // inter-agent ask_agent tool (default off; per-agent access via consultableBy)

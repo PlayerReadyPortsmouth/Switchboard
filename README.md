@@ -176,6 +176,15 @@ Agents aren't islands. With `consult.enabled`, each agent gets an **`ask_agent`*
 
 Built on the same request/response seam as `recall`: the target runs on a virtual `consult:<id>` channel, its reply is intercepted before Discord and returned to the caller. **Governed** — an agent answers only if its `access.consultableBy` permits the requester (`"*"` = any; self-consult always denied); the tool is exposed only when `consult.enabled`. **Bounded** — the caller waits up to `timeoutMs` (then gets a timeout note), and every consult (`ask`/`answer`/`deny`/`timeout`) is a `consult` audit event threaded by `corr`. *Boundaries:* the call is synchronous (the caller holds its turn while waiting) and runs in the target's shared session; a mutual cycle is broken by the timeout.
 
+## Web dashboard
+
+Point a browser at the hub and watch it work. Set `webPort` and the hub serves a single self-contained page (off when unset). See [`docs/superpowers/specs/2026-06-24-web-dashboard-design.md`](docs/superpowers/specs/2026-06-24-web-dashboard-design.md).
+
+- **`GET /`** — a read-only dashboard (vanilla JS, no build step) that polls `/api/status` every 3 s and renders the agent fleet (alive/busy, context-fill bar, queue, cost, replicas), hub health + uptime, the ledger summary, and a recent-activity feed.
+- **`GET /api/status`** — the JSON the page consumes, projected from the same `StatusSnapshot` + audit data as `!status`/`!audit`/`/metrics` (its readiness flag matches `/health`).
+
+Read-only and unauthenticated like `/metrics` — it serves only the already-public status/audit **metadata** (no message content, no secrets, no write actions); bind it on a private network. This is deliberately the read-only slice of "web support"; a bidirectional web chat would mean abstracting the Discord-coupled gateway, a separate effort.
+
 ## Status of features
 
 **Working** (covered by the passing unit tests + the real-CLI smoke check):
@@ -203,6 +212,7 @@ Built on the same request/response seam as `recall`: the target runs on a virtua
 - **Gated actions & approvals** (`approval.ts`): a `requireApproval` effect parks for a human Approve/Deny card and fires only on an authorized approver's grant — fail-closed, single-shot, TTL-swept, audited end-to-end by `corr`. Off unless `approvals.enabled`.
 - **Metrics & health** (`metrics.ts`/`metricsServer.ts`): a Prometheus `GET /metrics` scrape + `GET /health` probe (503 when no agent is alive) on `metricsPort`, projected from the live status snapshot + audit summary, plus a `!metrics` chat rollup. Off unless `metricsPort` is set.
 - **Inter-agent consult** (`consult.ts`): an `ask_agent` tool lets one agent ask another (by name) and get its reply back, via the recall request/response seam on a virtual channel — governed by `access.consultableBy` (default deny, no self-consult), bounded by `timeoutMs`, audited as `consult`. Off unless `consult.enabled`.
+- **Web dashboard** (`web.ts`/`webServer.ts`): a read-only browser dashboard on `webPort` (`GET /` + a `/api/status` JSON feed) showing the live agent fleet, health, ledger summary, and recent activity — projected from the same snapshot + audit data, no gateway changes. Off unless `webPort` is set.
 - **Overseer** (`overseer.ts`): opt-in keep-prodding-until-done loop with `done`/`working`/`blocked` verdicts, autonomy bias, and iteration/wallclock caps.
 
 **Known gaps:**
@@ -224,3 +234,4 @@ Built on the same request/response seam as `recall`: the target runs on a virtua
 - Gated action catalog — Spec: [`docs/superpowers/specs/2026-06-24-gated-action-catalog-design.md`](docs/superpowers/specs/2026-06-24-gated-action-catalog-design.md)
 - Metrics & health — Spec: [`docs/superpowers/specs/2026-06-24-metrics-health-design.md`](docs/superpowers/specs/2026-06-24-metrics-health-design.md)
 - Inter-agent consult — Spec: [`docs/superpowers/specs/2026-06-24-inter-agent-consult-design.md`](docs/superpowers/specs/2026-06-24-inter-agent-consult-design.md)
+- Web dashboard — Spec: [`docs/superpowers/specs/2026-06-24-web-dashboard-design.md`](docs/superpowers/specs/2026-06-24-web-dashboard-design.md)
