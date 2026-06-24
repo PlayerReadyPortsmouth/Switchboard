@@ -1,5 +1,5 @@
 import { join, dirname } from "path"
-import { unlinkSync, appendFileSync, mkdirSync, readFileSync, existsSync, statSync, renameSync, readdirSync } from "fs"
+import { unlinkSync, appendFileSync, mkdirSync, readFileSync, writeFileSync, existsSync, statSync, renameSync, readdirSync } from "fs"
 import { config as loadEnv } from "./env"
 import { loadConfigs } from "./config"
 import { BaseGate } from "./baseGate"
@@ -52,7 +52,7 @@ import { startWebServer } from "./webServer"
 import { type WebInput } from "./web"
 import { ConsultRegistry, mayConsult, consultAnswerFromReply } from "./consult"
 import { MissionRegistry, findWorkflow, renderStepPrompt, renderMissionCard, type MissionRun } from "./workflow"
-import type { AgentConfig, AgentReply, SpawnTrigger, SpawnCardUpdate, CardSpec, DirectCommand, OutboundRoute } from "./types"
+import type { AgentConfig, AgentReply, InboundMessage, SpawnTrigger, SpawnCardUpdate, CardSpec, DirectCommand, OutboundRoute } from "./types"
 
 const CONFIG_DIR = process.env.SWITCHBOARD_CONFIG ?? join(import.meta.dir, "..", "config")
 const { hub, agents } = loadConfigs(CONFIG_DIR)
@@ -181,6 +181,92 @@ const cardLifecycle = new CardLifecycle(cardRegistry, {
   runCommand: (cmd) => Bun.spawn(["sh", "-c", cmd], { stdout: "inherit", stderr: "inherit" }).exited,
 })
 
+// Virtual consult channels currently in the retry loop — their overflow events are
+// suppressed so the retry loop owns the settle lifecycle.
+const retryingConsults = new Set<string>()
+
+/** Retry consult delivery every 15 s for up to 2 min.
+ *  After 60 s, posts a "waiting" notice to the requester's Discord channel.
+ *  After 2 min, spawns an ephemeral one-shot clone of the target to answer.  */
+async function runConsultRetry(
+  targetName: string,
+  virtualChannel: string,
+  inbound: InboundMessage,
+  discordCh: string,
+  settle: (answer: string) => void,
+  isSettled: () => boolean,
+): Promise<void> {
+  const RETRY_MS = 15_000
+  const NOTIFY_AFTER_MS = 60_000
+  const CLONE_AFTER_MS = 120_000
+  const started = Date.now()
+  let notified = false
+  try {
+    while (!isSettled()) {
+      await Bun.sleep(RETRY_MS)
+      if (isSettled()) break
+      const elapsed = Date.now() - started
+      // After 60 s, post a one-time notice so the user isn't left wondering.
+      if (!notified && elapsed >= NOTIFY_AFTER_MS && discordCh) {
+        notified = true
+        const emoji = agents[targetName]?.emoji ?? ""
+        void gateway.sendPlain(
+          discordCh,
+          `${emoji} Waiting for **${targetName}** to finish its current turn — I'll continue once it responds.`,
+        )
+      }
+      // After 2 min, spin up a one-shot clone that answers from scratch.
+      if (elapsed >= CLONE_AFTER_MS) {
+        const answer = await spawnConsultClone(targetName, inbound.content)
+        settle(answer)
+        break
+      }
+      // Try delivery again; if the target is still busy the overflow handler is
+      // suppressed (retryingConsults), so we just loop and try again next tick.
+      dispatcher.dispatch(targetName, virtualChannel, inbound)
+    }
+  } finally {
+    retryingConsults.delete(virtualChannel)
+  }
+}
+
+/** Spawn a one-shot ephemeral clone of `targetName` to handle a single consult
+ *  question. The clone starts with a fresh session (no --resume, no memory
+ *  injection) and exits after the first reply. */
+async function spawnConsultClone(targetName: string, question: string): Promise<string> {
+  const cfg = agents[targetName]
+  if (!cfg) return `(agent "${targetName}" not found for clone)`
+  const cloneKey = `consult-clone-${targetName}-${Date.now()}`
+  const cloneCfg: AgentConfig = {
+    ...cfg,
+    mode: "ephemeral" as const,
+    runtime: { ...cfg.runtime, resumable: false, useMemory: false, injectContext: undefined },
+  }
+  const t = makeTransport(targetName, cloneKey, cloneCfg)
+  return new Promise<string>((resolve) => {
+    let done = false
+    const finish = (answer: string) => {
+      if (done) return
+      done = true
+      void t.close()
+      transports.delete(cloneKey)
+      resolve(answer)
+    }
+    // Override the onReply set by makeTransport so the reply doesn't reach Discord.
+    t.onReply((reply) => {
+      if (reply.kind === "reply") finish(reply.text ?? "(no response from clone)")
+      else if (reply.kind === "card") finish(reply.card?.body ?? "(card response from clone)")
+    })
+    setTimeout(() => finish(`(${targetName} clone timed out)`), 90_000).unref()
+    void t.start().then(() => {
+      t.deliver(cloneKey, {
+        chatId: cloneKey, messageId: "clone-0", userId: "system", user: "hub",
+        content: question, ts: new Date().toISOString(), isDM: false,
+      })
+    })
+  })
+}
+
 /** Build (but do not start) a StreamJsonTransport and register it under `key`. */
 function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonTransport {
   const socketPath = join(hub.stateDir, `${key}.sock`)
@@ -212,13 +298,36 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonT
       resolveAnswer(`(not permitted to consult "${targetName}")`)
       return
     }
-    const e = consultRegistry.open(requester, targetName, resolveAnswer)
+    // Wrap resolveAnswer so the retry loop can tell when the consult has been settled
+    // by external means (e.g. the target finished its current turn and answered).
+    let consultSettled = false
+    const settle = (answer: string) => {
+      if (consultSettled) return
+      consultSettled = true
+      resolveAnswer(answer)
+    }
+    const e = consultRegistry.open(requester, targetName, settle)
     audit.record({ kind: "consult", actor: `agent:${requester}`, action: "ask", target: targetName, chat: e.channel, outcome: "ok", corr: e.id })
-    const ok = dispatcher.dispatch(targetName, e.channel, {
-      chatId: e.channel, messageId: `consult:${requester}`, userId: "system", user: "hub",
-      content: message, ts: new Date().toISOString(), isDM: false,
-    })
-    if (!ok) consultRegistry.settle(e.channel, `(agent "${targetName}" is unavailable)`)
+    const inbound: InboundMessage = { chatId: e.channel, messageId: `consult:${requester}`, userId: "system", user: "hub",
+      content: message, ts: new Date().toISOString(), isDM: false }
+    // Try immediate delivery if target is free; otherwise start the retry loop.
+    const target = pools.get(targetName) ?? transports.get(targetName)
+    if (!target?.isAvailable()) {
+      // Agent is completely down — no point retrying; settle immediately.
+      settle(`(agent "${targetName}" is unavailable)`)
+      return
+    }
+    if (!target.isBusy()) {
+      // Agent is free — deliver directly (no retry needed).
+      dispatcher.dispatch(targetName, e.channel, inbound)
+      return
+    }
+    // Agent is alive but busy — start the retry loop.
+    // Retrieve the requester's active Discord channel now — safe because this
+    // handler only fires mid-turn, so the transport is live and lastChatId is set.
+    const discordCh = transports.get(key)?.getLastChatId() ?? ""
+    retryingConsults.add(e.channel)
+    void runConsultRetry(targetName, e.channel, inbound, discordCh, settle, () => consultSettled)
   }))
   const t = new StreamJsonTransport(name, cfg, {
     spawner,
@@ -230,10 +339,11 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonT
     sessionPath: join(hub.stateDir, `${key}.session`),
     consultEnabled: !!hub.consult?.enabled,
     onOverflow: (inbound) => {
-      // A consult that overflows the target's queue must settle the caller's
-      // ask_agent now (not post a "busy" notice to the virtual channel and hang).
+      // Consults in the retry loop own their own retry/settle lifecycle — don't
+      // short-circuit them here, just drop the overflow silently.
       if (consultRegistry.isConsultChannel(inbound.chatId)) {
-        consultRegistry.settle(inbound.chatId, `(agent "${name}" is busy)`)
+        if (!retryingConsults.has(inbound.chatId))
+          consultRegistry.settle(inbound.chatId, `(agent "${name}" is busy)`)
         return
       }
       // Likewise a mission step: fail it now so the run aborts promptly instead of
@@ -728,13 +838,25 @@ const governor = new SessionGovernor({
 // is doing, the router's recent picks, and live ephemeral agents. Read-only.
 const statusRegistry = new StatusRegistry()
 const boardThrottle = new Throttle(5_000)   // ≤1 Discord edit per 5s
-let boardMsgId: string | undefined
+const boardMsgPath = join(expandHome(hub.stateDir), "status-board-msg.txt")
+let boardMsgId: string | undefined = (() => {
+  try { const s = readFileSync(boardMsgPath, "utf8").trim(); return s || undefined } catch { return undefined }
+})()
 let boardSnapshotPending = false
 async function flushBoard(): Promise<void> {
   if (!hub.statusChannelId) return
   const card = renderBoard(statusRegistry.snapshot(Date.now()))
-  if (boardMsgId == null) boardMsgId = await gateway.sendCard(hub.statusChannelId, card)
-  else await gateway.editCard(hub.statusChannelId, boardMsgId, card)
+  if (boardMsgId == null) {
+    boardMsgId = await gateway.sendCard(hub.statusChannelId, card)
+    try { writeFileSync(boardMsgPath, boardMsgId) } catch {}
+  } else {
+    // If the message was deleted in Discord the edit will throw — fall back to a fresh post.
+    try { await gateway.editCard(hub.statusChannelId, boardMsgId, card) }
+    catch {
+      boardMsgId = await gateway.sendCard(hub.statusChannelId, card)
+      try { writeFileSync(boardMsgPath, boardMsgId) } catch {}
+    }
+  }
 }
 function requestBoardUpdate(): void {
   if (!hub.statusChannelId) return

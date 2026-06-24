@@ -128,46 +128,65 @@ export class StreamJsonTransport implements AgentTransport {
     const write = this.opts.writeMcpConfig ?? ((p, c) => writeFileSync(p, c))
     write(mcpConfigPath, JSON.stringify(buildShimMcpConfig(shimPath, socketPath, this.name, this.opts.consultEnabled)))
 
-    const resumeSessionId = this.opts.resumable
+    const initialSessionId = this.opts.resumable
       ? (this.opts.readSession?.() ?? (this.opts.sessionPath ? readSessionFile(this.opts.sessionPath) : undefined))
       : undefined
-    const argv = buildClaudeArgv({
-      mcpConfigPath, resumeSessionId,
-      model: this.cfg.runtime.model,
-      appendSystemPrompt: this.cfg.runtime.appendSystemPrompt,
-      claudeArgs: this.cfg.runtime.claudeArgs,
-    })
-    this.proc = spawner(argv, this.cfg.runtime.cwd, {
-      ...(process.env as Record<string, string>),
-      HUB_SOCKET: socketPath, AGENT_NAME: this.name,
-    })
-    this.alive = true
-    this.proc.onExit(() => { this.alive = false; this.gate.reset() })
-    this.proc.onStdoutLine((line) => {
-      const ev = parseStreamEvent(line)
-      if (ev?.kind === "init") {
-        if (this.opts.resumable) {
-          if (this.opts.writeSession) this.opts.writeSession(ev.sessionId)
-          else if (this.opts.sessionPath) writeSessionFile(this.opts.sessionPath, ev.sessionId)
+
+    // spawnWith is a local closure so it can reference `this` and retry itself
+    // exactly once when a stale --resume causes an immediate pre-init exit.
+    const spawnWith = (resumeSessionId: string | undefined, isFallback: boolean) => {
+      let initReceived = false
+      const argv = buildClaudeArgv({
+        mcpConfigPath, resumeSessionId,
+        model: this.cfg.runtime.model,
+        appendSystemPrompt: this.cfg.runtime.appendSystemPrompt,
+        claudeArgs: this.cfg.runtime.claudeArgs,
+      })
+      this.proc = spawner(argv, this.cfg.runtime.cwd, {
+        ...(process.env as Record<string, string>),
+        HUB_SOCKET: socketPath, AGENT_NAME: this.name,
+      })
+      this.alive = true
+      this.proc.onExit(() => {
+        this.alive = false
+        this.gate.reset()
+        // Stale --resume: the CLI exits immediately before emitting init when the
+        // session id is no longer on disk. Retry once as a fresh session and clear
+        // the stale file so future restarts don't hit the same loop.
+        if (!initReceived && resumeSessionId && !isFallback) {
+          if (this.opts.sessionPath) try { unlinkSync(this.opts.sessionPath) } catch {}
+          spawnWith(undefined, true)
         }
-        return
-      }
-      if (ev?.kind === "result") {
-        // Capture this turn's token/cost usage (when the CLI reported it) so the
-        // hub can estimate context fill, drive the session governor, and surface
-        // it on the live status board. Usage rides out on the reply too.
-        if (ev.usage) this.lastUsage = ev.usage
-        // The agent's end-of-turn text is posted as a reply ONLY when it didn't
-        // already communicate via a card this turn — a card IS the message, so the
-        // transcript summary underneath it is redundant noise. Turns with no card
-        // (e.g. a short "Backlogged" acknowledgement) still post their text.
-        if (!this.cardThisTurn) {
-          this.cb({ agent: this.name, kind: "reply", chatId: this.lastChatId, text: ev.text, usage: ev.usage })
+      })
+      this.proc.onStdoutLine((line) => {
+        const ev = parseStreamEvent(line)
+        if (ev?.kind === "init") {
+          initReceived = true
+          if (this.opts.resumable) {
+            if (this.opts.writeSession) this.opts.writeSession(ev.sessionId)
+            else if (this.opts.sessionPath) writeSessionFile(this.opts.sessionPath, ev.sessionId)
+          }
+          return
         }
-        this.cardThisTurn = false
-        this.gate.turnComplete()   // turn finished → drain the next queued message
-      }
-    })
+        if (ev?.kind === "result") {
+          // Capture this turn's token/cost usage (when the CLI reported it) so the
+          // hub can estimate context fill, drive the session governor, and surface
+          // it on the live status board. Usage rides out on the reply too.
+          if (ev.usage) this.lastUsage = ev.usage
+          // The agent's end-of-turn text is posted as a reply ONLY when it didn't
+          // already communicate via a card this turn — a card IS the message, so the
+          // transcript summary underneath it is redundant noise. Turns with no card
+          // (e.g. a short "Backlogged" acknowledgement) still post their text.
+          if (!this.cardThisTurn) {
+            this.cb({ agent: this.name, kind: "reply", chatId: this.lastChatId, text: ev.text, usage: ev.usage })
+          }
+          this.cardThisTurn = false
+          this.gate.turnComplete()   // turn finished → drain the next queued message
+        }
+      })
+    }
+
+    spawnWith(initialSessionId, false)
   }
 
   deliver(_chatKey: string, inbound: InboundMessage): void {
@@ -188,6 +207,8 @@ export class StreamJsonTransport implements AgentTransport {
   /** Number of messages waiting behind the in-flight turn. */
   queueDepth(): number { return this.gate.queueDepth() }
 
+  /** Discord channel id of the most recently delivered message (empty before first turn). */
+  getLastChatId(): string { return this.lastChatId }
   /** Most recent turn's usage, or null before the first reporting turn. */
   lastUsageInfo(): TurnUsage | null { return this.lastUsage }
   /** Estimated current context size (tokens) from the last turn's prompt. */

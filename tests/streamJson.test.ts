@@ -270,3 +270,59 @@ zt("not resumable → no --resume even if a session would resolve", async () => 
   await t.start()
   ze(argv).not.toContain("--resume")
 })
+
+// Stale session: process exits before emitting init → hub retries as fresh session
+zt("stale --resume: process exits before init → retry spawned without --resume", async () => {
+  const spawns: string[][] = []
+  let exitCb: (c: number) => void = () => {}
+  // The spawner records each argv set and returns a handle whose onExit we capture
+  const t = new SJT2("dev", cfgZ, {
+    spawner: (a: string[]) => {
+      spawns.push([...a])
+      return {
+        writeStdin() {}, kill() {},
+        onStdoutLine() {},
+        onExit: (cb: any) => { exitCb = cb },
+      } as any
+    },
+    socket: fakeSockZ() as any,
+    shimPath:"/s", socketPath:"/r.sock", mcpConfigPath:"/r.mcp.json", writeMcpConfig: () => {},
+    resumable: true,
+    readSession: () => "stale-sess",
+    // deleteSession seam: track whether it was called
+  })
+  await t.start()
+  // First spawn: should have --resume stale-sess
+  ze(spawns.length).toBe(1)
+  ze(spawns[0]).toContain("--resume")
+  ze(spawns[0][spawns[0].indexOf("--resume") + 1]).toBe("stale-sess")
+  // Process exits before any init event → stale session path
+  exitCb(1)
+  // Second spawn should have been triggered without --resume
+  ze(spawns.length).toBe(2)
+  ze(spawns[1]).not.toContain("--resume")
+})
+
+zt("stale session retry: does not retry again if fallback also exits before init", async () => {
+  const spawns: string[][] = []
+  const exitCbs: Array<(c: number) => void> = []
+  const t = new SJT2("dev", cfgZ, {
+    spawner: (a: string[]) => {
+      spawns.push([...a])
+      return {
+        writeStdin() {}, kill() {},
+        onStdoutLine() {},
+        onExit: (cb: any) => { exitCbs.push(cb) },
+      } as any
+    },
+    socket: fakeSockZ() as any,
+    shimPath:"/s", socketPath:"/r.sock", mcpConfigPath:"/r.mcp.json", writeMcpConfig: () => {},
+    resumable: true,
+    readSession: () => "stale-sess",
+  })
+  await t.start()
+  exitCbs[0](1)           // first spawn exits before init → triggers fallback
+  ze(spawns.length).toBe(2)
+  exitCbs[1](1)           // fallback also exits before init → no third spawn (isFallback guard)
+  ze(spawns.length).toBe(2)
+})
