@@ -65,6 +65,29 @@ test("sweepExpired expires only past-deadline entries", () => {
   expect(h.r.get(b.id)?.state).toBe("pending")
 })
 
+test("the held effect fires only on grant (the wiring calls fire on grant alone)", () => {
+  const h = harness(1000)
+  let fires = 0
+  const a = h.r.request(req(), () => { fires++ })
+  h.r.resolve(a.id, "grant")?.fire()              // granted → wiring fires it
+  expect(h.r.resolve(a.id, "grant")).toBeNull()   // single-shot: no second fire
+  h.r.resolve(h.r.request(req(), () => { fires++ }).id, "deny")  // denied → wiring does not fire
+  const c = h.r.request(req(), () => { fires++ })
+  h.advance(2000)
+  h.r.sweepExpired()                              // expired → wiring does not fire
+  expect(c.state).toBe("expired")
+  expect(fires).toBe(1)
+})
+
+test("the held effect receives the approval id as corr on grant", () => {
+  const h = harness()
+  let got: string | undefined
+  const e = h.r.request(req(), (corr) => { got = corr })
+  const g = h.r.resolve(e.id, "grant")
+  g?.fire(g.id)
+  expect(got).toBe(e.id)
+})
+
 // ---- renderApprovalCard ----
 
 test("a pending card has Approve/Deny buttons with the right customIds", () => {

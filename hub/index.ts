@@ -44,7 +44,7 @@ import { matchOutbound, renderBody } from "./outbound"
 import { AuditLog } from "./auditLog"
 import { parseJsonlTail, shouldRotate, rotationsToPrune } from "./audit"
 import { parseAuditCommand, renderAuditLines, renderAuditSummary } from "./auditCommand"
-import { ApprovalRegistry, renderApprovalCard, parseApprovalCustomId, type ApprovalRequest, type ApprovalDecision } from "./approval"
+import { ApprovalRegistry, renderApprovalCard, parseApprovalCustomId, type ApprovalRequest, type ApprovalDecision, type ApprovalFire } from "./approval"
 import type { AgentConfig, AgentReply, SpawnTrigger, SpawnCardUpdate, CardSpec, DirectCommand, OutboundRoute } from "./types"
 
 const CONFIG_DIR = process.env.SWITCHBOARD_CONFIG ?? join(import.meta.dir, "..", "config")
@@ -290,7 +290,7 @@ const approvalRegistry = new ApprovalRegistry(
 const approvalCards = new Map<string, { chatId: string; messageId: string }>()
 /** Park an effect for human approval: record the request, post the card, and
  *  remember it for editing on resolution. */
-async function requestApproval(req: ApprovalRequest, fire: () => void | Promise<void>): Promise<void> {
+async function requestApproval(req: ApprovalRequest, fire: ApprovalFire): Promise<void> {
   const e = approvalRegistry.request(req, fire)
   audit.record({
     kind: "approval", actor: req.actor, action: "request", target: req.target,
@@ -313,28 +313,41 @@ async function resolveApproval(id: string, decision: ApprovalDecision, userId: s
   const loc = approvalCards.get(e.id); approvalCards.delete(e.id)
   if (loc) await gateway.editCard(loc.chatId, loc.messageId, renderApprovalCard(e))
   if (decision === "grant") {
-    try { await e.fire() } catch (err) { process.stderr.write(`approval ${e.id} fire failed: ${err}\n`) }
+    try { await e.fire(e.id) } catch (err) { process.stderr.write(`approval ${e.id} fire failed: ${err}\n`) }
   }
 }
-/** Deliver an outbound route (fire-and-forget) and record its resolution to the
- *  ledger. `actor` is who triggered it (agent:<name> | hub); `agent`, if any,
- *  honors per-agent audit opt-out. */
-function deliverAudited(route: OutboundRoute, body: string, actor: string, agent?: string): void {
+/** The actual deliver + audit, used directly or as the held effect after an
+ *  approval grant. `corr`, when present, threads this row to the approval. */
+function doDeliver(route: OutboundRoute, body: string, actor: string, agent?: string, corr?: string): void {
   void outboundDelivery.deliver(route, body)
     .then((res) => {
       if (!auditOptedOut(agent)) audit.record({
-        kind: "outbound", actor, action: "deliver", target: route.id,
+        kind: "outbound", actor, action: "deliver", target: route.id, corr,
         outcome: res.ok ? "ok" : "error", detail: { status: res.status, attempts: res.attempts },
       })
     })
     .catch((e) => process.stderr.write(`outbound deliver failed: ${e}\n`))
 }
+/** Deliver an outbound route — but when it's flagged `requireApproval` and the
+ *  approvals subsystem is enabled, park it for a human grant first (the delivery
+ *  becomes the held effect). `actor` is who triggered it; `agent` honors
+ *  per-agent audit opt-out; `chat` is the approval card's fallback channel. */
+function deliverAudited(route: OutboundRoute, body: string, actor: string, agent?: string, chat?: string): void {
+  if (approvalsEnabled && route.requireApproval) {
+    void requestApproval(
+      { kind: "outbound", target: route.id, actor, chat, summary: `POST → ${route.id}` },
+      (corr) => doDeliver(route, body, actor, agent, corr),
+    )
+    return
+  }
+  doDeliver(route, body, actor, agent)
+}
 /** Fire any text-triggered outbound routes for `text`. Returns true if a matched
  *  route asked to `consume` the text (suppress the Discord post). */
-function fireOutboundText(text: string, agent: string): boolean {
+function fireOutboundText(text: string, agent: string, chat: string): boolean {
   let consume = false
   for (const { route, groups } of matchOutbound(text, outboundRoutes)) {
-    deliverAudited(route, renderBody(route.template, { groups }), `agent:${agent}`, agent)
+    deliverAudited(route, renderBody(route.template, { groups }), `agent:${agent}`, agent, chat)
     if (route.consume) consume = true
   }
   return consume
@@ -374,7 +387,7 @@ async function onAgentReply(reply: AgentReply, key: string): Promise<void> {
     }
     // Outbound webhooks: fire any text-triggered routes (fire-and-forget). A
     // `consume` route suppresses the Discord post; otherwise the text still ships.
-    if (fireOutboundText(reply.text, reply.agent)) return
+    if (fireOutboundText(reply.text, reply.agent, reply.chatId)) return
     // Session governor: inspect this turn's context usage. May swallow the reply
     // (when it's a compaction handoff) or annotate it, and signals whether the
     // overseer should stand down (don't add a turn mid-compaction).

@@ -12,12 +12,16 @@ export interface ApprovalRequest {
   summary: string      // one line: what happens if approved
 }
 
+/** The held effect, run once on grant. Receives the approval id so it can thread
+ *  its own audit row to the approval via `corr`. */
+export type ApprovalFire = (corr?: string) => void | Promise<void>
+
 export interface PendingApproval extends ApprovalRequest {
   id: string
   createdAt: number
   expiresAt: number
   state: ApprovalState
-  fire: () => void | Promise<void>   // the held effect, run once on grant
+  fire: ApprovalFire
 }
 
 /** In-memory store of pending approvals. Deterministic (injected `now`/`genId`);
@@ -32,7 +36,7 @@ export class ApprovalRegistry {
   ) {}
 
   /** Park an effect for approval; returns the pending entry (state "pending"). */
-  request(req: ApprovalRequest, fire: () => void | Promise<void>): PendingApproval {
+  request(req: ApprovalRequest, fire: ApprovalFire): PendingApproval {
     const createdAt = this.now()
     const e: PendingApproval = {
       ...req, id: this.genId(), createdAt, expiresAt: createdAt + this.ttlMs, state: "pending", fire,
