@@ -1,5 +1,6 @@
 import { writeFileSync, unlinkSync, readFileSync } from "fs"
-import type { AgentConfig, AgentReply, InboundMessage, CardSpec } from "../types"
+import type { AgentConfig, AgentReply, InboundMessage, CardSpec, TurnUsage } from "../types"
+import { contextTokens, fillPct } from "../usage"
 import type { AgentTransport } from "./index"
 import {
   parseStreamEvent, userMessageFrame, interactionFrame,
@@ -69,6 +70,7 @@ export class StreamJsonTransport implements AgentTransport {
   private lastChatId = ""
   private cardThisTurn = false
   private lastActivity = Date.now()
+  private lastUsage: TurnUsage | null = null
   private cb: (r: AgentReply) => void = () => {}
 
   constructor(
@@ -132,12 +134,16 @@ export class StreamJsonTransport implements AgentTransport {
         return
       }
       if (ev?.kind === "result") {
+        // Capture this turn's token/cost usage (when the CLI reported it) so the
+        // hub can estimate context fill, drive the session governor, and surface
+        // it on the live status board. Usage rides out on the reply too.
+        if (ev.usage) this.lastUsage = ev.usage
         // The agent's end-of-turn text is posted as a reply ONLY when it didn't
         // already communicate via a card this turn — a card IS the message, so the
         // transcript summary underneath it is redundant noise. Turns with no card
         // (e.g. a short "Backlogged" acknowledgement) still post their text.
         if (!this.cardThisTurn) {
-          this.cb({ agent: this.name, kind: "reply", chatId: this.lastChatId, text: ev.text })
+          this.cb({ agent: this.name, kind: "reply", chatId: this.lastChatId, text: ev.text, usage: ev.usage })
         }
         this.cardThisTurn = false
       }
@@ -156,6 +162,15 @@ export class StreamJsonTransport implements AgentTransport {
   }
 
   lastActivityMs(): number { return this.lastActivity }
+
+  /** Most recent turn's usage, or null before the first reporting turn. */
+  lastUsageInfo(): TurnUsage | null { return this.lastUsage }
+  /** Estimated current context size (tokens) from the last turn's prompt. */
+  contextTokens(): number { return this.lastUsage ? contextTokens(this.lastUsage) : 0 }
+  /** Estimated context fill (0..1) against this agent's model window. */
+  fillPct(windows?: Record<string, number>): number {
+    return this.lastUsage ? fillPct(this.lastUsage, this.cfg.runtime.model, windows) : 0
+  }
 
   async close(): Promise<void> {
     if (this.closed) return

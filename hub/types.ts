@@ -39,6 +39,18 @@ export interface CardSpec {
   footer?: string;
 }
 
+/** Per-turn token/cost usage parsed from a stream-json `result` event. The
+ *  context-fill estimate is derived from these (see hub/usage.ts). */
+export interface TurnUsage {
+  inputTokens: number          // fresh (uncached) prompt tokens
+  cacheReadTokens: number      // prompt tokens served from cache
+  cacheCreationTokens: number  // prompt tokens written to cache this turn
+  outputTokens: number         // tokens the model generated
+  numTurns?: number            // cumulative turns in this session
+  costUsd?: number             // cumulative session cost (USD)
+  durationMs?: number          // wall time for this turn
+}
+
 /** A request from an agent back out to Discord. */
 export interface AgentReply {
   agent: string
@@ -51,6 +63,7 @@ export interface AgentReply {
   files?: string[]      // absolute paths for reply attachments
   card?: CardSpec            // present when kind === "card"
   correlationId?: string    // ties a posted card's buttons back to the agent
+  usage?: TurnUsage          // end-of-turn token/cost usage (kind === "reply")
 }
 
 export interface AgentAccess {
@@ -214,6 +227,8 @@ export interface HubConfig {
   overseerModel?: string         // default judge model for overseen agents
   memory?: MemoryBackend         // recall index + embedder backend selection (default: all local)
   gardener?: GardenerConfig      // access-weighting + periodic vault hygiene (default: off)
+  // Session health, live status & scaling (all optional; default off/derived).
+  contextWindows?: Record<string, number>  // model id → context window (tokens); `default` is the fallback
 }
 
 /** Access-weighted recall + the periodic vault-tending pass. Absent ⇒ recall
