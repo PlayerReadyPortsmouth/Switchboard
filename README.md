@@ -131,6 +131,20 @@ These make the hub more autonomous. All extra model calls reuse **Claude Code au
 
 Caps + fail-open (a garbled judge ships the reply rather than looping) bound cost and runaway loops. The example `help` (persistent, warm) and `help-quick` (ephemeral, parallel one-shots) agents in `config/agents.example.json` show the dual-mode help pattern; `worker` shows an `overseer` block.
 
+## Session health, live status & scaling
+
+Persistent agents are long-lived `claude` processes whose context grows unbounded. These features keep them healthy and make the hub legible. They're driven by a signal the CLI already emits and the hub used to discard: each turn's **token usage** (input + cache tokens ≈ how full the context window is). All opt-in; off until configured. See [`docs/superpowers/specs/2026-06-24-session-health-status-autoscale-design.md`](docs/superpowers/specs/2026-06-24-session-health-status-autoscale-design.md).
+
+**Usage capture.** `parseStreamEvent` now reads `usage`/`num_turns`/`total_cost_usd` off each `result`; the transport exposes `contextTokens()` / `fillPct(windows)`. Context windows per model come from `contextWindows` (a `{ "<model>": tokens, "default": 200000 }` map).
+
+**Turn gate.** Each persistent agent runs **one turn in flight at a time**; a burst queues behind it (cap `runtime.maxQueueDepth`, default 8; optional `runtime.coalesceBurst` folds a same-conversation burst into one turn). This stops messages piling onto stdin mid-turn (which misroutes replies), and produces the busy / queue-depth load signal the board and pool read. Overflow tells the user to resend rather than dropping silently.
+
+**Session governor** (`runtime.sessionGovernor: { enabled, softPct?, hardPct?, strategy? }`). On each turn it reads the context fill: at `softPct` (default 0.75) it nudges the agent once to checkpoint important state via `remember`; at `hardPct` (default 0.90) it auto-compacts — asks for a ≤200-word handoff, persists it, resets the session (the existing fresh-session path), and seeds the new session with the handoff so continuity holds. Bounds context (and per-turn cost) without losing vault-persisted knowledge.
+
+**Live status board** (`statusChannelId`, `statusRefreshMs` default 15s). One self-editing embed showing every persistent agent (alive / busy / context% / queue / cost / replica count), what the overseer/governor is doing, the Haiku router's recent picks + rate, and live ephemeral agents. Edits are throttled to ≤1 / 5s. Allowlisted users can also pull it on demand with `!status` (aliases `!usage`, `!health`).
+
+**Agent auto-scaling** (`runtime.pool: { min?, max?, scaleUpQueue?, scaleUpSustainMs?, replicaIdleMs?, isolateCwd? }`). A hot agent is backed by 1..N replicas: conversations stick to a replica (context continuity), new ones load-balance, and **sustained** queue pressure (all replicas busy + queue over threshold, held for `scaleUpSustainMs`) spins up another replica up to `max`; idle, unbound spares retire down to `min`. *v1 boundary:* card interactions and session resets act on the primary replica, so don't combine `pool` with `sessionGovernor` on the same agent.
+
 ## Status of features
 
 **Working** (covered by the passing unit tests + the real-CLI smoke check):
@@ -153,6 +167,7 @@ Caps + fail-open (a garbled judge ships the reply rather than looping) bound cos
 - **Recent-message context cache** + per-agent `injectContext` policy; quote-reply capture.
 - **Memory vault** (`MemoryStore`/`MemoryRetriever`): four-scope Obsidian-style notes, recall via a local-embedding OR hosted (Qdrant + OpenAI-compatible) backend + Claude librarian, `remember`/`recall` shim tools, background distiller, and entity-aware dedup with protected agent-authored notes.
 - **Access-weighting & gardener** (`accessStore.ts`/`gardener.ts`): decayed usage importance, importance-weighted recall + proactive hot-set injection, and a periodic whole-vault dedup/stale/archival pass (opt-in via `gardener`).
+- **Session health, status & scaling** (`usage.ts`/`turnGate.ts`/`sessionGovernor.ts`/`statusRegistry.ts`/`statusBoard.ts`/`agentPool.ts`): per-turn token/cost capture, a one-turn-in-flight queue gate, context-window governance (checkpoint → auto-compact), a live self-editing status embed (+ `!status`), and opt-in replica auto-scaling for a hot agent.
 - **Overseer** (`overseer.ts`): opt-in keep-prodding-until-done loop with `done`/`working`/`blocked` verdicts, autonomy bias, and iteration/wallclock caps.
 
 **Known gaps:**

@@ -4,8 +4,9 @@ import { config as loadEnv } from "./env"
 import { loadConfigs } from "./config"
 import { BaseGate } from "./baseGate"
 import { Gateway } from "./gateway"
-import { Dispatcher } from "./transports/index"
+import { Dispatcher, type AgentTransport } from "./transports/index"
 import { StreamJsonTransport, makeBunProcessSpawner } from "./transports/streamJson"
+import { ReplicaPool } from "./agentPool"
 import { ShimSocketServer } from "./transports/shimSocket"
 import { makeRouterRunner } from "./transports/spawnClaude"
 import { route as routeFn } from "./router"
@@ -33,6 +34,10 @@ import { AccessStore } from "./memory/accessStore"
 import { Gardener } from "./memory/gardener"
 import { distill } from "./memory/distiller"
 import { Overseer } from "./overseer"
+import { SessionGovernor } from "./sessionGovernor"
+import { contextWindow } from "./usage"
+import { StatusRegistry, type AgentStatus, type OverseerStatus } from "./statusRegistry"
+import { renderBoard, Throttle } from "./statusBoard"
 import { matchDirectCommand, runDirect, interpolateArgs, type DirectExecutor } from "./directCommands"
 import { OutboundDelivery } from "./outboundDelivery"
 import { matchOutbound, renderBody } from "./outbound"
@@ -187,6 +192,9 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonT
     mcpConfigPath: join(hub.stateDir, `${key}.mcp.json`),
     resumable: cfg.runtime.resumable === true,
     sessionPath: join(hub.stateDir, `${key}.session`),
+    onOverflow: (inbound) => {
+      void gateway.sendPlain(inbound.chatId, `${cfg.emoji} ${name} is busy — please resend in a moment.`)
+    },
   })
   t.onReply((reply) => { void onAgentReply(reply, key) })
   transports.set(key, t)
@@ -261,13 +269,19 @@ async function onAgentReply(reply: AgentReply, key: string): Promise<void> {
     // Outbound webhooks: fire any text-triggered routes (fire-and-forget). A
     // `consume` route suppresses the Discord post; otherwise the text still ships.
     if (fireOutboundText(reply.text)) return
+    // Session governor: inspect this turn's context usage. May swallow the reply
+    // (when it's a compaction handoff) or annotate it, and signals whether the
+    // overseer should stand down (don't add a turn mid-compaction).
+    const gov = await governor.observe(reply.agent, reply.chatId, reply.text, reply.usage)
     // Overseer: for opt-in agents, judge the turn against the goal and either
     // swallow it (a nudge was delivered → another turn coming) or ship it.
-    if (agents[reply.agent]?.runtime.overseer?.enabled) {
+    if (!gov.suppressOverseer && agents[reply.agent]?.runtime.overseer?.enabled) {
       const v = await overseer.intercept(reply.agent, reply.chatId, reply.text)
       if (!v.forward) return
       if (v.footer) reply.text = `${reply.text}\n\n${v.footer}`
     }
+    if (!gov.forward) return                 // governor swallowed it (handoff captured)
+    if (gov.footer) reply.text = `${reply.text}\n\n${gov.footer}`
     messageCache.record(reply.chatId, {
       role: "agent", text: reply.text, ts: Date.now(), agent: reply.agent,
     })
@@ -308,6 +322,7 @@ function scheduleTeardown(jobId: string, t: StreamJsonTransport, teardownCmd: ()
       clearInterval(tick)
       void t.close()
       transports.delete(jobId)
+      statusRegistry.removeEphemeral(jobId)
       const cmd = teardownCmd()
       if (cmd) void Bun.spawn(["sh", "-c", cmd], { stdout: "inherit", stderr: "inherit" }).exited
     }
@@ -344,21 +359,40 @@ async function runSpawnTrigger(trig: SpawnTrigger, groups: string[], chatId: str
     chatId, messageId: `spawn:${jobId}`, userId: "system", user: "hub",
     content: interpolate(trig.taskTemplate, groups, jobId), ts: new Date().toISOString(), isDM: false,
   })
+  statusRegistry.setEphemeral({ jobId, agent: trig.agent, task: interpolate(trig.taskTemplate, groups, jobId), startedAt: Date.now() })
   // The matched trigger text is consumed (not shown); confirm the spawn to the channel.
   if (!trig.onSpawnCard) void gateway.sendPlain(chatId, `🔧 \`${trig.agent}\` agent dispatched (job ${jobId}).`)
   scheduleTeardown(jobId, t, () => (trig.teardownCommand ? interpolate(trig.teardownCommand, groups, jobId) : undefined))
 }
 
 // Persistent agents: spawn at boot; they receive webhook/schedule/command/interaction deliveries.
-const dispatchTransports: StreamJsonTransport[] = []
+// A `pool` policy backs the agent with a ReplicaPool that scales out under load;
+// without one it's a single transport exactly as before.
+const dispatchTransports: AgentTransport[] = []
+const pools = new Map<string, ReplicaPool>()
 for (const [name, cfg] of Object.entries(agents)) {
-  if (cfg.mode === "persistent") {
-    const t = makeTransport(name, name, cfg)
-    await t.start()
-    dispatchTransports.push(t)
+  if (cfg.mode !== "persistent") continue
+  const primary = makeTransport(name, name, cfg)
+  await primary.start()
+  const pol = cfg.runtime.pool
+  if (pol) {
+    const pool = new ReplicaPool(name, primary, {
+      min: pol.min ?? 1, max: pol.max ?? 3,
+      scaleUpQueue: pol.scaleUpQueue ?? 2, scaleUpSustainMs: pol.scaleUpSustainMs ?? 30_000,
+      replicaIdleMs: pol.replicaIdleMs ?? 600_000,
+      spawn: async (replicaKey) => { const t = makeTransport(name, replicaKey, cfg); await t.start(); return t },
+    })
+    pools.set(name, pool)
+    dispatchTransports.push(pool)
+  } else {
+    dispatchTransports.push(primary)
   }
 }
 const dispatcher = new Dispatcher(dispatchTransports)
+// Scaling monitor: each pool periodically checks load and scales replicas.
+if (pools.size) {
+  setInterval(() => { for (const p of pools.values()) void p.tick() }, 10_000).unref()
+}
 // Dispatcher's constructor re-binds each transport's onReply to its own aggregator,
 // so route that aggregator back to onAgentReply. For persistent agents the routing
 // key is the agent name (== reply.agent). (Ephemeral spawn transports are not in the
@@ -396,6 +430,84 @@ const overseer = new Overseer({
   deliverNudge: (agent, convId, text) => deliverToAgent(agent, convId, "overseer:nudge", text),
   recentConversation: (convId) => messageCache.render(convId),
 })
+
+// Session governor: keep an opt-in agent's context bounded — nudge it to
+// checkpoint to memory near the soft threshold, then auto-compact (handoff →
+// resetAgentSession → reseed) near the hard one. Reuses the existing reset.
+const governor = new SessionGovernor({
+  policyFor: (agent) => agents[agent]?.runtime.sessionGovernor,
+  windowFor: (agent) => contextWindow(agents[agent]?.runtime.model, hub.contextWindows),
+  deliver: (agent, convId, text) => deliverToAgent(agent, convId, "governor:checkpoint", text),
+  notify: (convId, text) => { void gateway.sendPlain(convId, text) },
+  reset: (agent, convId) => resetAgentSession(agent, convId),
+  recordHandoff: (agent, convId, summary) =>
+    messageCache.record(convId, { role: "agent", text: summary, ts: Date.now(), agent }),
+})
+
+// Live status board: one self-editing embed in `statusChannelId` showing every
+// persistent agent (alive/busy/context%/queue/cost), what the overseer/governor
+// is doing, the router's recent picks, and live ephemeral agents. Read-only.
+const statusRegistry = new StatusRegistry()
+const boardThrottle = new Throttle(5_000)   // ≤1 Discord edit per 5s
+let boardMsgId: string | undefined
+let boardSnapshotPending = false
+async function flushBoard(): Promise<void> {
+  if (!hub.statusChannelId) return
+  const card = renderBoard(statusRegistry.snapshot(Date.now()))
+  if (boardMsgId == null) boardMsgId = await gateway.sendCard(hub.statusChannelId, card)
+  else await gateway.editCard(hub.statusChannelId, boardMsgId, card)
+}
+function requestBoardUpdate(): void {
+  if (!hub.statusChannelId) return
+  const { emit, scheduleInMs } = boardThrottle.request(Date.now())
+  if (emit) void flushBoard()
+  else if (scheduleInMs != null && !boardSnapshotPending) {
+    boardSnapshotPending = true
+    setTimeout(() => {
+      boardSnapshotPending = false
+      boardThrottle.fire(Date.now())
+      void flushBoard()
+    }, scheduleInMs).unref()
+  }
+}
+function buildAgentRows(): AgentStatus[] {
+  const rows: AgentStatus[] = []
+  for (const [name, cfg] of Object.entries(agents)) {
+    if (cfg.mode !== "persistent") continue
+    const pool = pools.get(name)
+    const src = pool ?? transports.get(name)   // pool aggregates across replicas
+    rows.push({
+      name, emoji: cfg.emoji, mode: "persistent",
+      alive: src?.isAvailable() ?? false,
+      busy: src?.isBusy() ?? false,
+      queueDepth: src?.queueDepth() ?? 0,
+      fillPct: src?.fillPct(hub.contextWindows) ?? 0,
+      costUsd: src?.lastUsageInfo()?.costUsd,
+      replicas: pool?.replicaCount(),
+      lastActivityMs: src?.lastActivityMs() ?? 0,
+    })
+  }
+  return rows
+}
+function buildOverseerRows(): OverseerStatus[] {
+  const prodding = overseer.snapshot().map((o): OverseerStatus => ({
+    agent: o.agent, goal: o.goal, round: o.iterations,
+    max: agents[o.agent]?.runtime.overseer?.maxIterations ?? 4, state: "prodding",
+  }))
+  const compacting = governor.activeCompactions().map((c): OverseerStatus => ({
+    agent: c.agent, goal: "", round: 0, max: 0, state: "compacting",
+  }))
+  return [...prodding, ...compacting]
+}
+if (hub.statusChannelId) {
+  const refresh = hub.statusRefreshMs ?? 15_000
+  setInterval(() => {
+    statusRegistry.setAgents(buildAgentRows())
+    statusRegistry.setOverseers(buildOverseerRows())
+    requestBoardUpdate()
+  }, refresh).unref()
+  setTimeout(() => { statusRegistry.setAgents(buildAgentRows()); requestBoardUpdate() }, 2_000).unref()
+}
 
 const baseGate = new BaseGate(join(hub.stateDir, "access.json"))
 
@@ -505,13 +617,19 @@ const orchestrator = new Orchestrator(hub, agents, {
     const rt = agents[agent]?.runtime
     // A genuine user-initiated turn (re)sets the overseer goal for this agent.
     if (rt?.overseer?.enabled) overseer.begin(agent, inbound.chatId, inbound.content)
+    // Record the routing decision for the status board (the Haiku resolver's pick).
+    statusRegistry.recordRoute({ ts: Date.now(), conv: inbound.chatId, chosen: agent, switched: isSwitch })
     // Render context from PRIOR turns, then record this inbound so it's available
     // next turn (and to the distiller) without duplicating it in this turn's block.
     const policy = rt?.injectContext ?? "onSwitch"
     const wantContext = policy === "always" || (policy === "onSwitch" && isSwitch)
     const context = wantContext ? messageCache.render(inbound.chatId) : ""
     // Fold any quote-reply target into the live message so the agent sees it.
-    const live = foldQuote(inbound.content, inbound.quote)
+    let live = foldQuote(inbound.content, inbound.quote)
+    // If the governor just compacted this agent's session, seed the fresh one
+    // with the handoff so the first post-reset turn keeps continuity.
+    const seed = governor.takeSeed(agent, inbound.chatId)
+    if (seed) live = `[handoff from your previous session]\n${seed}\n\n${live}`
     let memory = ""
     if (rt?.useMemory) {
       const scopes: Scope[] = [
@@ -568,6 +686,14 @@ const commands = hub.commands ?? []
 const directCommands = hub.directCommands ?? []
 gateway.handleInbound((m) => {
   const trimmed = m.content.trim()
+  // On-demand status snapshot (operator-only): renders the live board here & now.
+  if (/^!(status|usage|health)\b/i.test(trimmed)) {
+    if (!baseGate.listAllowed().includes(m.userId)) return
+    statusRegistry.setAgents(buildAgentRows())
+    statusRegistry.setOverseers(buildOverseerRows())
+    void gateway.sendCard(m.chatId, renderBoard(statusRegistry.snapshot(Date.now())))
+    return
+  }
   const cmd = commands.find((c) => c.match === trimmed)
   if (cmd) {
     if (cmd.allowlistOnly && !baseGate.listAllowed().includes(m.userId)) return

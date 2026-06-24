@@ -1,5 +1,7 @@
 import { writeFileSync, unlinkSync, readFileSync } from "fs"
-import type { AgentConfig, AgentReply, InboundMessage, CardSpec } from "../types"
+import type { AgentConfig, AgentReply, InboundMessage, CardSpec, TurnUsage } from "../types"
+import { contextTokens, fillPct } from "../usage"
+import { TurnGate } from "../turnGate"
 import type { AgentTransport } from "./index"
 import {
   parseStreamEvent, userMessageFrame, interactionFrame,
@@ -58,6 +60,8 @@ export interface StreamJsonOpts {
   /** Seams for tests; default to fs read/write of sessionPath. */
   readSession?: () => string | undefined
   writeSession?: (id: string) => void
+  /** Called when a submission is rejected because the turn queue is full. */
+  onOverflow?: (inbound: InboundMessage) => void
 }
 
 /** One agent = one long-lived `claude -p --input-format stream-json` process.
@@ -69,13 +73,28 @@ export class StreamJsonTransport implements AgentTransport {
   private lastChatId = ""
   private cardThisTurn = false
   private lastActivity = Date.now()
+  private lastUsage: TurnUsage | null = null
   private cb: (r: AgentReply) => void = () => {}
+  private gate: TurnGate
 
   constructor(
     public readonly name: string,
     private cfg: AgentConfig,
     private opts: StreamJsonOpts,
-  ) {}
+  ) {
+    // One turn in flight at a time; the rest queue. The actual stdin write is
+    // the injected `send` — it also stamps lastChatId/lastActivity at *delivery*
+    // time so a queued message's reply routes to the right channel.
+    this.gate = new TurnGate({
+      send: (inbound) => {
+        this.lastActivity = Date.now()
+        this.lastChatId = inbound.chatId
+        this.proc?.writeStdin(userMessageFrame(inbound.content))
+      },
+      maxQueueDepth: cfg.runtime.maxQueueDepth,
+      coalesce: cfg.runtime.coalesceBurst,
+    })
+  }
 
   onReply(cb: (r: AgentReply) => void): void { this.cb = cb }
   isAvailable(): boolean { return this.alive }
@@ -121,7 +140,7 @@ export class StreamJsonTransport implements AgentTransport {
       HUB_SOCKET: socketPath, AGENT_NAME: this.name,
     })
     this.alive = true
-    this.proc.onExit(() => { this.alive = false })
+    this.proc.onExit(() => { this.alive = false; this.gate.reset() })
     this.proc.onStdoutLine((line) => {
       const ev = parseStreamEvent(line)
       if (ev?.kind === "init") {
@@ -132,22 +151,27 @@ export class StreamJsonTransport implements AgentTransport {
         return
       }
       if (ev?.kind === "result") {
+        // Capture this turn's token/cost usage (when the CLI reported it) so the
+        // hub can estimate context fill, drive the session governor, and surface
+        // it on the live status board. Usage rides out on the reply too.
+        if (ev.usage) this.lastUsage = ev.usage
         // The agent's end-of-turn text is posted as a reply ONLY when it didn't
         // already communicate via a card this turn — a card IS the message, so the
         // transcript summary underneath it is redundant noise. Turns with no card
         // (e.g. a short "Backlogged" acknowledgement) still post their text.
         if (!this.cardThisTurn) {
-          this.cb({ agent: this.name, kind: "reply", chatId: this.lastChatId, text: ev.text })
+          this.cb({ agent: this.name, kind: "reply", chatId: this.lastChatId, text: ev.text, usage: ev.usage })
         }
         this.cardThisTurn = false
+        this.gate.turnComplete()   // turn finished → drain the next queued message
       }
     })
   }
 
   deliver(_chatKey: string, inbound: InboundMessage): void {
     this.lastActivity = Date.now()
-    this.lastChatId = inbound.chatId
-    this.proc?.writeStdin(userMessageFrame(inbound.content))
+    const r = this.gate.submit(inbound)   // sent now, queued, or rejected (overflow)
+    if (r === "overflow") this.opts.onOverflow?.(inbound)
   }
 
   sendInteraction(customId: string, userId: string, fields?: Record<string, string>): void {
@@ -156,6 +180,20 @@ export class StreamJsonTransport implements AgentTransport {
   }
 
   lastActivityMs(): number { return this.lastActivity }
+
+  /** True while a turn is in flight (a reply is still pending). */
+  isBusy(): boolean { return this.gate.isBusy() }
+  /** Number of messages waiting behind the in-flight turn. */
+  queueDepth(): number { return this.gate.queueDepth() }
+
+  /** Most recent turn's usage, or null before the first reporting turn. */
+  lastUsageInfo(): TurnUsage | null { return this.lastUsage }
+  /** Estimated current context size (tokens) from the last turn's prompt. */
+  contextTokens(): number { return this.lastUsage ? contextTokens(this.lastUsage) : 0 }
+  /** Estimated context fill (0..1) against this agent's model window. */
+  fillPct(windows?: Record<string, number>): number {
+    return this.lastUsage ? fillPct(this.lastUsage, this.cfg.runtime.model, windows) : 0
+  }
 
   async close(): Promise<void> {
     if (this.closed) return
