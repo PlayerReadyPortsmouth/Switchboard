@@ -69,6 +69,7 @@ export interface AgentReply {
 export interface AgentAccess {
   roles: string[]       // role names; "*" means any paired user
   users?: string[]      // user snowflakes
+  consultableBy?: string[]  // agent names allowed to consult this agent via ask_agent ("*" = any); absent ⇒ none
 }
 
 /** Per-agent overseer policy: keep prodding the agent until a judge says the
@@ -280,12 +281,20 @@ export interface HubConfig {
   metricsPort?: number           // port for the Prometheus /metrics + /health listener (absent ⇒ off)
   audit?: AuditConfig            // append-only ledger of every governed effect (default off)
   approvals?: ApprovalConfig     // human-in-the-loop approval gate for requireApproval effects (default off)
+  consult?: ConsultConfig        // inter-agent ask_agent tool (default off; per-agent access via consultableBy)
+}
+
+/** Inter-agent consult config. Absent/disabled ⇒ the ask_agent tool isn't even
+ *  exposed to agents. Per-pair access is still governed by `access.consultableBy`. */
+export interface ConsultConfig {
+  enabled?: boolean              // expose ask_agent + honor consults (default off)
+  timeoutMs?: number             // hub-side wait for the target's reply (default 90000)
 }
 
 // Audit log — one append-only ledger of every governed effect (hub/audit.ts).
 export type AuditKind =
   | "route" | "spawn" | "exec" | "outbound"
-  | "session" | "access" | "approval" | "event" | "card"
+  | "session" | "access" | "approval" | "event" | "card" | "consult"
 
 /** One ledger record: who (`actor`) did what (`kind`/`action`) to what (`target`)
  *  in which conversation (`chat`), and how it resolved (`outcome`). Metadata only
