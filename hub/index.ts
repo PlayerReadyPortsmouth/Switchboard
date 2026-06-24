@@ -1,4 +1,4 @@
-import { join } from "path"
+import { join, dirname } from "path"
 import { unlinkSync, appendFileSync, mkdirSync } from "fs"
 import { config as loadEnv } from "./env"
 import { loadConfigs } from "./config"
@@ -39,7 +39,9 @@ import { contextWindow } from "./usage"
 import { StatusRegistry, type AgentStatus, type OverseerStatus } from "./statusRegistry"
 import { renderBoard, Throttle } from "./statusBoard"
 import { matchDirectCommand, runDirect, interpolateArgs, type DirectExecutor } from "./directCommands"
-import type { AgentConfig, AgentReply, SpawnTrigger, SpawnCardUpdate, CardSpec, DirectCommand } from "./types"
+import { OutboundDelivery } from "./outboundDelivery"
+import { matchOutbound, renderBody } from "./outbound"
+import type { AgentConfig, AgentReply, SpawnTrigger, SpawnCardUpdate, CardSpec, DirectCommand, OutboundRoute } from "./types"
 
 const CONFIG_DIR = process.env.SWITCHBOARD_CONFIG ?? join(import.meta.dir, "..", "config")
 const { hub, agents } = loadConfigs(CONFIG_DIR)
@@ -180,6 +182,8 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonT
     try { return (await memoryRetriever.relevant(query, sc)).notes.map((n) => ({ title: n.title, body: n.body })) }
     catch { return [] }
   })
+  // Agent-initiated outbound: fire a named (operator-configured) outbound route.
+  socket.onPostWebhook(({ target, body }) => { fireOutboundNamed(target, body) })
   const t = new StreamJsonTransport(name, cfg, {
     spawner,
     socket,
@@ -201,6 +205,51 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonT
 // ephemeral spawn (and is NOT forwarded to Discord).
 const spawnTriggers = (hub.spawnTriggers ?? []).map((t) => ({ ...t, re: new RegExp(t.pattern) }))
 
+// Outbound webhooks: agents (and hub events) push signed POSTs to named routes.
+// The hub owns the URL+secret — agents address routes by id, never a raw URL.
+const outboundRoutes = hub.outboundWebhooks ?? []
+function appendJsonl(path: string, entry: unknown): void {
+  try { mkdirSync(dirname(path), { recursive: true }); appendFileSync(path, JSON.stringify(entry) + "\n") }
+  catch (e) { process.stderr.write(`outbound log append failed: ${e}\n`) }
+}
+const outboundDelivery = new OutboundDelivery({
+  fetch: async (url, init) => {
+    const r = await fetch(url, { method: init.method, headers: init.headers, body: init.body })
+    return { status: r.status }
+  },
+  appendLog: (e) => appendJsonl(join(hub.stateDir, "outbound-log.jsonl"), e),
+  appendDeadLetter: (e) => appendJsonl(join(hub.stateDir, "outbound-dead.jsonl"), e),
+  sleep: (ms) => new Promise((res) => setTimeout(res, ms)),
+  now: () => Date.now(),
+  secretFor: (route) => (route.secretEnv ? process.env[route.secretEnv] : undefined),
+  retries: hub.outboundRetries,
+  allowedHosts: hub.outboundAllowedHosts,
+})
+/** Fire any text-triggered outbound routes for `text`. Returns true if a matched
+ *  route asked to `consume` the text (suppress the Discord post). */
+function fireOutboundText(text: string): boolean {
+  let consume = false
+  for (const { route, groups } of matchOutbound(text, outboundRoutes)) {
+    void outboundDelivery.deliver(route, renderBody(route.template, { groups }))
+    if (route.consume) consume = true
+  }
+  return consume
+}
+/** Deliver to a named route by id (the post_webhook tool path). Unknown ⇒ false. */
+function fireOutboundNamed(id: string, body?: string): boolean {
+  const route = outboundRoutes.find((r) => r.id === id)
+  if (!route) { process.stderr.write(`post_webhook: unknown route "${id}"\n`); return false }
+  void outboundDelivery.deliver(route, renderBody(route.template, { body }))
+  return true
+}
+/** Fire a hub lifecycle event as an outbound route, if a route with `event` as
+ *  its id is configured. Lets external systems observe the hub (schedules, etc). */
+function emitHubEvent(event: string, data: Record<string, unknown>): void {
+  if (outboundRoutes.some((r) => r.id === event)) {
+    fireOutboundNamed(event, JSON.stringify({ event, ts: Date.now(), ...data }))
+  }
+}
+
 /** Handle one reply from a transport: cards → Discord card (+ register buttons);
  *  text → spawn-trigger match or a plain reply; react/edit → passthrough. */
 async function onAgentReply(reply: AgentReply, key: string): Promise<void> {
@@ -217,6 +266,9 @@ async function onAgentReply(reply: AgentReply, key: string): Promise<void> {
       const m = trig.re.exec(reply.text)
       if (m) { await runSpawnTrigger(trig, m as unknown as string[], reply.chatId); return }
     }
+    // Outbound webhooks: fire any text-triggered routes (fire-and-forget). A
+    // `consume` route suppresses the Discord post; otherwise the text still ships.
+    if (fireOutboundText(reply.text)) return
     // Session governor: inspect this turn's context usage. May swallow the reply
     // (when it's a compaction handoff) or annotate it, and signals whether the
     // overseer should stand down (don't add a turn mid-compaction).
@@ -499,7 +551,10 @@ void listener
 // same minute never double-fires.
 const cronState = new CronState(join(hub.stateDir, "cron-state.json"))
 const cronTick = startCron(hub.schedules ?? [], hub.timezone ?? "Europe/London", {
-  deliver: (agent, channelId, idTag, message) => deliverToAgent(agent, channelId, idTag, message),
+  deliver: (agent, channelId, idTag, message) => {
+    deliverToAgent(agent, channelId, idTag, message)
+    emitHubEvent("schedule.fired", { id: idTag, agent, channelId })
+  },
   state: cronState,
   onInvalid: (id, expr) => process.stderr.write(`schedule "${id}": invalid cron "${expr}"\n`),
 })

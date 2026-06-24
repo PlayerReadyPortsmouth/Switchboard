@@ -108,5 +108,26 @@
       "setupCommand": "git worktree add /tmp/$jobId"
     }
   ],
+  "outboundWebhooks": [
+    {
+      "id": "deploy-done",
+      "pattern": "DEPLOYED\\s+(\\S+)",
+      "url": "https://hooks.example.com/deploy",
+      "secretEnv": "OUT_HOOK_SECRET",
+      "template": "{\"event\":\"deploy\",\"ref\":\"$1\"}"
+    },
+    {
+      "id": "notify-ops",
+      "url": "https://hooks.example.com/ops",
+      "secretEnv": "OUT_HOOK_SECRET"
+    },
+    {
+      "id": "schedule.fired",
+      "url": "https://hooks.example.com/events",
+      "secretEnv": "OUT_HOOK_SECRET"
+    }
+  ],
+  "outboundAllowedHosts": ["hooks.example.com"],
+  "outboundRetries": 3,
   "timezone": "Europe/London"
 }

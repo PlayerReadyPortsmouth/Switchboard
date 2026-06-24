@@ -45,3 +45,8 @@ ut("remember maps to a remember wire message", () => {
 ut("recall is not a fire-and-forget wire message (handled request/response)", () => {
   ue(wire("recall", { query: "x" })).toBeNull()
 })
+
+ut("post_webhook maps to a post_webhook wire message addressed by target", () => {
+  ue(wire("post_webhook", { target: "deploy-done", body: '{"ref":"v2"}' }) as any)
+    .toEqual({ t: "post_webhook", target: "deploy-done", body: '{"ref":"v2"}' })
+})

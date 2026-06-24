@@ -23,6 +23,7 @@ export class ShimSocketServer {
   private finishCb: () => void = () => {}
   private rememberCb: (r: RememberMsg) => void = () => {}
   private recallCb: (q: { query: string; scopes?: string[] }) => Promise<RecalledNote[]> = async () => []
+  private postWebhookCb: (w: { target: string; body?: string }) => void = () => {}
 
   constructor(private socketPath: string) {}
 
@@ -34,6 +35,7 @@ export class ShimSocketServer {
   onFinish(cb: typeof this.finishCb) { this.finishCb = cb }
   onRemember(cb: typeof this.rememberCb) { this.rememberCb = cb }
   onRecall(cb: typeof this.recallCb) { this.recallCb = cb }
+  onPostWebhook(cb: typeof this.postWebhookCb) { this.postWebhookCb = cb }
   isRegistered() { return this.registered }
 
   async listen(): Promise<void> {
@@ -61,6 +63,8 @@ export class ShimSocketServer {
       case "finish": this.finishCb(); break
       case "remember":
         this.rememberCb({ scope: m.scope, title: m.title, tags: m.tags, body: m.body }); break
+      case "post_webhook":
+        this.postWebhookCb({ target: m.target, body: m.body }); break
       case "recall":
         // Request/response: run retrieval, then write the result back keyed by id.
         void this.recallCb({ query: m.query, scopes: m.scopes }).then((notes) => {
