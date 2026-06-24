@@ -143,5 +143,9 @@
     "approvers": ["<discord user id>"],
     "ttlMs": 3600000
   },
+  "consult": {
+    "enabled": true,
+    "timeoutMs": 90000
+  },
   "timezone": "Europe/London"
 }
