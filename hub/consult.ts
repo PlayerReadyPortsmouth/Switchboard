@@ -1,4 +1,14 @@
-import type { AgentConfig } from "./types"
+import type { AgentConfig, AgentReply } from "./types"
+
+/** The text a consult should return for a target's reply, or undefined if this
+ *  reply kind doesn't answer (so the consult keeps waiting). A card is serialized
+ *  to its title + body, so an agent that answers with a card still settles the
+ *  consult instead of letting it time out. */
+export function consultAnswerFromReply(reply: AgentReply): string | undefined {
+  if (reply.kind === "reply" && reply.text !== undefined) return reply.text
+  if ((reply.kind === "card" || reply.kind === "update") && reply.card) return `${reply.card.title}\n\n${reply.card.body}`
+  return undefined
+}
 
 /** May `requester` consult `targetName` (config `target`)? Allowed only when the
  *  target lists the requester (or `"*"`) in `access.consultableBy`. A self-consult
