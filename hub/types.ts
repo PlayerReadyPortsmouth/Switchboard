@@ -39,6 +39,18 @@ export interface CardSpec {
   footer?: string;
 }
 
+/** Per-turn token/cost usage parsed from a stream-json `result` event. The
+ *  context-fill estimate is derived from these (see hub/usage.ts). */
+export interface TurnUsage {
+  inputTokens: number          // fresh (uncached) prompt tokens
+  cacheReadTokens: number      // prompt tokens served from cache
+  cacheCreationTokens: number  // prompt tokens written to cache this turn
+  outputTokens: number         // tokens the model generated
+  numTurns?: number            // cumulative turns in this session
+  costUsd?: number             // cumulative session cost (USD)
+  durationMs?: number          // wall time for this turn
+}
+
 /** A request from an agent back out to Discord. */
 export interface AgentReply {
   agent: string
@@ -51,6 +63,7 @@ export interface AgentReply {
   files?: string[]      // absolute paths for reply attachments
   card?: CardSpec            // present when kind === "card"
   correlationId?: string    // ties a posted card's buttons back to the agent
+  usage?: TurnUsage          // end-of-turn token/cost usage (kind === "reply")
 }
 
 export interface AgentAccess {
@@ -67,6 +80,28 @@ export interface OverseerPolicy {
   model?: string           // judge model; defaults to hub.overseerModel
 }
 
+/** Per-agent session governor: keep a persistent agent's context bounded by
+ *  nudging it to checkpoint to memory at `softPct`, then auto-compacting (handoff
+ *  → reset → reseed) at `hardPct`. Opt-in (absent ⇒ disabled). */
+export interface GovernorPolicy {
+  enabled: boolean
+  softPct?: number   // checkpoint-nudge threshold, 0..1 (default 0.75)
+  hardPct?: number   // auto-compaction threshold, 0..1 (default 0.90)
+  strategy?: "restart" | "cli"  // compaction mechanism (default "restart")
+}
+
+/** Per-agent auto-scaling pool: back a logical persistent agent with 1..N
+ *  replicas that scale out under sustained queue pressure. Opt-in (absent ⇒ a
+ *  single transport, exactly as before). */
+export interface PoolPolicy {
+  min?: number              // floor on live replicas (default 1 — the primary)
+  max?: number              // cap on replicas (default 3)
+  scaleUpQueue?: number     // total queued across replicas that signals pressure (default 2)
+  scaleUpSustainMs?: number // pressure must hold this long before scaling up (default 30000)
+  replicaIdleMs?: number    // idle this long ⇒ a spare replica retires (default 600000)
+  isolateCwd?: boolean      // give each replica its own worktree (writers; default false)
+}
+
 export interface AgentRuntime {
   cwd: string
   model?: string
@@ -77,6 +112,10 @@ export interface AgentRuntime {
   useMemory?: boolean        // inject relevant memory-vault notes as context
   injectContext?: "always" | "onSwitch" | "never"  // recent-message cache injection (default onSwitch)
   overseer?: OverseerPolicy  // opt-in autonomous "keep prodding until done" loop
+  sessionGovernor?: GovernorPolicy  // opt-in context-window governance (checkpoint + auto-compact)
+  maxQueueDepth?: number     // turn-gate inbound queue cap (default 8); past it, submissions overflow
+  coalesceBurst?: boolean    // fold consecutive same-conversation queued messages into one turn
+  pool?: PoolPolicy          // opt-in replica auto-scaling for a hot persistent agent
 }
 
 export interface AgentConfig {
@@ -214,6 +253,10 @@ export interface HubConfig {
   overseerModel?: string         // default judge model for overseen agents
   memory?: MemoryBackend         // recall index + embedder backend selection (default: all local)
   gardener?: GardenerConfig      // access-weighting + periodic vault hygiene (default: off)
+  // Session health, live status & scaling (all optional; default off/derived).
+  contextWindows?: Record<string, number>  // model id → context window (tokens); `default` is the fallback
+  statusChannelId?: string       // channel for the live status embed (absent ⇒ board off)
+  statusRefreshMs?: number       // status board heartbeat cadence (default 15000)
 }
 
 /** Access-weighted recall + the periodic vault-tending pass. Absent ⇒ recall

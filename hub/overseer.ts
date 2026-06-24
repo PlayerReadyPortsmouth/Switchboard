@@ -76,6 +76,14 @@ export class Overseer {
   private key(agent: string, convId: string): string { return `${agent}::${convId}` }
   private now(): number { return this.deps.now?.() ?? Date.now() }
 
+  /** Active goal sessions, for the status board. */
+  snapshot(): { agent: string; convId: string; goal: string; iterations: number }[] {
+    return [...this.sessions.entries()].map(([k, s]) => {
+      const i = k.indexOf("::")
+      return { agent: k.slice(0, i), convId: k.slice(i + 2), goal: s.goal, iterations: s.iterations }
+    })
+  }
+
   /** Start (or reset) the goal for an overseen agent — called on each genuine
    *  user-initiated dispatch. No-op for non-overseen agents. */
   begin(agent: string, convId: string, goal: string): void {

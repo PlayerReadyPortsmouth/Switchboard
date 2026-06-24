@@ -1,6 +1,9 @@
+import { parseUsage } from "../usage"
+import type { TurnUsage } from "../types"
+
 /** A parsed stdout stream-json event we care about. */
 export type StreamEvent =
-  | { kind: "result"; text: string }
+  | { kind: "result"; text: string; usage?: TurnUsage }
   | { kind: "assistant" }
   | { kind: "init"; sessionId: string }
 
@@ -12,7 +15,10 @@ export function parseStreamEvent(line: string): StreamEvent | null {
   try { ev = JSON.parse(s) } catch { return null }
   if (ev.type === "system" && ev.subtype === "init" && typeof ev.session_id === "string")
     return { kind: "init", sessionId: ev.session_id }
-  if (ev.type === "result" && typeof ev.result === "string") return { kind: "result", text: ev.result }
+  if (ev.type === "result" && typeof ev.result === "string") {
+    const usage = parseUsage(ev)
+    return usage ? { kind: "result", text: ev.result, usage } : { kind: "result", text: ev.result }
+  }
   if (ev.type === "assistant") return { kind: "assistant" }
   return null
 }
