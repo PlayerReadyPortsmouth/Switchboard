@@ -183,6 +183,9 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonT
     mcpConfigPath: join(hub.stateDir, `${key}.mcp.json`),
     resumable: cfg.runtime.resumable === true,
     sessionPath: join(hub.stateDir, `${key}.session`),
+    onOverflow: (inbound) => {
+      void gateway.sendPlain(inbound.chatId, `${cfg.emoji} ${name} is busy — please resend in a moment.`)
+    },
   })
   t.onReply((reply) => { void onAgentReply(reply, key) })
   transports.set(key, t)

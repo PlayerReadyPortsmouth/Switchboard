@@ -90,6 +90,8 @@ export interface AgentRuntime {
   useMemory?: boolean        // inject relevant memory-vault notes as context
   injectContext?: "always" | "onSwitch" | "never"  // recent-message cache injection (default onSwitch)
   overseer?: OverseerPolicy  // opt-in autonomous "keep prodding until done" loop
+  maxQueueDepth?: number     // turn-gate inbound queue cap (default 8); past it, submissions overflow
+  coalesceBurst?: boolean    // fold consecutive same-conversation queued messages into one turn
 }
 
 export interface AgentConfig {
