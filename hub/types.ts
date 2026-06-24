@@ -80,6 +80,16 @@ export interface OverseerPolicy {
   model?: string           // judge model; defaults to hub.overseerModel
 }
 
+/** Per-agent session governor: keep a persistent agent's context bounded by
+ *  nudging it to checkpoint to memory at `softPct`, then auto-compacting (handoff
+ *  → reset → reseed) at `hardPct`. Opt-in (absent ⇒ disabled). */
+export interface GovernorPolicy {
+  enabled: boolean
+  softPct?: number   // checkpoint-nudge threshold, 0..1 (default 0.75)
+  hardPct?: number   // auto-compaction threshold, 0..1 (default 0.90)
+  strategy?: "restart" | "cli"  // compaction mechanism (default "restart")
+}
+
 export interface AgentRuntime {
   cwd: string
   model?: string
@@ -90,6 +100,7 @@ export interface AgentRuntime {
   useMemory?: boolean        // inject relevant memory-vault notes as context
   injectContext?: "always" | "onSwitch" | "never"  // recent-message cache injection (default onSwitch)
   overseer?: OverseerPolicy  // opt-in autonomous "keep prodding until done" loop
+  sessionGovernor?: GovernorPolicy  // opt-in context-window governance (checkpoint + auto-compact)
   maxQueueDepth?: number     // turn-gate inbound queue cap (default 8); past it, submissions overflow
   coalesceBurst?: boolean    // fold consecutive same-conversation queued messages into one turn
 }

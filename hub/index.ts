@@ -33,6 +33,8 @@ import { AccessStore } from "./memory/accessStore"
 import { Gardener } from "./memory/gardener"
 import { distill } from "./memory/distiller"
 import { Overseer } from "./overseer"
+import { SessionGovernor } from "./sessionGovernor"
+import { contextWindow } from "./usage"
 import { matchDirectCommand, runDirect, interpolateArgs, type DirectExecutor } from "./directCommands"
 import type { AgentConfig, AgentReply, SpawnTrigger, SpawnCardUpdate, CardSpec, DirectCommand } from "./types"
 
@@ -212,13 +214,19 @@ async function onAgentReply(reply: AgentReply, key: string): Promise<void> {
       const m = trig.re.exec(reply.text)
       if (m) { await runSpawnTrigger(trig, m as unknown as string[], reply.chatId); return }
     }
+    // Session governor: inspect this turn's context usage. May swallow the reply
+    // (when it's a compaction handoff) or annotate it, and signals whether the
+    // overseer should stand down (don't add a turn mid-compaction).
+    const gov = await governor.observe(reply.agent, reply.chatId, reply.text, reply.usage)
     // Overseer: for opt-in agents, judge the turn against the goal and either
     // swallow it (a nudge was delivered → another turn coming) or ship it.
-    if (agents[reply.agent]?.runtime.overseer?.enabled) {
+    if (!gov.suppressOverseer && agents[reply.agent]?.runtime.overseer?.enabled) {
       const v = await overseer.intercept(reply.agent, reply.chatId, reply.text)
       if (!v.forward) return
       if (v.footer) reply.text = `${reply.text}\n\n${v.footer}`
     }
+    if (!gov.forward) return                 // governor swallowed it (handoff captured)
+    if (gov.footer) reply.text = `${reply.text}\n\n${gov.footer}`
     messageCache.record(reply.chatId, {
       role: "agent", text: reply.text, ts: Date.now(), agent: reply.agent,
     })
@@ -348,6 +356,19 @@ const overseer = new Overseer({
   recentConversation: (convId) => messageCache.render(convId),
 })
 
+// Session governor: keep an opt-in agent's context bounded — nudge it to
+// checkpoint to memory near the soft threshold, then auto-compact (handoff →
+// resetAgentSession → reseed) near the hard one. Reuses the existing reset.
+const governor = new SessionGovernor({
+  policyFor: (agent) => agents[agent]?.runtime.sessionGovernor,
+  windowFor: (agent) => contextWindow(agents[agent]?.runtime.model, hub.contextWindows),
+  deliver: (agent, convId, text) => deliverToAgent(agent, convId, "governor:checkpoint", text),
+  notify: (convId, text) => { void gateway.sendPlain(convId, text) },
+  reset: (agent, convId) => resetAgentSession(agent, convId),
+  recordHandoff: (agent, convId, summary) =>
+    messageCache.record(convId, { role: "agent", text: summary, ts: Date.now(), agent }),
+})
+
 const baseGate = new BaseGate(join(hub.stateDir, "access.json"))
 
 // Only allowlisted users may press card buttons.
@@ -459,7 +480,11 @@ const orchestrator = new Orchestrator(hub, agents, {
     const wantContext = policy === "always" || (policy === "onSwitch" && isSwitch)
     const context = wantContext ? messageCache.render(inbound.chatId) : ""
     // Fold any quote-reply target into the live message so the agent sees it.
-    const live = foldQuote(inbound.content, inbound.quote)
+    let live = foldQuote(inbound.content, inbound.quote)
+    // If the governor just compacted this agent's session, seed the fresh one
+    // with the handoff so the first post-reset turn keeps continuity.
+    const seed = governor.takeSeed(agent, inbound.chatId)
+    if (seed) live = `[handoff from your previous session]\n${seed}\n\n${live}`
     let memory = ""
     if (rt?.useMemory) {
       const scopes: Scope[] = [
