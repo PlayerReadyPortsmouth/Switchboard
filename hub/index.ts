@@ -177,6 +177,8 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonT
     try { return (await memoryRetriever.relevant(query, sc)).notes.map((n) => ({ title: n.title, body: n.body })) }
     catch { return [] }
   })
+  // Agent-initiated outbound: fire a named (operator-configured) outbound route.
+  socket.onPostWebhook(({ target, body }) => { fireOutboundNamed(target, body) })
   const t = new StreamJsonTransport(name, cfg, {
     spawner,
     socket,

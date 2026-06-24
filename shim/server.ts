@@ -20,6 +20,8 @@ export function toolCallToWire(name: string, args: Record<string, any>) {
       return { t: "finish" }
     case "remember":
       return { t: "remember", scope: args.scope, title: args.title, tags: args.tags, body: args.body }
+    case "post_webhook":
+      return { t: "post_webhook", target: args.target, body: args.body }
     default:
       return null
   }
@@ -136,6 +138,12 @@ async function main() {
           query: { type: "string" },
           scopes: { type: "array", items: { type: "string" }, description: "Scopes to search; defaults to global + your own agent memory." } },
           required: ["query"] } },
+      { name: "post_webhook",
+        description: "Fire a pre-configured outbound webhook to an external system (e.g. notify a service, append to a sheet, page on-call). You address it by `target` — the route's id from the hub config — NOT a URL; the hub holds the destination and secret and delivers it signed and retried. Use only the named targets the operator has set up.",
+        inputSchema: { type: "object", properties: {
+          target: { type: "string", description: "The configured outbound route id to fire." },
+          body: { type: "string", description: "Optional request body (used when the route has no template)." } },
+          required: ["target"] } },
     ],
   }))
 
