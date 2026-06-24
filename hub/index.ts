@@ -44,6 +44,7 @@ import { matchOutbound, renderBody } from "./outbound"
 import { AuditLog } from "./auditLog"
 import { parseJsonlTail, shouldRotate, rotationsToPrune } from "./audit"
 import { parseAuditCommand, renderAuditLines, renderAuditSummary } from "./auditCommand"
+import { ApprovalRegistry, renderApprovalCard, parseApprovalCustomId, type ApprovalRequest, type ApprovalDecision } from "./approval"
 import type { AgentConfig, AgentReply, SpawnTrigger, SpawnCardUpdate, CardSpec, DirectCommand, OutboundRoute } from "./types"
 
 const CONFIG_DIR = process.env.SWITCHBOARD_CONFIG ?? join(import.meta.dir, "..", "config")
@@ -55,9 +56,14 @@ if (!token) { console.error(`missing ${hub.botTokenEnv}`); process.exit(1) }
 
 const gateway = new Gateway(hub, agents)
 const deployApprover = hub.deployApproverUserId ?? ""
-gateway.setNotifyButtonGate((customId, userId) =>
-  isDeployAuthorized(customId, userId, deployApprover) &&
-  (requiresApprover(customId, hub.gatedActions ?? []) ? !!deployApprover && userId === deployApprover : true))
+// Approval buttons are pressable only by configured approvers (default: the
+// deploy approver); everything else keeps the existing deploy/gated-action gate.
+const approvalApprovers = hub.approvals?.approvers ?? (deployApprover ? [deployApprover] : [])
+gateway.setNotifyButtonGate((customId, userId) => {
+  if (customId.startsWith("approval:")) return approvalApprovers.includes(userId)
+  return isDeployAuthorized(customId, userId, deployApprover) &&
+    (requiresApprover(customId, hub.gatedActions ?? []) ? !!deployApprover && userId === deployApprover : true)
+})
 const routerRunner = makeRouterRunner()
 const spawner = makeBunProcessSpawner()
 
@@ -269,6 +275,47 @@ const audit = new AuditLog({
  *  from agent-attributed events even when the hub master switch is on. */
 const auditOptedOut = (agent?: string): boolean =>
   !!agent && agents[agent]?.runtime.audit === false
+
+// Approval gate: a requireApproval effect parks here, posts an Approve/Deny card,
+// and fires only on a configured approver's grant (fail-closed on deny / expiry /
+// restart). Off unless approvals.enabled. Every step is an `approval` audit event
+// threaded by the approval id as `corr`.
+const approvalsEnabled = !!hub.approvals?.enabled
+let approvalCounter = 0
+const approvalRegistry = new ApprovalRegistry(
+  () => Date.now(),
+  () => `appr-${++approvalCounter}`,
+  hub.approvals?.ttlMs ?? 3_600_000,
+)
+const approvalCards = new Map<string, { chatId: string; messageId: string }>()
+/** Park an effect for human approval: record the request, post the card, and
+ *  remember it for editing on resolution. */
+async function requestApproval(req: ApprovalRequest, fire: () => void | Promise<void>): Promise<void> {
+  const e = approvalRegistry.request(req, fire)
+  audit.record({
+    kind: "approval", actor: req.actor, action: "request", target: req.target,
+    chat: req.chat, outcome: "pending", corr: e.id, detail: { kind: req.kind },
+  })
+  const channel = hub.approvals?.channelId ?? req.chat
+  if (!channel) { process.stderr.write(`approval ${e.id}: no channel to post to\n`); return }
+  const messageId = await gateway.sendCard(channel, renderApprovalCard(e))
+  if (messageId) approvalCards.set(e.id, { chatId: channel, messageId })
+}
+/** Resolve an approval from a button click: audit the decision, edit the card to
+ *  its terminal state, and (on grant) fire the held effect exactly once. */
+async function resolveApproval(id: string, decision: ApprovalDecision, userId: string): Promise<void> {
+  const e = approvalRegistry.resolve(id, decision)
+  if (!e) return   // unknown or already resolved — single-shot
+  audit.record({
+    kind: "approval", actor: `user:${userId}`, action: decision === "grant" ? "grant" : "deny",
+    target: e.target, chat: e.chat, outcome: decision === "grant" ? "ok" : "deny", corr: e.id,
+  })
+  const loc = approvalCards.get(e.id); approvalCards.delete(e.id)
+  if (loc) await gateway.editCard(loc.chatId, loc.messageId, renderApprovalCard(e))
+  if (decision === "grant") {
+    try { await e.fire() } catch (err) { process.stderr.write(`approval ${e.id} fire failed: ${err}\n`) }
+  }
+}
 /** Deliver an outbound route (fire-and-forget) and record its resolution to the
  *  ledger. `actor` is who triggered it (agent:<name> | hub); `agent`, if any,
  *  honors per-agent audit opt-out. */
@@ -585,6 +632,8 @@ gateway.setPermissionAuthorizer((uid) => baseGate.listAllowed().includes(uid))
 
 // A card button was clicked → gated actions run hub-side; others relay to the agent.
 gateway.onNotifyButton((customId, userId) => {
+  const ap = parseApprovalCustomId(customId)
+  if (ap) { void resolveApproval(ap.id, ap.decision, userId); return }
   const action = matchGatedAction(customId, hub.gatedActions ?? [])
   if (action) { void cardLifecycle.runGated(action, customId); return }
   const key = notifyRouter.agentFor(customId)
@@ -811,3 +860,15 @@ setInterval(() => {
     void gateway.sendPlain(chatId, "✅ Paired! You can talk to the agents now. Try `!agents`.")
   }
 }, 5000).unref()
+
+// Auto-deny pending approvals past their TTL: edit the card to "Expired" and
+// audit the lapse. The held effect never fires (fail-closed).
+if (approvalsEnabled) {
+  setInterval(() => {
+    for (const e of approvalRegistry.sweepExpired()) {
+      audit.record({ kind: "approval", actor: "hub", action: "expire", target: e.target, chat: e.chat, outcome: "deny", corr: e.id })
+      const loc = approvalCards.get(e.id); approvalCards.delete(e.id)
+      if (loc) void gateway.editCard(loc.chatId, loc.messageId, renderApprovalCard(e))
+    }
+  }, 60_000).unref()
+}
