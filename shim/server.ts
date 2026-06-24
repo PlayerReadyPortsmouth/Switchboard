@@ -47,16 +47,20 @@ async function main() {
   // agent via its stdin (the hub owns the process), not through this socket.
   let reqCounter = 0
   const pending = new Map<string, (notes: { title: string; body: string }[]) => void>()
+  const pendingAsk = new Map<string, (answer: string) => void>()
   const decoder = new LineDecoder()
   const sock = await Bun.connect({
     unix: SOCKET,
     socket: {
       data(_s, data) {
         for (const obj of decoder.push(data.toString())) {
-          const m = obj as { t?: string; id?: string; notes?: { title: string; body: string }[] }
+          const m = obj as { t?: string; id?: string; notes?: { title: string; body: string }[]; answer?: string }
           if (m.t === "recall_result" && m.id && pending.has(m.id)) {
             pending.get(m.id)!(m.notes ?? [])
             pending.delete(m.id)
+          } else if (m.t === "ask_agent_result" && m.id && pendingAsk.has(m.id)) {
+            pendingAsk.get(m.id)!(m.answer ?? "")
+            pendingAsk.delete(m.id)
           }
         }
       },
@@ -144,6 +148,15 @@ async function main() {
           target: { type: "string", description: "The configured outbound route id to fire." },
           body: { type: "string", description: "Optional request body (used when the route has no template)." } },
           required: ["target"] } },
+      // ask_agent is exposed only when the hub enables inter-agent consult.
+      ...(process.env.CONSULT === "1" ? [{
+        name: "ask_agent",
+        description: "Consult another Switchboard agent by name and get its answer back. Use to delegate a sub-question to a specialist (e.g. ask the ops agent whether prod is healthy). You address it by `agent` — the agent's name from the hub config, never a URL; the hub runs that agent and returns its reply text. Only agents the operator has made consultable will answer; expect a short wait while the agent thinks.",
+        inputSchema: { type: "object", properties: {
+          agent: { type: "string", description: "The name of the agent to consult." },
+          message: { type: "string", description: "Your question or task for that agent." } },
+          required: ["agent", "message"] },
+      }] : []),
     ],
   }))
 
@@ -162,6 +175,17 @@ async function main() {
         ? notes.map((n) => `## ${n.title}\n${n.body}`).join("\n\n")
         : "(no relevant memory found)"
       return { content: [{ type: "text", text }] }
+    }
+    // ask_agent is request/response: send, await the consulted agent's reply.
+    if (req.params.name === "ask_agent") {
+      const id = `a${++reqCounter}`
+      const answer = await new Promise<string>((resolve) => {
+        pendingAsk.set(id, resolve)
+        sock.write(encode({ t: "ask_agent", id, agent: args.agent, message: args.message }))
+        const timer = setTimeout(() => { if (pendingAsk.delete(id)) resolve("(the agent did not respond in time)") }, 120000)
+        ;(timer as { unref?: () => void }).unref?.()
+      })
+      return { content: [{ type: "text", text: answer }] }
     }
     const wire = toolCallToWire(req.params.name, args)
     if (!wire) return { content: [{ type: "text", text: `unknown tool: ${req.params.name}` }], isError: true }

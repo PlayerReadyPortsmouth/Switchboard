@@ -77,3 +77,23 @@ st("remember reaches the callback; recall replies with notes keyed by id", async
   se(results[0]).toEqual({ t: "recall_result", id: "q1", notes: [{ title: "for:alpha", body: "B" }] })
   sock.end(); await srv.close()
 })
+
+st("ask_agent reaches the callback; the answer is written back keyed by id", async () => {
+  const path = join(tmpdir(), `sbtest-ask-${process.pid}-${globalThis.performance.now()}.sock`)
+  const srv = new SSS(path)
+  let asked: any = null
+  srv.onAskAgent(async (q) => { asked = q; return `answer-for:${q.message}` })
+  await srv.listen()
+
+  const results: any[] = []
+  const dec = new (await import("../hub/framing")).LineDecoder()
+  const sock = await Bun.connect({ unix: path, socket: {
+    data(_s, d) { for (const o of dec.push(d.toString())) results.push(o) },
+  } })
+  sock.write(enc({ t: "ask_agent", id: "a1", agent: "ops", message: "is prod ok?" }))
+  await Bun.sleep(80)
+
+  se(asked).toEqual({ agent: "ops", message: "is prod ok?" })
+  se(results[0]).toEqual({ t: "ask_agent_result", id: "a1", answer: "answer-for:is prod ok?" })
+  sock.end(); await srv.close()
+})

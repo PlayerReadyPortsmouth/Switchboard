@@ -24,6 +24,7 @@ export class ShimSocketServer {
   private rememberCb: (r: RememberMsg) => void = () => {}
   private recallCb: (q: { query: string; scopes?: string[] }) => Promise<RecalledNote[]> = async () => []
   private postWebhookCb: (w: { target: string; body?: string }) => void = () => {}
+  private askAgentCb: (q: { agent: string; message: string }) => Promise<string> = async () => ""
 
   constructor(private socketPath: string) {}
 
@@ -36,6 +37,7 @@ export class ShimSocketServer {
   onRemember(cb: typeof this.rememberCb) { this.rememberCb = cb }
   onRecall(cb: typeof this.recallCb) { this.recallCb = cb }
   onPostWebhook(cb: typeof this.postWebhookCb) { this.postWebhookCb = cb }
+  onAskAgent(cb: typeof this.askAgentCb) { this.askAgentCb = cb }
   isRegistered() { return this.registered }
 
   async listen(): Promise<void> {
@@ -69,6 +71,12 @@ export class ShimSocketServer {
         // Request/response: run retrieval, then write the result back keyed by id.
         void this.recallCb({ query: m.query, scopes: m.scopes }).then((notes) => {
           try { socket.write(encode({ t: "recall_result", id: m.id, notes })) } catch {}
+        })
+        break
+      case "ask_agent":
+        // Request/response: run the consulted agent, then write its answer back by id.
+        void this.askAgentCb({ agent: m.agent, message: m.message }).then((answer) => {
+          try { socket.write(encode({ t: "ask_agent_result", id: m.id, answer })) } catch {}
         })
         break
     }
