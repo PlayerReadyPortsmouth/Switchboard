@@ -1,4 +1,4 @@
-import { join } from "path"
+import { join, dirname } from "path"
 import { unlinkSync, appendFileSync, mkdirSync } from "fs"
 import { config as loadEnv } from "./env"
 import { loadConfigs } from "./config"
@@ -34,7 +34,9 @@ import { Gardener } from "./memory/gardener"
 import { distill } from "./memory/distiller"
 import { Overseer } from "./overseer"
 import { matchDirectCommand, runDirect, interpolateArgs, type DirectExecutor } from "./directCommands"
-import type { AgentConfig, AgentReply, SpawnTrigger, SpawnCardUpdate, CardSpec, DirectCommand } from "./types"
+import { OutboundDelivery } from "./outboundDelivery"
+import { matchOutbound, renderBody } from "./outbound"
+import type { AgentConfig, AgentReply, SpawnTrigger, SpawnCardUpdate, CardSpec, DirectCommand, OutboundRoute } from "./types"
 
 const CONFIG_DIR = process.env.SWITCHBOARD_CONFIG ?? join(import.meta.dir, "..", "config")
 const { hub, agents } = loadConfigs(CONFIG_DIR)
@@ -193,6 +195,44 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonT
 // ephemeral spawn (and is NOT forwarded to Discord).
 const spawnTriggers = (hub.spawnTriggers ?? []).map((t) => ({ ...t, re: new RegExp(t.pattern) }))
 
+// Outbound webhooks: agents (and hub events) push signed POSTs to named routes.
+// The hub owns the URL+secret — agents address routes by id, never a raw URL.
+const outboundRoutes = hub.outboundWebhooks ?? []
+function appendJsonl(path: string, entry: unknown): void {
+  try { mkdirSync(dirname(path), { recursive: true }); appendFileSync(path, JSON.stringify(entry) + "\n") }
+  catch (e) { process.stderr.write(`outbound log append failed: ${e}\n`) }
+}
+const outboundDelivery = new OutboundDelivery({
+  fetch: async (url, init) => {
+    const r = await fetch(url, { method: init.method, headers: init.headers, body: init.body })
+    return { status: r.status }
+  },
+  appendLog: (e) => appendJsonl(join(hub.stateDir, "outbound-log.jsonl"), e),
+  appendDeadLetter: (e) => appendJsonl(join(hub.stateDir, "outbound-dead.jsonl"), e),
+  sleep: (ms) => new Promise((res) => setTimeout(res, ms)),
+  now: () => Date.now(),
+  secretFor: (route) => (route.secretEnv ? process.env[route.secretEnv] : undefined),
+  retries: hub.outboundRetries,
+  allowedHosts: hub.outboundAllowedHosts,
+})
+/** Fire any text-triggered outbound routes for `text`. Returns true if a matched
+ *  route asked to `consume` the text (suppress the Discord post). */
+function fireOutboundText(text: string): boolean {
+  let consume = false
+  for (const { route, groups } of matchOutbound(text, outboundRoutes)) {
+    void outboundDelivery.deliver(route, renderBody(route.template, { groups }))
+    if (route.consume) consume = true
+  }
+  return consume
+}
+/** Deliver to a named route by id (the post_webhook tool path). Unknown ⇒ false. */
+function fireOutboundNamed(id: string, body?: string): boolean {
+  const route = outboundRoutes.find((r) => r.id === id)
+  if (!route) { process.stderr.write(`post_webhook: unknown route "${id}"\n`); return false }
+  void outboundDelivery.deliver(route, renderBody(route.template, { body }))
+  return true
+}
+
 /** Handle one reply from a transport: cards → Discord card (+ register buttons);
  *  text → spawn-trigger match or a plain reply; react/edit → passthrough. */
 async function onAgentReply(reply: AgentReply, key: string): Promise<void> {
@@ -209,6 +249,9 @@ async function onAgentReply(reply: AgentReply, key: string): Promise<void> {
       const m = trig.re.exec(reply.text)
       if (m) { await runSpawnTrigger(trig, m as unknown as string[], reply.chatId); return }
     }
+    // Outbound webhooks: fire any text-triggered routes (fire-and-forget). A
+    // `consume` route suppresses the Discord post; otherwise the text still ships.
+    if (fireOutboundText(reply.text)) return
     // Overseer: for opt-in agents, judge the turn against the goal and either
     // swallow it (a nudge was delivered → another turn coming) or ship it.
     if (agents[reply.agent]?.runtime.overseer?.enabled) {
