@@ -969,6 +969,28 @@ const directCommands = hub.directCommands ?? []
 gateway.handleInbound((m) => {
   const trimmed = m.content.trim()
   // Audit ledger query (operator-only): list recent governed effects or a rollup.
+  // Workflows: list configured missions (operator-only).
+  if (/^!workflows\b/i.test(trimmed)) {
+    if (!baseGate.listAllowed().includes(m.userId)) return
+    if (!hub.workflow?.enabled) { void gateway.sendPlain(m.chatId, "🧩 workflows are off (set `hub.workflow.enabled`)."); return }
+    const list = (hub.workflows ?? []).filter((w) => w.enabled !== false)
+    if (!list.length) { void gateway.sendPlain(m.chatId, "no workflows configured."); return }
+    const lines = list.map((w) => `• \`${w.id}\` — ${w.description ?? `${w.steps.length} step(s)`}  (${w.steps.map((s) => s.agent).join(" → ")})`)
+    void gateway.sendPlain(m.chatId, ["**workflows** (run with `!run <id> [input]`):", ...lines].join("\n"))
+    return
+  }
+  // Run a workflow as a mission (operator-only).
+  if (/^!run\b/i.test(trimmed)) {
+    if (!baseGate.listAllowed().includes(m.userId)) return
+    if (!hub.workflow?.enabled) { void gateway.sendPlain(m.chatId, "🧩 workflows are off (set `hub.workflow.enabled`)."); return }
+    const rest = trimmed.replace(/^!run\b/i, "").trim()
+    const sp = rest.indexOf(" ")
+    const id = sp === -1 ? rest : rest.slice(0, sp)
+    const input = sp === -1 ? "" : rest.slice(sp + 1).trim()
+    if (!id) { void gateway.sendPlain(m.chatId, "usage: `!run <workflow-id> [input]`"); return }
+    void runWorkflow(id, input, m.chatId, `user:${m.userId}`)
+    return
+  }
   if (/^!audit\b/i.test(trimmed)) {
     if (!baseGate.listAllowed().includes(m.userId)) return
     if (!hub.audit?.enabled) { void gateway.sendPlain(m.chatId, "📜 audit logging is off (set `hub.audit.enabled`)."); return }

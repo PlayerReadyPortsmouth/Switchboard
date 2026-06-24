@@ -148,5 +148,20 @@
     "enabled": true,
     "timeoutMs": 90000
   },
+  "workflow": {
+    "enabled": true,
+    "stepTimeoutMs": 120000
+  },
+  "workflows": [
+    {
+      "id": "ship-feature",
+      "description": "research → implement → review, one governed pipeline",
+      "steps": [
+        { "id": "research", "agent": "research", "prompt": "Research how to {{input}}. Summarise the approach and any gotchas." },
+        { "id": "implement", "agent": "assistant", "prompt": "Using this research:\n{{steps.research}}\n\nImplement: {{input}}. Describe what you changed." },
+        { "id": "review", "agent": "help", "prompt": "Review this work for correctness:\n{{steps.implement}}\n\nList any issues, or say LGTM." }
+      ]
+    }
+  ],
   "timezone": "Europe/London"
 }

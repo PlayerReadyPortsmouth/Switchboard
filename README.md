@@ -185,6 +185,21 @@ Point a browser at the hub and watch it work. Set `webPort` and the hub serves a
 
 Read-only and unauthenticated like `/metrics` — it serves only the already-public status/audit **metadata** (no message content, no secrets, no write actions), and binds **loopback (`127.0.0.1`) by default** (`webHost: "0.0.0.0"` to expose). This is deliberately the read-only slice of "web support"; a bidirectional web chat would mean abstracting the Discord-coupled gateway, a separate effort.
 
+## Workflows / missions
+
+A team of agents, not one. A **mission** runs a declarative `workflows[]` pipeline — each step runs a named agent with a templated prompt, and each step's output feeds the next — kicked off with **`!run <id> [input]`** (operator-only). See [`docs/superpowers/specs/2026-06-24-agent-workflows-design.md`](docs/superpowers/specs/2026-06-24-agent-workflows-design.md).
+
+Each step runs on a hidden `mission:<id>` channel — the same run-and-capture primitive as `ask_agent`: the step's reply (text or card, via `consultAnswerFromReply`) is intercepted before Discord and fed into the next step's prompt (`{{input}}` = the run input, `{{steps.<id>}}` = a prior step's output). A **live progress card** updates per step (⏳ → 🔄 → ✅/❌), the final output is posted, and every hop (`start`/`step`/`done`/`error`) is a `mission` audit event threaded by run id. **Off unless `workflow.enabled`.** A stuck step (unavailable agent or `stepTimeoutMs`) fails the run rather than hanging; steps target persistent agents and run sequentially (ephemeral-per-step isolation and DAG/parallel steps are the documented next steps). `!workflows` lists what's configured.
+
+```jsonc
+"workflow": { "enabled": true, "stepTimeoutMs": 120000 },
+"workflows": [{ "id": "ship-feature", "steps": [
+  { "id": "research",  "agent": "research",  "prompt": "Research how to {{input}}." },
+  { "id": "implement", "agent": "assistant", "prompt": "Using:\n{{steps.research}}\nImplement {{input}}." },
+  { "id": "review",    "agent": "help",      "prompt": "Review:\n{{steps.implement}}" }
+]}]
+```
+
 ## Status of features
 
 **Working** (covered by the passing unit tests + the real-CLI smoke check):
@@ -212,6 +227,7 @@ Read-only and unauthenticated like `/metrics` — it serves only the already-pub
 - **Gated actions & approvals** (`approval.ts`): a `requireApproval` effect parks for a human Approve/Deny card and fires only on an authorized approver's grant — fail-closed, single-shot, TTL-swept, audited end-to-end by `corr`. Off unless `approvals.enabled`.
 - **Metrics & health** (`metrics.ts`/`metricsServer.ts`): a Prometheus `GET /metrics` scrape + `GET /health` probe (503 when no agent is alive) on `metricsPort`, projected from the live status snapshot + audit summary, plus a `!metrics` chat rollup. Off unless `metricsPort` is set.
 - **Inter-agent consult** (`consult.ts`): an `ask_agent` tool lets one agent ask another (by name) and get its reply back, via the recall request/response seam on a virtual channel — governed by `access.consultableBy` (default deny, no self-consult), bounded by `timeoutMs`, audited as `consult`. Off unless `consult.enabled`.
+- **Workflows / missions** (`workflow.ts`): declarative multi-step pipelines — each step runs an agent with a templated prompt, output feeding the next — run via `!run <id> [input]` on hidden mission channels, with a live progress card and per-step `mission` audit, threaded by run id. Off unless `workflow.enabled`.
 - **Web dashboard** (`web.ts`/`webServer.ts`): a read-only browser dashboard on `webPort` (`GET /` + a `/api/status` JSON feed) showing the live agent fleet, health, ledger summary, and recent activity — projected from the same snapshot + audit data, no gateway changes. Off unless `webPort` is set.
 - **Overseer** (`overseer.ts`): opt-in keep-prodding-until-done loop with `done`/`working`/`blocked` verdicts, autonomy bias, and iteration/wallclock caps.
 
@@ -234,4 +250,5 @@ Read-only and unauthenticated like `/metrics` — it serves only the already-pub
 - Gated action catalog — Spec: [`docs/superpowers/specs/2026-06-24-gated-action-catalog-design.md`](docs/superpowers/specs/2026-06-24-gated-action-catalog-design.md)
 - Metrics & health — Spec: [`docs/superpowers/specs/2026-06-24-metrics-health-design.md`](docs/superpowers/specs/2026-06-24-metrics-health-design.md)
 - Inter-agent consult — Spec: [`docs/superpowers/specs/2026-06-24-inter-agent-consult-design.md`](docs/superpowers/specs/2026-06-24-inter-agent-consult-design.md)
+- Agent workflows / missions — Spec: [`docs/superpowers/specs/2026-06-24-agent-workflows-design.md`](docs/superpowers/specs/2026-06-24-agent-workflows-design.md)
 - Web dashboard — Spec: [`docs/superpowers/specs/2026-06-24-web-dashboard-design.md`](docs/superpowers/specs/2026-06-24-web-dashboard-design.md)
