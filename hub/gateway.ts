@@ -168,7 +168,7 @@ export class Gateway {
           user: msg.author.username, content: msg.content,
           ts: msg.createdAt.toISOString(), isDM: msg.channel.type === ChannelType.DM,
           attachments: [...msg.attachments.values()].map(a => ({
-            name: a.name ?? a.id, type: a.contentType ?? "unknown", size: a.size })),
+            name: a.name ?? a.id, type: a.contentType ?? "unknown", size: a.size, url: a.url })),
           quote,
         })
       })()

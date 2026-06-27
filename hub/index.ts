@@ -21,7 +21,9 @@ import { matchGatedAction, requiresApprover } from "./gatedActions"
 import { isDeployAuthorized } from "./deployGate"
 import { clearReactionAgent } from "./channelPin"
 import { MessageCache } from "./messageCache"
-import { enrich, foldQuote } from "./enrich"
+import { enrich, foldQuote, foldAttachments } from "./enrich"
+import { materializeAttachments } from "./attachments"
+import { mkdir as mkdirAsync, writeFile as writeFileAsync } from "fs/promises"
 import { expandHome } from "./config"
 import { MemoryStore, type Scope } from "./memory/store"
 import { VectorIndex } from "./memory/vectorIndex"
@@ -1059,6 +1061,21 @@ const orchestrator = new Orchestrator(hub, agents, {
     const context = wantContext ? messageCache.render(inbound.chatId) : ""
     // Fold any quote-reply target into the live message so the agent sees it.
     let live = foldQuote(inbound.content, inbound.quote)
+    // Pass user-uploaded files through: download them locally and tell the agent
+    // where to Read them. Off unless attachments.enabled (then byte-identical).
+    if (hub.attachments?.enabled && inbound.attachments?.length) {
+      try {
+        const files = await materializeAttachments(
+          inbound.attachments,
+          {
+            dir: hub.attachments.dir ? expandHome(hub.attachments.dir) : join(hub.stateDir, "attachments"),
+            maxBytes: hub.attachments.maxBytes ?? 10_485_760,
+          },
+          { fetch: (u) => fetch(u), writeFile: (p, d) => writeFileAsync(p, d), mkdir: (d) => mkdirAsync(d, { recursive: true }).then(() => undefined) },
+        )
+        live = foldAttachments(live, files)
+      } catch (e) { process.stderr.write(`hub: attachment passthrough failed: ${e}\n`) }
+    }
     // If the governor just compacted this agent's session, seed the fresh one
     // with the handoff so the first post-reset turn keeps continuity.
     const seed = governor.takeSeed(agent, inbound.chatId)
