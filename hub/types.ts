@@ -7,7 +7,7 @@ export interface InboundMessage {
   content: string
   ts: string            // ISO timestamp
   isDM: boolean
-  attachments?: { name: string; type: string; size: number }[]
+  attachments?: { name: string; type: string; size: number; url?: string }[]
   quote?: { user: string; content: string }   // the message this one quote-replies to
 }
 
@@ -287,6 +287,16 @@ export interface HubConfig {
   consult?: ConsultConfig        // inter-agent ask_agent tool (default off; per-agent access via consultableBy)
   workflows?: WorkflowRoute[]    // declarative multi-step agent missions (run via !run)
   workflow?: WorkflowConfig      // workflow engine config (default off)
+  attachments?: AttachmentConfig // pass Discord file uploads through to agents (default off)
+}
+
+/** Discord file-upload passthrough. Absent/disabled ⇒ uploads are ignored exactly
+ *  as before (only message text reaches the agent). When enabled, the hub downloads
+ *  each upload to `dir` and folds a breadcrumb of local paths into the agent's turn. */
+export interface AttachmentConfig {
+  enabled?: boolean              // master switch (default off)
+  maxBytes?: number              // skip downloads larger than this (default 10485760 = 10 MB)
+  dir?: string                   // download directory (default <stateDir>/attachments)
 }
 
 /** One step of a workflow: run `agent` with a templated `prompt` ({{input}} and
