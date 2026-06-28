@@ -59,3 +59,15 @@ gt("buildModal integrates for a feedback button (smoke)", () => {
   const m = bm("fix:feedback:T1", { title: "Feedback", inputs: [{ id: "feedback", label: "Note", style: "paragraph" }] })
   ge(m.data.custom_id).toBe("fix:feedback:T1")
 })
+
+import { buildAttachmentFiles } from "./gateway"
+import { AttachmentBuilder } from "discord.js"
+
+test("buildAttachmentFiles wraps buffers in named AttachmentBuilders and clamps to 10", () => {
+  const one = buildAttachmentFiles([{ data: Buffer.from("hi"), name: "report.pdf" }])
+  expect(one.length).toBe(1)
+  expect(one[0]).toBeInstanceOf(AttachmentBuilder)
+  expect(one[0].name).toBe("report.pdf")
+  const many = buildAttachmentFiles(Array.from({ length: 15 }, (_, i) => ({ data: Buffer.from(String(i)), name: `${i}.txt` })))
+  expect(many.length).toBe(10)
+})

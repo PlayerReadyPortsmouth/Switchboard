@@ -55,6 +55,8 @@ export interface StreamJsonOpts {
   writeMcpConfig?: (path: string, contents: string) => void
   /** Expose the ask_agent inter-agent consult tool to this agent (CONSULT=1). */
   consultEnabled?: boolean
+  /** Expose the attach_file outbound-attachment tool to this agent (ATTACH_FILES=1). */
+  attachEnabled?: boolean
   /** Persist+resume the CLI session across restarts (persistent agents). */
   resumable?: boolean
   /** Path to read/write the captured session id. */
@@ -126,7 +128,7 @@ export class StreamJsonTransport implements AgentTransport {
     await socket.listen()
 
     const write = this.opts.writeMcpConfig ?? ((p, c) => writeFileSync(p, c))
-    write(mcpConfigPath, JSON.stringify(buildShimMcpConfig(shimPath, socketPath, this.name, this.opts.consultEnabled)))
+    write(mcpConfigPath, JSON.stringify(buildShimMcpConfig(shimPath, socketPath, this.name, this.opts.consultEnabled, this.opts.attachEnabled)))
 
     const initialSessionId = this.opts.resumable
       ? (this.opts.readSession?.() ?? (this.opts.sessionPath ? readSessionFile(this.opts.sessionPath) : undefined))

@@ -55,6 +55,8 @@ import { type WebInput } from "./web"
 import { ConsultRegistry, mayConsult, consultAnswerFromReply } from "./consult"
 import { MissionRegistry, findWorkflow, renderStepPrompt, renderMissionCard, type MissionRun } from "./workflow"
 import type { AgentConfig, AgentReply, InboundMessage, SpawnTrigger, SpawnCardUpdate, CardSpec, DirectCommand, OutboundRoute } from "./types"
+import { resolveOutboxFile } from "./outboxAttach"
+import { makeAttachHandler } from "./attachHandler"
 
 const CONFIG_DIR = process.env.SWITCHBOARD_CONFIG ?? join(import.meta.dir, "..", "config")
 const { hub, agents } = loadConfigs(CONFIG_DIR)
@@ -351,6 +353,27 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonT
     retryingConsults.add(e.channel)
     void runConsultRetry(targetName, e.channel, inbound, discordCh, settle, () => consultSettled)
   }))
+  // Agent-initiated outbound file attachment. Disabled ⇒ handler ignores the
+  // frame (double-gate alongside the tool not being listed). The agent identity
+  // is this transport's `name`, never taken from the frame.
+  const oa = hub.outboundAttachments
+  socket.onAttach(makeAttachHandler({
+    enabled: !!oa?.enabled,
+    resolve: (relPath) => resolveOutboxFile(relPath, {
+      outboxBase: oa?.outboxDir ?? join(hub.stateDir, "outbox"),
+      agent: name,
+      maxBytes: oa?.maxBytes ?? 8_388_608,
+      allowedExtensions: (oa?.allowedExtensions ?? []).map((e) => e.toLowerCase()),
+    }),
+    sendFiles: (chatId, attachments, caption) => gateway.sendFiles(chatId, attachments, caption),
+    note: (chatId, text) => void gateway.sendPlain(chatId, text),
+    audit: (ok, chatId, detail) => {
+      if (!auditOptedOut(name)) audit.record({
+        kind: "event", actor: `agent:${name}`, action: "attach",
+        chat: chatId, outcome: ok ? "ok" : "deny", detail,
+      })
+    },
+  }))
   const t = new StreamJsonTransport(name, cfg, {
     spawner,
     socket,
@@ -360,6 +383,7 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonT
     resumable: cfg.runtime.resumable === true,
     sessionPath: join(hub.stateDir, `${key}.session`),
     consultEnabled: !!hub.consult?.enabled,
+    attachEnabled: !!hub.outboundAttachments?.enabled,
     onOverflow: (inbound) => {
       // Consults in the retry loop own their own retry/settle lifecycle — don't
       // short-circuit them here, just drop the overflow silently.

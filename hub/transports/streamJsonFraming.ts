@@ -62,14 +62,21 @@ export function buildClaudeArgv(o: ClaudeArgvOpts): string[] {
   return argv
 }
 
-/** The --mcp-config object registering the shim as a normal MCP server.
- *  `consultEnabled` sets CONSULT=1 so the shim exposes the ask_agent tool. */
-export function buildShimMcpConfig(shimPath: string, socketPath: string, agentName: string, consultEnabled = false) {
+/** The --mcp-config object registering the shim as a normal MCP server. The shim
+ *  is launched by Claude as an MCP server and sees ONLY this `env` block (not the
+ *  hub's process.env), so per-feature tool gates must be injected here.
+ *  `consultEnabled` sets CONSULT=1 (exposes ask_agent); `attachEnabled` sets
+ *  ATTACH_FILES=1 (exposes attach_file). */
+export function buildShimMcpConfig(shimPath: string, socketPath: string, agentName: string, consultEnabled = false, attachEnabled = false) {
   return {
     mcpServers: {
       "switchboard-shim": {
         command: "bun", args: ["run", shimPath],
-        env: { HUB_SOCKET: socketPath, AGENT_NAME: agentName, ...(consultEnabled ? { CONSULT: "1" } : {}) },
+        env: {
+          HUB_SOCKET: socketPath, AGENT_NAME: agentName,
+          ...(consultEnabled ? { CONSULT: "1" } : {}),
+          ...(attachEnabled ? { ATTACH_FILES: "1" } : {}),
+        },
       },
     },
   }

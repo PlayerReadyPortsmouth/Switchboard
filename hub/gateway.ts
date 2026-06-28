@@ -1,6 +1,7 @@
 import {
   Client, GatewayIntentBits, Partials, ChannelType,
-  ButtonBuilder, ButtonStyle, ActionRowBuilder, EmbedBuilder, type Message, type Interaction,
+  ButtonBuilder, ButtonStyle, ActionRowBuilder, EmbedBuilder, AttachmentBuilder,
+  type Message, type Interaction,
 } from "discord.js"
 import type { AgentRegistry, InboundMessage, AgentReply, AgentConfig, HubConfig, CardSpec, CardModal } from "./types"
 import { formatOutbound } from "./format"
@@ -76,6 +77,12 @@ export function renderAgentList(reg: AgentRegistry, permitted: string[], current
     return `${c.emoji} ${n} — ${c.description}${mark}`
   })
   return lines.length ? lines.join("\n") : "(no agents available to you)"
+}
+
+/** Build the discord.js `files` payload from in-memory buffers. Clamps to
+ *  Discord's 10-attachment limit; each attachment carries its own display name. */
+export function buildAttachmentFiles(attachments: { data: Buffer; name: string }[]): AttachmentBuilder[] {
+  return attachments.slice(0, 10).map((a) => new AttachmentBuilder(a.data, { name: a.name }))
 }
 
 /** Thin discord.js wrapper. Caller supplies handlers; this owns the client + I/O. */
@@ -268,5 +275,21 @@ export class Gateway {
   async sendPlain(chatId: string, text: string): Promise<void> {
     const ch = await this.client.channels.fetch(chatId)
     if (ch && "send" in ch) await (ch as any).send({ content: text })
+  }
+
+  /** Post a message carrying file attachments. Returns true if delivered, false
+   *  on any failure so the caller can audit the real outcome. */
+  async sendFiles(chatId: string, attachments: { data: Buffer; name: string }[], caption?: string): Promise<boolean> {
+    try {
+      const ch = await this.client.channels.fetch(chatId)
+      if (!ch || !("send" in ch)) return false
+      const files = buildAttachmentFiles(attachments)
+      if (!files.length) return false
+      await (ch as any).send({ ...(caption ? { content: caption } : {}), files })
+      return true
+    } catch (e) {
+      process.stderr.write(`gateway: sendFiles to ${chatId} failed: ${e}\n`)
+      return false
+    }
   }
 }

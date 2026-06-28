@@ -288,6 +288,7 @@ export interface HubConfig {
   workflows?: WorkflowRoute[]    // declarative multi-step agent missions (run via !run)
   workflow?: WorkflowConfig      // workflow engine config (default off)
   attachments?: AttachmentConfig // pass Discord file uploads through to agents (default off)
+  outboundAttachments?: OutboundAttachmentConfig // agents attach produced files to Discord (default off)
 }
 
 /** Discord file-upload passthrough. Absent/disabled ⇒ uploads are ignored exactly
@@ -297,6 +298,18 @@ export interface AttachmentConfig {
   enabled?: boolean              // master switch (default off)
   maxBytes?: number              // skip downloads larger than this (default 10485760 = 10 MB)
   dir?: string                   // download directory (default <stateDir>/attachments)
+}
+
+/** Agent-initiated outbound file attachments. Absent/disabled ⇒ the attach_file
+ *  tool is not offered and any stray attach frame is ignored (byte-identical to
+ *  before). When enabled, an agent may attach a file it wrote into its per-agent
+ *  outbox (`<outboxDir>/<agent>/`); the hub validates containment + size before
+ *  posting it to Discord. */
+export interface OutboundAttachmentConfig {
+  enabled?: boolean              // master switch (default off)
+  outboxDir?: string             // base outbox dir (default <stateDir>/outbox)
+  maxBytes?: number              // reject larger files (default 8388608 = 8 MB)
+  allowedExtensions?: string[]   // empty/absent = allow any; e.g. ["md","pdf","png","csv"]
 }
 
 /** One step of a workflow: run `agent` with a templated `prompt` ({{input}} and

@@ -25,6 +25,7 @@ export class ShimSocketServer {
   private recallCb: (q: { query: string; scopes?: string[] }) => Promise<RecalledNote[]> = async () => []
   private postWebhookCb: (w: { target: string; body?: string }) => void = () => {}
   private askAgentCb: (q: { agent: string; message: string }) => Promise<string> = async () => ""
+  private attachCb: (a: { chatId: string; path: string; caption?: string; filename?: string }) => void = () => {}
 
   constructor(private socketPath: string) {}
 
@@ -38,6 +39,7 @@ export class ShimSocketServer {
   onRecall(cb: typeof this.recallCb) { this.recallCb = cb }
   onPostWebhook(cb: typeof this.postWebhookCb) { this.postWebhookCb = cb }
   onAskAgent(cb: typeof this.askAgentCb) { this.askAgentCb = cb }
+  onAttach(cb: typeof this.attachCb) { this.attachCb = cb }
   isRegistered() { return this.registered }
 
   async listen(): Promise<void> {
@@ -61,6 +63,8 @@ export class ShimSocketServer {
       case "notify": this.notifyCb({ chatId: m.chatId, card: m.card, correlationId: m.correlationId }); break
       case "react": this.reactCb({ chatId: m.chatId, messageId: m.messageId, emoji: m.emoji }); break
       case "edit": this.editCb({ chatId: m.chatId, messageId: m.messageId, text: m.text }); break
+      case "attach":
+        this.attachCb({ chatId: m.chatId, path: m.path, caption: m.caption, filename: m.filename }); break
       case "update": this.updateCb({ chatId: m.chatId, card: m.card, correlationId: m.correlationId }); break
       case "finish": this.finishCb(); break
       case "remember":

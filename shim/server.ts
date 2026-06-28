@@ -22,6 +22,8 @@ export function toolCallToWire(name: string, args: Record<string, any>) {
       return { t: "remember", scope: args.scope, title: args.title, tags: args.tags, body: args.body }
     case "post_webhook":
       return { t: "post_webhook", target: args.target, body: args.body }
+    case "attach_file":
+      return { t: "attach", chatId: args.chat_id, path: args.path, caption: args.caption, filename: args.filename }
     default:
       return null
   }
@@ -156,6 +158,16 @@ async function main() {
           agent: { type: "string", description: "The name of the agent to consult." },
           message: { type: "string", description: "Your question or task for that agent." } },
           required: ["agent", "message"] },
+      }] : []),
+      ...(process.env.ATTACH_FILES === "1" ? [{
+        name: "attach_file",
+        description: "Attach a file you have produced (e.g. a .md or .pdf report) to a Discord message. First WRITE the file into your outbox directory, then call this with its path RELATIVE to that outbox (e.g. \"report.pdf\"). Absolute paths or paths escaping your outbox are rejected. Optional `caption` is posted with the file; optional `filename` sets the display name (defaults to the file's basename).",
+        inputSchema: { type: "object", properties: {
+          chat_id: { type: "string", description: "The Discord channel id to post the file to." },
+          path: { type: "string", description: "Path relative to your outbox directory." },
+          caption: { type: "string", description: "Optional message text to post with the file." },
+          filename: { type: "string", description: "Optional display name for the attachment." } },
+          required: ["chat_id", "path"] },
       }] : []),
     ],
   }))
