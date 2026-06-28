@@ -289,6 +289,7 @@ export interface HubConfig {
   workflow?: WorkflowConfig      // workflow engine config (default off)
   attachments?: AttachmentConfig // pass Discord file uploads through to agents (default off)
   outboundAttachments?: OutboundAttachmentConfig // agents attach produced files to Discord (default off)
+  toolObservability?: ToolObservabilityConfig  // capture + surface per-agent tool usage (default off)
 }
 
 /** Discord file-upload passthrough. Absent/disabled ⇒ uploads are ignored exactly
@@ -298,6 +299,14 @@ export interface AttachmentConfig {
   enabled?: boolean              // master switch (default off)
   maxBytes?: number              // skip downloads larger than this (default 10485760 = 10 MB)
   dir?: string                   // download directory (default <stateDir>/attachments)
+}
+
+/** Capture tool_use/tool_result from the agent stream and surface it: live tool
+ *  in the status board, a per-agent tally embed, and the !tools command. Absent/
+ *  disabled ⇒ no capture/board/command (byte-identical). */
+export interface ToolObservabilityConfig {
+  enabled?: boolean           // master switch (default off)
+  channelId?: string          // where to post the tool board (default: statusChannelId)
 }
 
 /** Agent-initiated outbound file attachments. Absent/disabled ⇒ the attach_file
