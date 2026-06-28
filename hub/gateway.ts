@@ -1,6 +1,7 @@
 import {
   Client, GatewayIntentBits, Partials, ChannelType,
-  ButtonBuilder, ButtonStyle, ActionRowBuilder, EmbedBuilder, type Message, type Interaction,
+  ButtonBuilder, ButtonStyle, ActionRowBuilder, EmbedBuilder, AttachmentBuilder,
+  type Message, type Interaction,
 } from "discord.js"
 import type { AgentRegistry, InboundMessage, AgentReply, AgentConfig, HubConfig, CardSpec, CardModal } from "./types"
 import { formatOutbound } from "./format"
@@ -76,6 +77,14 @@ export function renderAgentList(reg: AgentRegistry, permitted: string[], current
     return `${c.emoji} ${n} — ${c.description}${mark}`
   })
   return lines.length ? lines.join("\n") : "(no agents available to you)"
+}
+
+/** Build the discord.js `files` payload from absolute paths. Clamps to Discord's
+ *  10-attachment limit; a `filename` override wraps each path in an
+ *  AttachmentBuilder so the display name differs from the on-disk basename. */
+export function buildAttachmentFiles(paths: string[], filename?: string): (string | AttachmentBuilder)[] {
+  return paths.slice(0, 10).map((p) =>
+    filename ? new AttachmentBuilder(p, { name: filename }) : p)
 }
 
 /** Thin discord.js wrapper. Caller supplies handlers; this owns the client + I/O. */
@@ -268,5 +277,19 @@ export class Gateway {
   async sendPlain(chatId: string, text: string): Promise<void> {
     const ch = await this.client.channels.fetch(chatId)
     if (ch && "send" in ch) await (ch as any).send({ content: text })
+  }
+
+  /** Post a message carrying file attachments. Fire-and-forget: a fetch/send
+   *  failure is logged, never thrown (the agent's turn already moved on). */
+  async sendFiles(chatId: string, paths: string[], caption?: string, filename?: string): Promise<void> {
+    try {
+      const ch = await this.client.channels.fetch(chatId)
+      if (!ch || !("send" in ch)) return
+      const files = buildAttachmentFiles(paths, filename)
+      if (!files.length) return
+      await (ch as any).send({ ...(caption ? { content: caption } : {}), files })
+    } catch (e) {
+      process.stderr.write(`gateway: sendFiles to ${chatId} failed: ${e}\n`)
+    }
   }
 }

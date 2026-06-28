@@ -59,3 +59,22 @@ gt("buildModal integrates for a feedback button (smoke)", () => {
   const m = bm("fix:feedback:T1", { title: "Feedback", inputs: [{ id: "feedback", label: "Note", style: "paragraph" }] })
   ge(m.data.custom_id).toBe("fix:feedback:T1")
 })
+
+import { buildAttachmentFiles } from "./gateway"
+import { AttachmentBuilder } from "discord.js"
+
+test("buildAttachmentFiles clamps to 10 files and overrides the display name", () => {
+  // no filename → raw path strings (discord.js uses the basename)
+  const plain = buildAttachmentFiles(["/out/a.pdf", "/out/b.pdf"])
+  expect(plain).toEqual(["/out/a.pdf", "/out/b.pdf"])
+
+  // filename override → an AttachmentBuilder carrying that name
+  const named = buildAttachmentFiles(["/out/report.pdf"], "Weekly Report.pdf")
+  expect(named.length).toBe(1)
+  expect(named[0]).toBeInstanceOf(AttachmentBuilder)
+  expect((named[0] as AttachmentBuilder).name).toBe("Weekly Report.pdf")
+
+  // Discord allows at most 10 attachments per message
+  const many = buildAttachmentFiles(Array.from({ length: 15 }, (_, i) => `/out/${i}.txt`))
+  expect(many.length).toBe(10)
+})
