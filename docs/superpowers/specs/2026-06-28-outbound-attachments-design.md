@@ -50,8 +50,13 @@ agent → attach_file(chat_id, path, caption?, filename?)        [shim/server.ts
 ### 1. Agent-facing MCP tool — `shim/server.ts`
 
 New tool, listed **only when the feature is enabled** (same conditional pattern
-as `ask_agent` under `CONSULT`; gated by an env flag the hub sets when
-`outboundAttachments.enabled`):
+as `ask_agent` under `CONSULT`). The shim is launched by Claude as an MCP server
+and sees only the `env` block in its MCP config — NOT the hub's `process.env` —
+so the `ATTACH_FILES=1` gate is injected through `buildShimMcpConfig`
+(`hub/transports/streamJsonFraming.ts`), threaded from `attachEnabled:
+!!hub.outboundAttachments?.enabled` exactly as `CONSULT` is. (An earlier draft set
+`process.env.ATTACH_FILES` in the hub and relied on inheritance; that does not
+reach the shim and was corrected before deploy.)
 
 ```
 attach_file(chat_id, path, caption?, filename?)

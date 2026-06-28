@@ -65,8 +65,6 @@ loadEnv(join(hub.stateDir, ".env"))   // load DISCORD_BOT_TOKEN + agent env if p
 const startedAt = Date.now()          // for the metrics/health uptime gauge
 const token = process.env[hub.botTokenEnv]
 if (!token) { console.error(`missing ${hub.botTokenEnv}`); process.exit(1) }
-// Expose the attach_file tool to spawned shims (they inherit process.env).
-if (hub.outboundAttachments?.enabled) process.env.ATTACH_FILES = "1"
 
 const gateway = new Gateway(hub, agents)
 const deployApprover = hub.deployApproverUserId ?? ""
@@ -385,6 +383,7 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonT
     resumable: cfg.runtime.resumable === true,
     sessionPath: join(hub.stateDir, `${key}.session`),
     consultEnabled: !!hub.consult?.enabled,
+    attachEnabled: !!hub.outboundAttachments?.enabled,
     onOverflow: (inbound) => {
       // Consults in the retry loop own their own retry/settle lifecycle — don't
       // short-circuit them here, just drop the overflow silently.
