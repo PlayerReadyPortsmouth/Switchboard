@@ -30,6 +30,7 @@ export function loadConfigs(dir: string): { hub: HubConfig; agents: AgentRegistr
   hub.stateDir = expandHome(hub.stateDir)
   if (hub.outboundAttachments?.outboxDir)
     hub.outboundAttachments.outboxDir = expandHome(hub.outboundAttachments.outboxDir)
+  if (hub.shareLinks?.artifactsDir) hub.shareLinks.artifactsDir = expandHome(hub.shareLinks.artifactsDir)
   for (const a of Object.values(agents)) a.runtime.cwd = expandHome(a.runtime.cwd)
 
   if (!agents[hub.defaultAgent]) {

@@ -1,5 +1,5 @@
 import { join, dirname } from "path"
-import { unlinkSync, appendFileSync, mkdirSync, readFileSync, writeFileSync, existsSync, statSync, renameSync, readdirSync } from "fs"
+import { unlinkSync, appendFileSync, mkdirSync, readFileSync, writeFileSync, existsSync, statSync, renameSync, readdirSync, rmSync } from "fs"
 import { config as loadEnv } from "./env"
 import { loadConfigs } from "./config"
 import { BaseGate } from "./baseGate"
@@ -59,6 +59,9 @@ import { MissionRegistry, findWorkflow, renderStepPrompt, renderMissionCard, typ
 import type { AgentConfig, AgentReply, InboundMessage, SpawnTrigger, SpawnCardUpdate, CardSpec, DirectCommand, OutboundRoute } from "./types"
 import { resolveOutboxFile } from "./outboxAttach"
 import { makeAttachHandler } from "./attachHandler"
+import { publishArtifact } from "./publishLink"
+import { selectExpired } from "./publishCleanup"
+import { randomBytes } from "crypto"
 
 const CONFIG_DIR = process.env.SWITCHBOARD_CONFIG ?? join(import.meta.dir, "..", "config")
 const { hub, agents } = loadConfigs(CONFIG_DIR)
@@ -376,6 +379,22 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonT
       })
     },
   }))
+  if (shareLinksOn) {
+    socket.onPublish(async (a) => {
+      const io = {
+        mkdir: (d: string) => mkdirSync(d, { recursive: true }),
+        writeFile: (p: string, data: Buffer | string) => writeFileSync(p, data),
+        rename: (f: string, t: string) => renameSync(f, t),
+      }
+      const r = publishArtifact(a, {
+        artifactsDir: shareArtifactsDir, raHost: hub.shareLinks?.raHost ?? "readyapp.player-ready.co.uk",
+        agent: name, outboxBase: shareOutboxBase, maxBytes: hub.shareLinks?.maxBytes ?? 26_214_400,
+        defaultTtlDays: hub.shareLinks?.defaultTtlDays ?? 30, now: new Date(), randomToken: () => base62(randomBytes(16)),
+      }, io)
+      if (!auditOptedOut(name)) audit.record({ kind: "event", actor: `agent:${name}`, action: "publish_link", outcome: r.ok ? "ok" : "deny", detail: r.ok ? { token: r.token } : { reason: r.reason } })
+      return r.ok ? { url: r.url } : { error: r.reason }
+    })
+  }
   const t = new StreamJsonTransport(name, cfg, {
     spawner,
     socket,
@@ -386,6 +405,7 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonT
     sessionPath: join(hub.stateDir, `${key}.session`),
     consultEnabled: !!hub.consult?.enabled,
     attachEnabled: !!hub.outboundAttachments?.enabled,
+    publishEnabled: shareLinksOn,
     onOverflow: (inbound) => {
       // Consults in the retry loop own their own retry/settle lifecycle — don't
       // short-circuit them here, just drop the overflow silently.
@@ -807,6 +827,10 @@ const dispatchTransports: AgentTransport[] = []
 const pools = new Map<string, ReplicaPool>()
 const toolObs = hub.toolObservability?.enabled === true
 const toolUsage = new ToolUsageRegistry()
+const shareLinksOn = hub.shareLinks?.enabled === true
+const shareArtifactsDir = hub.shareLinks?.artifactsDir ?? join(hub.stateDir, "share-artifacts")
+const shareOutboxBase = hub.outboundAttachments?.outboxDir ?? join(hub.stateDir, "outbox")
+const base62 = (b: Buffer) => { const A = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"; let n = 0n; for (const x of b) n = n * 256n + BigInt(x); let s = ""; while (n > 0n) { s = A[Number(n % 62n)] + s; n /= 62n } return s.padStart(22, "0") }
 for (const [name, cfg] of Object.entries(agents)) {
   if (cfg.mode !== "persistent") continue
   const primary = makeTransport(name, name, cfg)
@@ -989,6 +1013,27 @@ if (toolObs && toolBoardChannel) {
   const refresh = hub.statusRefreshMs ?? 15_000
   setInterval(() => void flushToolBoard(), refresh).unref()
   setTimeout(() => void flushToolBoard(), 3_000).unref()
+}
+
+if (shareLinksOn) {
+  const sweep = () => {
+    let names: string[] = []
+    try { names = readdirSync(shareArtifactsDir) } catch { return }
+    const now = new Date()
+    const entries = names.filter((n) => !n.endsWith(".tmp")).map((token) => {
+      try { const m = JSON.parse(readFileSync(join(shareArtifactsDir, token, "meta.sbmd"), "utf8")); return { token, expiresAt: m.expiresAt as string } }
+      catch { let ageMs = 0; try { ageMs = now.getTime() - statSync(join(shareArtifactsDir, token)).mtimeMs } catch {}; return { token, ageMs } }
+    })
+    // also reap abandoned *.tmp dirs older than the grace period
+    for (const n of names.filter((x) => x.endsWith(".tmp"))) {
+      try { if (now.getTime() - statSync(join(shareArtifactsDir, n)).mtimeMs > 3_600_000) rmSync(join(shareArtifactsDir, n), { recursive: true, force: true }) } catch {}
+    }
+    for (const token of selectExpired(entries, now, 3_600_000)) {
+      try { rmSync(join(shareArtifactsDir, token), { recursive: true, force: true }) } catch {}
+    }
+  }
+  setInterval(sweep, hub.shareLinks?.cleanupIntervalMs ?? 86_400_000).unref()
+  setTimeout(sweep, 30_000).unref()
 }
 
 const baseGate = new BaseGate(join(hub.stateDir, "access.json"))
