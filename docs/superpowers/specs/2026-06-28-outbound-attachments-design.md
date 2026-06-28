@@ -172,13 +172,18 @@ logged with the file + outcome), and the **extension allowlist**. The per-agent
 outbox keeps one agent from reading another's *staged* files, but is not a
 sandbox around the agent's own host access.
 
-> **TOCTOU note (deferred hardening):** `resolveOutboxFile` validates the
-> canonical path, but `gateway.sendFiles` passes the path string to discord.js,
-> which reads it lazily at REST time — a window in which a hostile agent could
-> swap the file for an out-of-outbox symlink. Strictly weaker than the direct
-> copy above, so it only matters if containment is ever treated as a hard
-> boundary. Closeable by reading the ≤8 MB file into a Buffer at validation time
-> and sending the Buffer. Not done here (see fast-follows).
+> **TOCTOU / delivery-audit hardening (done):** `resolveOutboxFile` now reads the
+> validated file into a `Buffer` synchronously, immediately after the realpath
+> containment check (no intervening `await`), and only that Buffer — never a path
+> string — is handed to discord.js. This closes the window where a hostile agent
+> could swap the validated file for an out-of-outbox symlink before discord.js's
+> lazy read (I3). The handler also `await`s delivery and audits the *real*
+> outcome, posting a "could not deliver" note and a `deny`/`delivery` audit row
+> when the Discord send fails, so the ledger reflects delivery rather than mere
+> dispatch (I2). **Known residual:** a microsecond cross-process race between the
+> `statSync` and `readFileSync` syscalls remains (a fully bulletproof close would
+> `open()` once and `fstat`+`read` the same fd); strictly weaker than the direct
+> copy above and out of scope for the chosen threat model.
 
 ## Testing
 
