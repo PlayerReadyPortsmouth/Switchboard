@@ -13,7 +13,7 @@ const note = (t: string): NoteSummary => ({ path: `/v/global/${t}.md`, scope: "g
 
 test("renderListCard: a View + Forget button per note, gated by Discord's 25-component cap", () => {
   const notes = [note("one"), note("two")]
-  const card = renderListCard(notes, "m1", 0, 3, "global")
+  const card = renderListCard(notes, "m1", 0, 3, "global", 5)
   expect(card.title).toContain("global")
   // one field per note
   expect(card.fields!.length).toBe(2)
@@ -28,7 +28,7 @@ test("renderListCard: a View + Forget button per note, gated by Discord's 25-com
 })
 
 test("renderListCard: empty notes → a placeholder, no per-note buttons", () => {
-  const card = renderListCard([], "m1", 0, 1, "global")
+  const card = renderListCard([], "m1", 0, 1, "global", 5)
   expect(card.fields!.length).toBe(1)
   expect(card.fields![0].value).toContain("no notes")
   expect(card.buttons.every(b => !b.customId.startsWith("mem:view"))).toBe(true)
@@ -50,4 +50,11 @@ test("renderConfirmCard wording + action differ for archive vs permanent delete"
   const d = renderConfirmCard("del", "one", "m1", 0)
   expect(d.body.toLowerCase()).toContain("permanently")
   expect(d.buttons.map(b => b.customId)).toContain("mem:confirmdel:m1:0")  // delete → confirmdel (kind explicit)
+})
+
+test("renderListCard encodes ABSOLUTE note indices (page drift safety)", () => {
+  const card = renderListCard([note("x")], "m1", 1, 3, "global", 5)   // page 1, pageSize 5
+  const ids = card.buttons.map(b => b.customId)
+  expect(ids).toContain("mem:view:m1:5")     // abs = 1*5 + 0
+  expect(ids).toContain("mem:forget:m1:5")
 })

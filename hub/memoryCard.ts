@@ -18,16 +18,20 @@ export function parseMemArg(arg: string): { corrId: string; idx?: number } {
 
 const clip = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + "…" : s)
 
-export function renderListCard(notes: NoteSummary[], corrId: string, page: number, pageCount: number, label: string): CardSpec {
-  const fields = notes.map((n, i) => ({
-    name: `${i}. ${clip(n.title, 80)}`,
-    value: `\`${n.scope}\` · ${n.source}${n.tags.length ? " · " + n.tags.map(t => `#${t}`).join(" ") : ""}`,
-  }))
+export function renderListCard(notes: NoteSummary[], corrId: string, page: number, pageCount: number, label: string, pageSize: number): CardSpec {
+  const fields = notes.map((n, i) => {
+    const abs = page * pageSize + i
+    return {
+      name: `${abs}. ${clip(n.title, 80)}`,
+      value: `\`${n.scope}\` · ${n.source}${n.tags.length ? " · " + n.tags.map(t => `#${t}`).join(" ") : ""}`,
+    }
+  })
   if (!fields.length) fields.push({ name: "—", value: "_no notes in this view_" })
   const buttons: CardSpec["buttons"] = []
   notes.forEach((_, i) => {
-    buttons.push({ customId: encodeMemId("view", corrId, i), label: `View ${i}`, style: "secondary" })
-    buttons.push({ customId: encodeMemId("forget", corrId, i), label: `Forget ${i}`, style: "danger" })
+    const abs = page * pageSize + i
+    buttons.push({ customId: encodeMemId("view", corrId, abs), label: `View ${abs}`, style: "secondary" })
+    buttons.push({ customId: encodeMemId("forget", corrId, abs), label: `Forget ${abs}`, style: "danger" })
   })
   if (pageCount > 1) {
     buttons.push({ customId: encodeMemId("prev", corrId), label: "◀ Prev", style: "primary" })

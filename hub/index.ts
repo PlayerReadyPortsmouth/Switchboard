@@ -138,7 +138,7 @@ const memBrowse = new MemoryBrowse({
   list: (scopes) => memoryStore.list(scopes as any).map(toSummary),
   readBody: (path) => { try { return memoryStore.read(path).body } catch { return "" } },
   exists: (path) => { try { memoryStore.read(path); return true } catch { return false } },
-  archive: (path) => { try { memoryStore.archive(path) } catch (e) { process.stderr.write(`memory-browse archive: ${e}\n`) } },
+  archive: (path) => { try { memoryStore.archive(path); return true } catch (e) { process.stderr.write(`memory-browse archive: ${e}\n`); return false } },
   remove: (path) => memoryStore.remove(path),
   deindex: (path) => { void Promise.resolve(vectorIndex.remove(path)).catch(() => {}) },
   audit: (action, actor, detail) => audit.record({ kind: "event", actor: `user:${actor}`, action, outcome: "ok", detail }),
@@ -1022,11 +1022,11 @@ async function handleMemButton(action: string, arg: { corrId: string; idx?: numb
   if (!s) return
   const chatId = s.chatId
   const pageCount = Math.max(1, Math.ceil(s.notes.length / PAGE))
-  const pageNotes = () => s.notes.slice(s.page * PAGE, s.page * PAGE + PAGE)
-  const noteAt = (i?: number) => (i === undefined ? undefined : pageNotes()[i])
+  const shown = () => s.notes.slice(s.page * PAGE, s.page * PAGE + PAGE)
+  const noteAt = (i?: number) => (i === undefined ? undefined : s.notes[i])
   if (action === "next" || action === "prev") {
     memSessions.setPage(arg.corrId, Math.max(0, Math.min(pageCount - 1, s.page + (action === "next" ? 1 : -1))))
-    await gateway.sendCard(chatId, renderListCard(pageNotes(), arg.corrId, s.page, pageCount, s.label)); return
+    await gateway.sendCard(chatId, renderListCard(shown(), arg.corrId, s.page, pageCount, s.label, PAGE)); return
   }
   if (action === "view") {
     const n = noteAt(arg.idx); if (!n) return
@@ -1044,7 +1044,13 @@ async function handleMemButton(action: string, arg: { corrId: string; idx?: numb
       ? memBrowse.remove({ path: n.path, title: n.title, scope: n.scope }, userId)
       : memBrowse.forget({ path: n.path, title: n.title, scope: n.scope }, userId)
     const verb = action === "confirmdel" ? "🗑 Deleted" : "🗄 Archived"
-    await gateway.sendPlain(chatId, r.ok ? `${verb} **${n.title}**.` : `⚠️ "${n.title}" no longer exists.`)
+    if (!r.ok) {
+      const msg = r.reason === "archive_failed"
+        ? `⚠️ Could not archive **${n.title}** (already archived?).`
+        : `⚠️ "${n.title}" no longer exists.`
+      await gateway.sendPlain(chatId, msg); return
+    }
+    await gateway.sendPlain(chatId, `${verb} **${n.title}**.`)
     return
   }
 }
@@ -1057,7 +1063,10 @@ gateway.onNotifyButton((customId, userId) => {
   if (action) { void cardLifecycle.runGated(action, customId); return }
   const mem = parseNotifyCustomId(customId)
   if (memBrowseOn && mem?.ns === "mem") {
-    if (!isMemOperator(userId)) return
+    if (!isMemOperator(userId)) {
+      audit.record({ kind: "event", actor: `user:${userId}`, action: "memory_deny", outcome: "deny", detail: { via: "button" } })
+      return
+    }
     void handleMemButton(mem.action, parseMemArg(mem.arg), userId)
     return
   }
@@ -1327,7 +1336,10 @@ gateway.handleInbound((m) => {
     return
   }
   if (memBrowseOn && /^!memory\b/i.test(trimmed)) {
-    if (!isMemOperator(m.userId)) { void gateway.sendPlain(m.chatId, "🔒 `!memory` is operator-only."); return }
+    if (!isMemOperator(m.userId)) {
+      audit.record({ kind: "event", actor: `user:${m.userId}`, action: "memory_deny", outcome: "deny", detail: { via: "command" } })
+      void gateway.sendPlain(m.chatId, "🔒 `!memory` is operator-only."); return
+    }
     const rest = trimmed.replace(/^!memory\b/i, "").trim()
     void (async () => {
       let notes: NoteSummary[]; let label: string
@@ -1343,7 +1355,7 @@ gateway.handleInbound((m) => {
       }
       const corrId = memSessions.create({ chatId: m.chatId, scopes: [label], label, notes, pageSize: PAGE })
       const pageCount = Math.max(1, Math.ceil(notes.length / PAGE))
-      await gateway.sendCard(m.chatId, renderListCard(notes.slice(0, PAGE), corrId, 0, pageCount, label))
+      await gateway.sendCard(m.chatId, renderListCard(notes.slice(0, PAGE), corrId, 0, pageCount, label, PAGE))
     })()
     return
   }

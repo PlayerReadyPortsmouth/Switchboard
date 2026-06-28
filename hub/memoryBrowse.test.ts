@@ -11,7 +11,7 @@ function deps(over: Partial<MemoryBrowseDeps> = {}) {
     list: () => [note("a"), note("b")],
     readBody: () => "body",
     exists: () => true,
-    archive: (p) => calls.archive.push(p),
+    archive: (p) => { calls.archive.push(p); return true },
     remove: (p) => calls.remove.push(p),
     deindex: (p) => calls.deindex.push(p),
     audit: (action, actor, detail) => calls.audit.push({ action, actor, detail }),
@@ -53,6 +53,14 @@ test("a de-index failure still archives + audits (de-index is best-effort)", () 
   expect(r.ok).toBe(true)
   expect(calls.archive).toEqual(["/v/a.md"])
   expect(calls.audit.length).toBe(1)
+})
+
+test("forget with archive failure → {ok:false, reason:'archive_failed'}, no de-index or audit", () => {
+  const { d, calls } = deps({ archive: () => false })
+  const r = new MemoryBrowse(d).forget({ path: "/v/a.md", title: "a", scope: "global" }, "u1")
+  expect(r).toEqual({ ok: false, reason: "archive_failed" })
+  expect(calls.deindex).toEqual([])
+  expect(calls.audit).toEqual([])
 })
 
 test("list passes through the deps", () => {
