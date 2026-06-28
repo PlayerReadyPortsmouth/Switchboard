@@ -26,6 +26,7 @@ export class ShimSocketServer {
   private postWebhookCb: (w: { target: string; body?: string }) => void = () => {}
   private askAgentCb: (q: { agent: string; message: string }) => Promise<string> = async () => ""
   private attachCb: (a: { chatId: string; path: string; caption?: string; filename?: string }) => void = () => {}
+  private publishCb: (a: { path: string; mode?: string; title?: string; scope?: string; ttlDays?: number }) => Promise<{ url?: string; error?: string }> = async () => ({})
 
   constructor(private socketPath: string) {}
 
@@ -40,6 +41,7 @@ export class ShimSocketServer {
   onPostWebhook(cb: typeof this.postWebhookCb) { this.postWebhookCb = cb }
   onAskAgent(cb: typeof this.askAgentCb) { this.askAgentCb = cb }
   onAttach(cb: typeof this.attachCb) { this.attachCb = cb }
+  onPublish(cb: typeof this.publishCb) { this.publishCb = cb }
   isRegistered() { return this.registered }
 
   async listen(): Promise<void> {
@@ -81,6 +83,11 @@ export class ShimSocketServer {
         // Request/response: run the consulted agent, then write its answer back by id.
         void this.askAgentCb({ agent: m.agent, message: m.message }).then((answer) => {
           try { socket.write(encode({ t: "ask_agent_result", id: m.id, answer })) } catch {}
+        })
+        break
+      case "publish":
+        void this.publishCb({ path: m.path, mode: m.mode, title: m.title, scope: m.scope, ttlDays: m.ttlDays }).then((res) => {
+          try { socket.write(encode({ t: "publish_result", id: m.id, url: res.url, error: res.error })) } catch {}
         })
         break
     }

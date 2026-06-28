@@ -87,7 +87,7 @@ export function buildClaudeArgv(o: ClaudeArgvOpts): string[] {
  *  hub's process.env), so per-feature tool gates must be injected here.
  *  `consultEnabled` sets CONSULT=1 (exposes ask_agent); `attachEnabled` sets
  *  ATTACH_FILES=1 (exposes attach_file). */
-export function buildShimMcpConfig(shimPath: string, socketPath: string, agentName: string, consultEnabled = false, attachEnabled = false) {
+export function buildShimMcpConfig(shimPath: string, socketPath: string, agentName: string, consultEnabled = false, attachEnabled = false, publishEnabled = false) {
   return {
     mcpServers: {
       "switchboard-shim": {
@@ -96,6 +96,7 @@ export function buildShimMcpConfig(shimPath: string, socketPath: string, agentNa
           HUB_SOCKET: socketPath, AGENT_NAME: agentName,
           ...(consultEnabled ? { CONSULT: "1" } : {}),
           ...(attachEnabled ? { ATTACH_FILES: "1" } : {}),
+          ...(publishEnabled ? { PUBLISH_LINK: "1" } : {}),
         },
       },
     },
