@@ -29,7 +29,7 @@ test("happy path: a file written into the outbox resolves", () => {
   writeFileSync(join(base, agent, "report.pdf"), "hello")
   const r = resolveOutboxFile("report.pdf", opts)
   expect(r.ok).toBe(true)
-  if (r.ok) { expect(r.filename).toBe("report.pdf"); expect(r.size).toBe(5) }
+  if (r.ok) { expect(r.filename).toBe("report.pdf"); expect(r.size).toBe(5); expect(r.bytes.toString()).toBe("hello") }
 })
 
 test("rejects parent-traversal escaping the outbox", () => {

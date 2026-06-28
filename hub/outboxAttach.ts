@@ -1,9 +1,9 @@
 // hub/outboxAttach.ts
-import { realpathSync, statSync, mkdirSync } from "fs"
+import { realpathSync, statSync, mkdirSync, readFileSync } from "fs"
 import { join, sep, extname, basename } from "path"
 
 export type OutboxResult =
-  | { ok: true; absPath: string; filename: string; size: number }
+  | { ok: true; absPath: string; filename: string; size: number; bytes: Buffer }
   | { ok: false; reason: "escape" | "missing" | "notfile" | "oversize" | "extension" }
 
 export interface OutboxOpts {
@@ -37,5 +37,7 @@ export function resolveOutboxFile(relPath: string, opts: OutboxOpts): OutboxResu
   if (opts.allowedExtensions.length && !opts.allowedExtensions.includes(ext))
     return { ok: false, reason: "extension" }
 
-  return { ok: true, absPath: real, filename: basename(real), size: st.size }
+  let bytes: Buffer
+  try { bytes = readFileSync(real) } catch { return { ok: false, reason: "missing" } }
+  return { ok: true, absPath: real, filename: basename(real), size: st.size, bytes }
 }

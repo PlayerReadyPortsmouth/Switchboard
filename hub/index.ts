@@ -367,7 +367,7 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonT
       maxBytes: oa?.maxBytes ?? 8_388_608,
       allowedExtensions: (oa?.allowedExtensions ?? []).map((e) => e.toLowerCase()),
     }),
-    sendFiles: (chatId, paths, caption, filename) => void gateway.sendFiles(chatId, paths, caption, filename),
+    sendFiles: (chatId, attachments, caption) => gateway.sendFiles(chatId, attachments, caption),
     note: (chatId, text) => void gateway.sendPlain(chatId, text),
     audit: (ok, chatId, detail) => {
       if (!auditOptedOut(name)) audit.record({
