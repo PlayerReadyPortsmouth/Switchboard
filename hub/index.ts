@@ -805,6 +805,8 @@ async function runSpawnTrigger(trig: SpawnTrigger, groups: string[], chatId: str
 // without one it's a single transport exactly as before.
 const dispatchTransports: AgentTransport[] = []
 const pools = new Map<string, ReplicaPool>()
+const toolObs = hub.toolObservability?.enabled === true
+const toolUsage = new ToolUsageRegistry()
 for (const [name, cfg] of Object.entries(agents)) {
   if (cfg.mode !== "persistent") continue
   const primary = makeTransport(name, name, cfg)
@@ -890,8 +892,6 @@ const governor = new SessionGovernor({
 // persistent agent (alive/busy/context%/queue/cost), what the overseer/governor
 // is doing, the router's recent picks, and live ephemeral agents. Read-only.
 const statusRegistry = new StatusRegistry()
-const toolObs = hub.toolObservability?.enabled === true
-const toolUsage = new ToolUsageRegistry()
 const boardThrottle = new Throttle(5_000)   // ≤1 Discord edit per 5s
 const boardMsgPath = join(expandHome(hub.stateDir), "status-board-msg.txt")
 let boardMsgId: string | undefined = (() => {
@@ -1252,6 +1252,7 @@ gateway.handleInbound((m) => {
     return
   }
   if (toolObs && /^!tools\b/i.test(trimmed)) {
+    if (!baseGate.listAllowed().includes(m.userId)) return
     const who = trimmed.replace(/^!tools\b/i, "").trim()
     const fmt = (a: { agent: string; tools: Record<string, { count: number; errors: number }> }) =>
       `**${a.agent}** — ` + (Object.entries(a.tools)
