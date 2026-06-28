@@ -39,3 +39,39 @@ test("both flags can be set together", () => {
   expect(e.CONSULT).toBe("1")
   expect(e.ATTACH_FILES).toBe("1")
 })
+
+test("parseStreamEvent extracts tool_use blocks from an assistant frame", () => {
+  const line = JSON.stringify({ type: "assistant", message: {
+    content: [
+      { type: "text", text: "running it" },
+      { type: "tool_use", id: "t1", name: "Bash", input: { command: "ls" } },
+      { type: "tool_use", id: "t2", name: "Read", input: { path: "x" } },
+    ],
+    usage: { input_tokens: 5, cache_read_input_tokens: 50, cache_creation_input_tokens: 0, output_tokens: 2 },
+  } })
+  expect(parseStreamEvent(line)).toEqual({
+    kind: "assistant",
+    usage: { inputTokens: 5, cacheReadTokens: 50, cacheCreationTokens: 0, outputTokens: 2 },
+    tools: [{ id: "t1", name: "Bash" }, { id: "t2", name: "Read" }],
+  })
+})
+
+test("parseStreamEvent: assistant frame with no tool_use → no tools field", () => {
+  const line = JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "hi" }] } })
+  expect(parseStreamEvent(line)).toEqual({ kind: "assistant" })
+})
+
+test("parseStreamEvent parses tool_result blocks off a user frame", () => {
+  const line = JSON.stringify({ type: "user", message: { content: [
+    { type: "tool_result", tool_use_id: "t1", is_error: true, content: "boom" },
+    { type: "tool_result", tool_use_id: "t2", content: "ok" },
+  ] } })
+  expect(parseStreamEvent(line)).toEqual({
+    kind: "tool_result",
+    results: [{ id: "t1", isError: true }, { id: "t2", isError: false }],
+  })
+})
+
+test("parseStreamEvent: a user frame with no tool_result → null (noise)", () => {
+  expect(parseStreamEvent(JSON.stringify({ type: "user", message: { content: [{ type: "text", text: "hi" }] } }))).toBeNull()
+})

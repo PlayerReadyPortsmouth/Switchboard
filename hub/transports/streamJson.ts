@@ -83,6 +83,8 @@ export class StreamJsonTransport implements AgentTransport {
   // every tool-call and sub-agent and would over-count). Reset at each turn end.
   private lastAssistantUsage: TurnUsage | null = null
   private cb: (r: AgentReply) => void = () => {}
+  private toolUseCb: (tools: { id: string; name: string }[]) => void = () => {}
+  private toolResultCb: (results: { id: string; isError: boolean }[]) => void = () => {}
   private gate: TurnGate
 
   constructor(
@@ -105,6 +107,8 @@ export class StreamJsonTransport implements AgentTransport {
   }
 
   onReply(cb: (r: AgentReply) => void): void { this.cb = cb }
+  onToolUse(cb: typeof this.toolUseCb): void { this.toolUseCb = cb }
+  onToolResult(cb: typeof this.toolResultCb): void { this.toolResultCb = cb }
   isAvailable(): boolean { return this.alive }
 
   async start(): Promise<void> {
@@ -178,6 +182,11 @@ export class StreamJsonTransport implements AgentTransport {
           // Remember this call's prompt size; the final one of the turn is the
           // live context fill (see lastAssistantUsage).
           if (ev.usage) this.lastAssistantUsage = ev.usage
+          if (ev.tools?.length) this.toolUseCb(ev.tools)
+          return
+        }
+        if (ev?.kind === "tool_result") {
+          this.toolResultCb(ev.results)
           return
         }
         if (ev?.kind === "result") {

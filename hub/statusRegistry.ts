@@ -10,6 +10,8 @@ export interface AgentStatus {
   costUsd?: number         // cumulative session cost
   replicas?: number        // >1 when the agent is pooled (increment 5)
   lastActivityMs: number
+  currentTool?: string | null            // tool the agent is running right now (live)
+  lastTool?: { name: string; error: boolean }  // last tool used this/previous turn
 }
 
 /** A single routing decision by the Haiku resolver. */

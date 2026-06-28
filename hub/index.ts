@@ -40,6 +40,8 @@ import { SessionGovernor } from "./sessionGovernor"
 import { contextWindow } from "./usage"
 import { StatusRegistry, type AgentStatus, type OverseerStatus } from "./statusRegistry"
 import { renderBoard, Throttle } from "./statusBoard"
+import { ToolUsageRegistry } from "./toolUsageRegistry"
+import { renderToolBoard } from "./toolBoard"
 import { matchDirectCommand, runDirect, interpolateArgs, type DirectExecutor } from "./directCommands"
 import { OutboundDelivery } from "./outboundDelivery"
 import { matchOutbound, renderBody } from "./outbound"
@@ -402,6 +404,10 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonT
     },
   })
   t.onReply((reply) => { void onAgentReply(reply, key) })
+  if (toolObs) {
+    t.onToolUse((tools) => toolUsage.recordToolUse(name, tools))
+    t.onToolResult((results) => toolUsage.recordToolResult(results))
+  }
   transports.set(key, t)
   return t
 }
@@ -655,6 +661,7 @@ function emitHubEvent(event: string, data: Record<string, unknown>): void {
 /** Handle one reply from a transport: cards → Discord card (+ register buttons);
  *  text → spawn-trigger match or a plain reply; react/edit → passthrough. */
 async function onAgentReply(reply: AgentReply, key: string): Promise<void> {
+  if (toolObs) toolUsage.endTurn(reply.agent)
   // Inter-agent consult: a reply on a virtual consult channel is the answer to a
   // pending ask_agent — settle it (return the answer to the caller) and never post
   // it to Discord or run the normal reply pipeline. Settle on the first text OR
@@ -798,6 +805,8 @@ async function runSpawnTrigger(trig: SpawnTrigger, groups: string[], chatId: str
 // without one it's a single transport exactly as before.
 const dispatchTransports: AgentTransport[] = []
 const pools = new Map<string, ReplicaPool>()
+const toolObs = hub.toolObservability?.enabled === true
+const toolUsage = new ToolUsageRegistry()
 for (const [name, cfg] of Object.entries(agents)) {
   if (cfg.mode !== "persistent") continue
   const primary = makeTransport(name, name, cfg)
@@ -932,6 +941,7 @@ function buildAgentRows(): AgentStatus[] {
       costUsd: src?.lastUsageInfo()?.costUsd,
       replicas: pool?.replicaCount(),
       lastActivityMs: src?.lastActivityMs() ?? 0,
+      ...(toolObs ? { currentTool: toolUsage.liveFor(name).current, lastTool: toolUsage.liveFor(name).last } : {}),
     })
   }
   return rows
@@ -954,6 +964,31 @@ if (hub.statusChannelId) {
     requestBoardUpdate()
   }, refresh).unref()
   setTimeout(() => { statusRegistry.setAgents(buildAgentRows()); requestBoardUpdate() }, 2_000).unref()
+}
+
+const toolBoardChannel = hub.toolObservability?.channelId ?? hub.statusChannelId
+const toolBoardMsgPath = join(expandHome(hub.stateDir), "tool-board-msg.txt")
+let toolBoardMsgId: string | undefined = (() => {
+  try { const s = readFileSync(toolBoardMsgPath, "utf8").trim(); return s || undefined } catch { return undefined }
+})()
+async function flushToolBoard(): Promise<void> {
+  if (!toolObs || !toolBoardChannel) return
+  const card = renderToolBoard(toolUsage.snapshot())
+  if (toolBoardMsgId == null) {
+    toolBoardMsgId = await gateway.sendCard(toolBoardChannel, card)
+    try { writeFileSync(toolBoardMsgPath, toolBoardMsgId ?? "") } catch {}
+  } else {
+    try { await gateway.editCard(toolBoardChannel, toolBoardMsgId, card) }
+    catch {
+      toolBoardMsgId = await gateway.sendCard(toolBoardChannel, card)
+      try { writeFileSync(toolBoardMsgPath, toolBoardMsgId ?? "") } catch {}
+    }
+  }
+}
+if (toolObs && toolBoardChannel) {
+  const refresh = hub.statusRefreshMs ?? 15_000
+  setInterval(() => void flushToolBoard(), refresh).unref()
+  setTimeout(() => void flushToolBoard(), 3_000).unref()
 }
 
 const baseGate = new BaseGate(join(hub.stateDir, "access.json"))
@@ -1214,6 +1249,22 @@ gateway.handleInbound((m) => {
     const timeline = buildReplay(audit.recent({ limit: scan }), id)
     const out = renderReplay(timeline, (ts) => new Date(ts).toISOString().slice(11, 19))
     for (const chunk of chunkLines(out, 1_900)) void gateway.sendPlain(m.chatId, chunk)
+    return
+  }
+  if (toolObs && /^!tools\b/i.test(trimmed)) {
+    if (!baseGate.listAllowed().includes(m.userId)) return
+    const who = trimmed.replace(/^!tools\b/i, "").trim()
+    const fmt = (a: { agent: string; tools: Record<string, { count: number; errors: number }> }) =>
+      `**${a.agent}** — ` + (Object.entries(a.tools)
+        .sort((x, y) => y[1].count - x[1].count)
+        .map(([n, s]) => `${n} ×${s.count}${s.errors ? ` (${s.errors}✗)` : ""}`).join(" · ") || "_none_")
+    if (who) {
+      const a = toolUsage.forAgent(who)
+      void gateway.sendPlain(m.chatId, a ? fmt(a) : `_no tool activity for ${who}_`)
+    } else {
+      const snap = toolUsage.snapshot()
+      void gateway.sendPlain(m.chatId, snap.length ? snap.map(fmt).join("\n") : "_no tool activity yet_")
+    }
     return
   }
   // Health rollup (operator-only): the same data /health serves, in chat.

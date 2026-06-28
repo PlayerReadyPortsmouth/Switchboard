@@ -15,6 +15,8 @@ export function agentLine(a: AgentStatus): string {
   if (a.queueDepth > 0) parts.push(`q:${a.queueDepth}`)
   if (typeof a.costUsd === "number") parts.push(`$${a.costUsd.toFixed(2)}`)
   if (a.replicas && a.replicas > 1) parts.push(`×${a.replicas}`)
+  if (a.busy && a.currentTool) parts.push(`⚙ ${a.currentTool}`)
+  else if (!a.busy && a.lastTool?.error) parts.push(`⚠ ${a.lastTool.name} failed`)
   return parts.join("  ")
 }
 
