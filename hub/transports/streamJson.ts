@@ -1,6 +1,6 @@
 import { writeFileSync, unlinkSync, readFileSync } from "fs"
 import type { AgentConfig, AgentReply, InboundMessage, CardSpec, TurnUsage } from "../types"
-import { contextTokens, fillPct } from "../usage"
+import { contextTokens, fillPct, blendUsage } from "../usage"
 import { TurnGate } from "../turnGate"
 import type { AgentTransport } from "./index"
 import {
@@ -78,6 +78,10 @@ export class StreamJsonTransport implements AgentTransport {
   private cardThisTurn = false
   private lastActivity = Date.now()
   private lastUsage: TurnUsage | null = null
+  // The most recent `assistant` frame's usage this turn ≈ the live prompt size.
+  // Used for context fill instead of the cumulative `result` usage (which sums
+  // every tool-call and sub-agent and would over-count). Reset at each turn end.
+  private lastAssistantUsage: TurnUsage | null = null
   private cb: (r: AgentReply) => void = () => {}
   private gate: TurnGate
 
@@ -170,19 +174,28 @@ export class StreamJsonTransport implements AgentTransport {
           }
           return
         }
+        if (ev?.kind === "assistant") {
+          // Remember this call's prompt size; the final one of the turn is the
+          // live context fill (see lastAssistantUsage).
+          if (ev.usage) this.lastAssistantUsage = ev.usage
+          return
+        }
         if (ev?.kind === "result") {
-          // Capture this turn's token/cost usage (when the CLI reported it) so the
-          // hub can estimate context fill, drive the session governor, and surface
-          // it on the live status board. Usage rides out on the reply too.
-          if (ev.usage) this.lastUsage = ev.usage
+          // Context-fill fields come from the final assistant call (the live
+          // prompt), cost/meta from the cumulative result usage. This stops the
+          // governor + status board reading summed tool-loop/sub-agent usage as
+          // context size (which over-counted, e.g. fill > 100% → spurious compaction).
+          const usage = blendUsage(this.lastAssistantUsage ?? undefined, ev.usage)
+          if (usage) this.lastUsage = usage
           // The agent's end-of-turn text is posted as a reply ONLY when it didn't
           // already communicate via a card this turn — a card IS the message, so the
           // transcript summary underneath it is redundant noise. Turns with no card
           // (e.g. a short "Backlogged" acknowledgement) still post their text.
           if (!this.cardThisTurn) {
-            this.cb({ agent: this.name, kind: "reply", chatId: this.lastChatId, text: ev.text, usage: ev.usage })
+            this.cb({ agent: this.name, kind: "reply", chatId: this.lastChatId, text: ev.text, usage })
           }
           this.cardThisTurn = false
+          this.lastAssistantUsage = null   // reset for the next turn
           this.gate.turnComplete()   // turn finished → drain the next queued message
         }
       })

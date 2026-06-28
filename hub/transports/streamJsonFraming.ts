@@ -1,10 +1,10 @@
-import { parseUsage } from "../usage"
+import { parseUsage, parseUsageObj } from "../usage"
 import type { TurnUsage } from "../types"
 
 /** A parsed stdout stream-json event we care about. */
 export type StreamEvent =
   | { kind: "result"; text: string; usage?: TurnUsage }
-  | { kind: "assistant" }
+  | { kind: "assistant"; usage?: TurnUsage }
   | { kind: "init"; sessionId: string }
 
 /** Parse one newline-delimited stream-json stdout line. Returns null for noise. */
@@ -19,7 +19,12 @@ export function parseStreamEvent(line: string): StreamEvent | null {
     const usage = parseUsage(ev)
     return usage ? { kind: "result", text: ev.result, usage } : { kind: "result", text: ev.result }
   }
-  if (ev.type === "assistant") return { kind: "assistant" }
+  if (ev.type === "assistant") {
+    // The assistant message's own usage is this single call's prompt size ≈ the
+    // live context fill (bounded by the window), unlike the cumulative result usage.
+    const usage = parseUsageObj(ev.message?.usage)
+    return usage ? { kind: "assistant", usage } : { kind: "assistant" }
+  }
   return null
 }
 
