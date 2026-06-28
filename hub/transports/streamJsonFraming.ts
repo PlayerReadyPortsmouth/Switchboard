@@ -4,7 +4,8 @@ import type { TurnUsage } from "../types"
 /** A parsed stdout stream-json event we care about. */
 export type StreamEvent =
   | { kind: "result"; text: string; usage?: TurnUsage }
-  | { kind: "assistant"; usage?: TurnUsage }
+  | { kind: "assistant"; usage?: TurnUsage; tools?: { id: string; name: string }[] }
+  | { kind: "tool_result"; results: { id: string; isError: boolean }[] }
   | { kind: "init"; sessionId: string }
 
 /** Parse one newline-delimited stream-json stdout line. Returns null for noise. */
@@ -23,7 +24,21 @@ export function parseStreamEvent(line: string): StreamEvent | null {
     // The assistant message's own usage is this single call's prompt size ≈ the
     // live context fill (bounded by the window), unlike the cumulative result usage.
     const usage = parseUsageObj(ev.message?.usage)
-    return usage ? { kind: "assistant", usage } : { kind: "assistant" }
+    const content = Array.isArray(ev.message?.content) ? ev.message.content : []
+    const tools = content
+      .filter((b: any) => b?.type === "tool_use" && typeof b.id === "string" && typeof b.name === "string")
+      .map((b: any) => ({ id: b.id as string, name: b.name as string }))
+    const out: Extract<StreamEvent, { kind: "assistant" }> = { kind: "assistant" }
+    if (usage) out.usage = usage
+    if (tools.length) out.tools = tools
+    return out
+  }
+  if (ev.type === "user") {
+    const content = Array.isArray(ev.message?.content) ? ev.message.content : []
+    const results = content
+      .filter((b: any) => b?.type === "tool_result" && typeof b.tool_use_id === "string")
+      .map((b: any) => ({ id: b.tool_use_id as string, isError: !!b.is_error }))
+    return results.length ? { kind: "tool_result", results } : null
   }
   return null
 }
