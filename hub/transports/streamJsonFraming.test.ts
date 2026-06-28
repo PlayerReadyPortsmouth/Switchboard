@@ -1,5 +1,16 @@
 import { test, expect } from "bun:test"
-import { buildShimMcpConfig } from "./streamJsonFraming"
+import { buildShimMcpConfig, parseStreamEvent } from "./streamJsonFraming"
+
+test("parseStreamEvent extracts usage from an assistant frame (the live context size)", () => {
+  const line = JSON.stringify({ type: "assistant", message: { usage: {
+    input_tokens: 7, cache_read_input_tokens: 70, cache_creation_input_tokens: 0, output_tokens: 3 } } })
+  expect(parseStreamEvent(line)).toEqual({ kind: "assistant", usage: {
+    inputTokens: 7, cacheReadTokens: 70, cacheCreationTokens: 0, outputTokens: 3 } })
+})
+
+test("parseStreamEvent: an assistant frame without usage stays a bare assistant event", () => {
+  expect(parseStreamEvent(JSON.stringify({ type: "assistant", message: {} }))).toEqual({ kind: "assistant" })
+})
 
 const env = (consult: boolean, attach: boolean) =>
   (buildShimMcpConfig("/shim.ts", "/sock", "ada", consult, attach)
