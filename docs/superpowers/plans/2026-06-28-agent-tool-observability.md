@@ -188,7 +188,7 @@ test("snapshot sorts agents by total desc and is JSON-stable", () => {
 })
 
 test("pending id map is bounded (does not leak when results never arrive)", () => {
-  const r = new ToolUsageRegistry(undefined, 100)   // cap 100 for the test
+  const r = new ToolUsageRegistry(100)   // cap 100 for the test
   for (let i = 0; i < 250; i++) r.recordToolUse("ada", [{ id: `k${i}`, name: "Read" }])
   // Only the most recent 100 ids are still attributable.
   r.recordToolResult([{ id: "k0", isError: true }])    // evicted → ignored
@@ -220,7 +220,7 @@ export class ToolUsageRegistry {
   // id → {agent,name} so a later tool_result can be attributed; bounded (insertion-ordered Map, evict oldest).
   private pending = new Map<string, { agent: string; name: string }>()
 
-  constructor(private routeRing?: unknown, private pendingCap = 1000) {}
+  constructor(private pendingCap = 1000) {}
 
   private statFor(agent: string, name: string): ToolStat {
     let tools = this.agents.get(agent)
@@ -283,7 +283,6 @@ export class ToolUsageRegistry {
 }
 ```
 
-(The unused `routeRing` constructor slot keeps the signature `(_, pendingCap)` so the test's `new ToolUsageRegistry(undefined, 100)` reads naturally; if you prefer, make `pendingCap` the first arg and update the test — keep them consistent.)
 
 - [ ] **Step 4: Run to verify they pass**
 
