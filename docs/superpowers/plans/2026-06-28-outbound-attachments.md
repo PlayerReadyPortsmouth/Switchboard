@@ -52,6 +52,17 @@ function fixture() {
   return { base, agent, opts }
 }
 
+// Windows without Developer Mode / admin cannot create symlinks (EPERM). Probe
+// once so the symlink-escape test runs on Linux/macOS/CI and skips elsewhere —
+// the realpath containment still defends against symlinks regardless.
+const SYMLINKS_OK = (() => {
+  try {
+    const d = mkdtempSync(join(tmpdir(), "slk-"))
+    symlinkSync(join(d, "x"), join(d, "y"))
+    return true
+  } catch { return false }
+})()
+
 test("happy path: a file written into the outbox resolves", () => {
   const { base, agent, opts } = fixture()
   writeFileSync(join(base, agent, "report.pdf"), "hello")
@@ -66,7 +77,7 @@ test("rejects parent-traversal escaping the outbox", () => {
   expect(resolveOutboxFile("../secret.txt", opts)).toEqual({ ok: false, reason: "escape" })
 })
 
-test("rejects a symlink whose target escapes the outbox", () => {
+test.skipIf(!SYMLINKS_OK)("rejects a symlink whose target escapes the outbox", () => {
   const { base, agent, opts } = fixture()
   const secret = join(base, "secret.txt"); writeFileSync(secret, "x")
   symlinkSync(secret, join(base, agent, "link.txt"))
@@ -159,7 +170,7 @@ export function resolveOutboxFile(relPath: string, opts: OutboxOpts): OutboxResu
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `bun test hub/outboxAttach.test.ts`
-Expected: PASS — 8 tests.
+Expected: PASS — 8 tests (the symlink-escape test is skipped where symlinks cannot be created, e.g. Windows without Developer Mode; it runs on Linux/macOS/CI).
 
 - [ ] **Step 5: Typecheck**
 
