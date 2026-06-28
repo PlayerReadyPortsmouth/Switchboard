@@ -51,6 +51,7 @@ export function publishArtifact(args: PublishArgs, opts: PublishOpts, io: Publis
     outboxBase: opts.outboxBase, agent: opts.agent, maxBytes: opts.maxBytes, allowedExtensions: [],
   })
   if (!r.ok) return { ok: false, reason: r.reason }
+  if (r.filename === "meta.sbmd") return { ok: false, reason: "reserved_filename" }
 
   const inferred = inferModeAndType(r.filename)
   const mode = (args.mode && MODES.has(args.mode) ? args.mode : inferred.mode) as Sbmd["mode"]

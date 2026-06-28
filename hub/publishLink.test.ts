@@ -72,3 +72,12 @@ test("publishArtifact: an invalid explicit mode falls back to the inferred mode"
   publishArtifact({ path: "report.pdf", mode: "bogus" }, opts({ outboxBase: base }), io)
   expect(JSON.parse(calls.writeFile[1].data).mode).toBe("view")
 })
+
+test("publishArtifact: a file named meta.sbmd is rejected (reserved)", () => {
+  const base = outbox("ada", "meta.sbmd")
+  const { io, calls } = spyIo()
+  const r = publishArtifact({ path: "meta.sbmd" }, opts({ outboxBase: base }), io)
+  expect(r).toEqual({ ok: false, reason: "reserved_filename" })
+  expect(calls.writeFile).toEqual([])
+  expect(calls.rename).toEqual([])
+})
