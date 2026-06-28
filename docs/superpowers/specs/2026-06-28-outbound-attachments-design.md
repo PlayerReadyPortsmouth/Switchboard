@@ -151,16 +151,34 @@ hub.outboundAttachments: {
 ## Security notes
 
 Agents run with `--dangerously-skip-permissions`, so this tool is a genuine new
-egress channel. Containment rests on three independent limits:
+egress channel. **Be precise about what containment does and does not buy.** A
+deliberately hostile agent already has full file access and can simply copy a
+secret into its own outbox (`cat /etc/passwd > <outbox>/x.txt`) and attach
+it — no `..`, symlink, or race needed. Path containment is therefore **not** an
+exfiltration boundary against a hostile agent. Its real, narrower guarantees:
 
-1. **Outbox containment** — `realpath`-based prefix check defeats `..` and
-   symlink escapes; the agent can only attach files it deliberately wrote into
-   *its own* outbox (identity taken from the socket registration, not tool args).
+1. **Outbox containment** — the `realpath`-based prefix check defeats *accidental
+   / confused-deputy* attachment of arbitrary host paths (`..` traversal,
+   absolute paths, symlink-target escape). It forces an explicit copy into the
+   outbox, which the audit ledger then records. Agent identity is the transport's
+   `name`, never a tool arg, so one agent cannot name another's outbox.
 2. **Size cap** — bounds accidental/abusive large dumps.
 3. **Extension allowlist** (optional) — operators can restrict to document/image
    types if desired.
 
-The outbox is per-agent, so one agent cannot read another's staged files.
+The genuine defenses against deliberate exfiltration are **agent trust** (only
+enable for agents you trust on the box), the **audit trail** (every attach is
+logged with the file + outcome), and the **extension allowlist**. The per-agent
+outbox keeps one agent from reading another's *staged* files, but is not a
+sandbox around the agent's own host access.
+
+> **TOCTOU note (deferred hardening):** `resolveOutboxFile` validates the
+> canonical path, but `gateway.sendFiles` passes the path string to discord.js,
+> which reads it lazily at REST time — a window in which a hostile agent could
+> swap the file for an out-of-outbox symlink. Strictly weaker than the direct
+> copy above, so it only matters if containment is ever treated as a hard
+> boundary. Closeable by reading the ≤8 MB file into a Buffer at validation time
+> and sending the Buffer. Not done here (see fast-follows).
 
 ## Testing
 
