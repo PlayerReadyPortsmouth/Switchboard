@@ -50,3 +50,11 @@ ut("post_webhook maps to a post_webhook wire message addressed by target", () =>
   ue(wire("post_webhook", { target: "deploy-done", body: '{"ref":"v2"}' }) as any)
     .toEqual({ t: "post_webhook", target: "deploy-done", body: '{"ref":"v2"}' })
 })
+
+ut("attach_file maps to an attach wire message", () => {
+  ue(wire("attach_file", {
+    chat_id: "C1", path: "report.pdf", caption: "here you go", filename: "Report.pdf",
+  }) as any).toEqual({
+    t: "attach", chatId: "C1", path: "report.pdf", caption: "here you go", filename: "Report.pdf",
+  })
+})
