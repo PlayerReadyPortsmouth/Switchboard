@@ -55,6 +55,8 @@ import { type WebInput } from "./web"
 import { ConsultRegistry, mayConsult, consultAnswerFromReply } from "./consult"
 import { MissionRegistry, findWorkflow, renderStepPrompt, renderMissionCard, type MissionRun } from "./workflow"
 import type { AgentConfig, AgentReply, InboundMessage, SpawnTrigger, SpawnCardUpdate, CardSpec, DirectCommand, OutboundRoute } from "./types"
+import { resolveOutboxFile } from "./outboxAttach"
+import { makeAttachHandler } from "./attachHandler"
 
 const CONFIG_DIR = process.env.SWITCHBOARD_CONFIG ?? join(import.meta.dir, "..", "config")
 const { hub, agents } = loadConfigs(CONFIG_DIR)
@@ -63,6 +65,8 @@ loadEnv(join(hub.stateDir, ".env"))   // load DISCORD_BOT_TOKEN + agent env if p
 const startedAt = Date.now()          // for the metrics/health uptime gauge
 const token = process.env[hub.botTokenEnv]
 if (!token) { console.error(`missing ${hub.botTokenEnv}`); process.exit(1) }
+// Expose the attach_file tool to spawned shims (they inherit process.env).
+if (hub.outboundAttachments?.enabled) process.env.ATTACH_FILES = "1"
 
 const gateway = new Gateway(hub, agents)
 const deployApprover = hub.deployApproverUserId ?? ""
@@ -350,6 +354,27 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonT
     const discordCh = transports.get(key)?.getLastChatId() ?? ""
     retryingConsults.add(e.channel)
     void runConsultRetry(targetName, e.channel, inbound, discordCh, settle, () => consultSettled)
+  }))
+  // Agent-initiated outbound file attachment. Disabled ⇒ handler ignores the
+  // frame (double-gate alongside the tool not being listed). The agent identity
+  // is this transport's `name`, never taken from the frame.
+  const oa = hub.outboundAttachments
+  socket.onAttach(makeAttachHandler({
+    enabled: !!oa?.enabled,
+    resolve: (relPath) => resolveOutboxFile(relPath, {
+      outboxBase: oa?.outboxDir ?? join(hub.stateDir, "outbox"),
+      agent: name,
+      maxBytes: oa?.maxBytes ?? 8_388_608,
+      allowedExtensions: (oa?.allowedExtensions ?? []).map((e) => e.toLowerCase()),
+    }),
+    sendFiles: (chatId, paths, caption, filename) => void gateway.sendFiles(chatId, paths, caption, filename),
+    note: (chatId, text) => void gateway.sendPlain(chatId, text),
+    audit: (ok, chatId, detail) => {
+      if (!auditOptedOut(name)) audit.record({
+        kind: "event", actor: `agent:${name}`, action: "attach",
+        chat: chatId, outcome: ok ? "ok" : "deny", detail,
+      })
+    },
   }))
   const t = new StreamJsonTransport(name, cfg, {
     spawner,
