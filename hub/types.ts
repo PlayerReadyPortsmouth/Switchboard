@@ -290,6 +290,7 @@ export interface HubConfig {
   attachments?: AttachmentConfig // pass Discord file uploads through to agents (default off)
   outboundAttachments?: OutboundAttachmentConfig // agents attach produced files to Discord (default off)
   toolObservability?: ToolObservabilityConfig  // capture + surface per-agent tool usage (default off)
+  memoryBrowse?: MemoryBrowseConfig  // operator memory browse & forget UI (default off)
 }
 
 /** Discord file-upload passthrough. Absent/disabled ⇒ uploads are ignored exactly
@@ -307,6 +308,14 @@ export interface AttachmentConfig {
 export interface ToolObservabilityConfig {
   enabled?: boolean           // master switch (default off)
   channelId?: string          // where to post the tool board (default: statusChannelId)
+}
+
+/** Operator-only card UI to browse/search the vault and forget (archive) or
+ *  delete notes. Absent/disabled ⇒ the !memory command is unregistered and
+ *  mem: buttons are ignored (byte-identical). */
+export interface MemoryBrowseConfig {
+  enabled?: boolean         // master switch (default off)
+  operatorIds?: string[]    // user ids allowed to use it; empty ⇒ [deployApproverUserId]
 }
 
 /** Agent-initiated outbound file attachments. Absent/disabled ⇒ the attach_file

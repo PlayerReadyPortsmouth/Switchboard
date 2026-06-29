@@ -3,7 +3,7 @@ import { unlinkSync, appendFileSync, mkdirSync, readFileSync, writeFileSync, exi
 import { config as loadEnv } from "./env"
 import { loadConfigs } from "./config"
 import { BaseGate } from "./baseGate"
-import { Gateway } from "./gateway"
+import { Gateway, parseNotifyCustomId } from "./gateway"
 import { Dispatcher, type AgentTransport } from "./transports/index"
 import { StreamJsonTransport, makeBunProcessSpawner } from "./transports/streamJson"
 import { ReplicaPool } from "./agentPool"
@@ -59,6 +59,9 @@ import { MissionRegistry, findWorkflow, renderStepPrompt, renderMissionCard, typ
 import type { AgentConfig, AgentReply, InboundMessage, SpawnTrigger, SpawnCardUpdate, CardSpec, DirectCommand, OutboundRoute } from "./types"
 import { resolveOutboxFile } from "./outboxAttach"
 import { makeAttachHandler } from "./attachHandler"
+import { MemoryBrowse } from "./memoryBrowse"
+import { BrowseSessions } from "./memoryBrowseSessions"
+import { renderListCard, renderDetailCard, renderConfirmCard, parseMemArg, type NoteSummary } from "./memoryCard"
 
 const CONFIG_DIR = process.env.SWITCHBOARD_CONFIG ?? join(import.meta.dir, "..", "config")
 const { hub, agents } = loadConfigs(CONFIG_DIR)
@@ -122,6 +125,24 @@ const memoryRetriever = new MemoryRetriever({
   hotSetSize: garden.hotSetSize ?? (garden.enabled ? 3 : 0),
 })
 void memoryRetriever.reindexAll().catch((e) => process.stderr.write(`memory: reindex failed: ${e}\n`))
+
+const memBrowseOn = hub.memoryBrowse?.enabled === true
+const memOperators = (hub.memoryBrowse?.operatorIds?.length ? hub.memoryBrowse.operatorIds
+  : (hub.deployApproverUserId ? [hub.deployApproverUserId] : []))
+const isMemOperator = (uid: string) => memOperators.includes(uid)
+const toSummary = (n: { path: string; scope: string; title: string; tags: string[]; source: string; updated: string }): NoteSummary =>
+  ({ path: n.path, scope: n.scope, title: n.title, tags: n.tags, source: n.source, updated: n.updated })
+const memSessions = new BrowseSessions()
+const PAGE = 5
+const memBrowse = new MemoryBrowse({
+  list: (scopes) => memoryStore.list(scopes as any).map(toSummary),
+  readBody: (path) => { try { return memoryStore.read(path).body } catch { return "" } },
+  exists: (path) => { try { memoryStore.read(path); return true } catch { return false } },
+  archive: (path) => { try { memoryStore.archive(path); return true } catch (e) { process.stderr.write(`memory-browse archive: ${e}\n`); return false } },
+  remove: (path) => memoryStore.remove(path),
+  deindex: (path) => { void Promise.resolve(vectorIndex.remove(path)).catch(() => {}) },
+  audit: (action, actor, detail) => audit.record({ kind: "event", actor: `user:${actor}`, action, outcome: "ok", detail }),
+})
 
 /** Background dedup for a just-written note: auto-merge distiller dups, append
  *  suspected protected dups to a review log (never silently touch hand-written notes). */
@@ -996,12 +1017,59 @@ const baseGate = new BaseGate(join(hub.stateDir, "access.json"))
 // Only allowlisted users may press card buttons.
 gateway.setPermissionAuthorizer((uid) => baseGate.listAllowed().includes(uid))
 
+async function handleMemButton(action: string, arg: { corrId: string; idx?: number }, userId: string): Promise<void> {
+  const s = memSessions.get(arg.corrId)
+  if (!s) return
+  const chatId = s.chatId
+  const pageCount = Math.max(1, Math.ceil(s.notes.length / PAGE))
+  const shown = () => s.notes.slice(s.page * PAGE, s.page * PAGE + PAGE)
+  const noteAt = (i?: number) => (i === undefined ? undefined : s.notes[i])
+  if (action === "next" || action === "prev") {
+    memSessions.setPage(arg.corrId, Math.max(0, Math.min(pageCount - 1, s.page + (action === "next" ? 1 : -1))))
+    await gateway.sendCard(chatId, renderListCard(shown(), arg.corrId, s.page, pageCount, s.label, PAGE)); return
+  }
+  if (action === "view") {
+    const n = noteAt(arg.idx); if (!n) return
+    await gateway.sendCard(chatId, renderDetailCard({ ...n, body: memBrowse.body(n.path) }, arg.corrId, arg.idx!)); return
+  }
+  if (action === "forget" || action === "del") {
+    const n = noteAt(arg.idx); if (!n) return
+    await gateway.sendCard(chatId, renderConfirmCard(action === "del" ? "del" : "forget", n.title, arg.corrId, arg.idx!)); return
+  }
+  if (action === "cancel") { await gateway.sendPlain(chatId, "Cancelled."); return }
+  if (action === "confirm" || action === "confirmdel") {
+    const n = noteAt(arg.idx); if (!n) return
+    // The kind is explicit in the customId: confirm → archive, confirmdel → permanent delete.
+    const r = action === "confirmdel"
+      ? memBrowse.remove({ path: n.path, title: n.title, scope: n.scope }, userId)
+      : memBrowse.forget({ path: n.path, title: n.title, scope: n.scope }, userId)
+    const verb = action === "confirmdel" ? "🗑 Deleted" : "🗄 Archived"
+    if (!r.ok) {
+      const msg = r.reason === "archive_failed"
+        ? `⚠️ Could not archive **${n.title}** (already archived?).`
+        : `⚠️ "${n.title}" no longer exists.`
+      await gateway.sendPlain(chatId, msg); return
+    }
+    await gateway.sendPlain(chatId, `${verb} **${n.title}**.`)
+    return
+  }
+}
+
 // A card button was clicked → gated actions run hub-side; others relay to the agent.
 gateway.onNotifyButton((customId, userId) => {
   const ap = parseApprovalCustomId(customId)
   if (ap) { void resolveApproval(ap.id, ap.decision, userId); return }
   const action = matchGatedAction(customId, hub.gatedActions ?? [])
   if (action) { void cardLifecycle.runGated(action, customId); return }
+  const mem = parseNotifyCustomId(customId)
+  if (memBrowseOn && mem?.ns === "mem") {
+    if (!isMemOperator(userId)) {
+      audit.record({ kind: "event", actor: `user:${userId}`, action: "memory_deny", outcome: "deny", detail: { via: "button" } })
+      return
+    }
+    void handleMemButton(mem.action, parseMemArg(mem.arg), userId)
+    return
+  }
   const key = notifyRouter.agentFor(customId)
   if (key) transports.get(key)?.sendInteraction(customId, userId)
 })
@@ -1265,6 +1333,30 @@ gateway.handleInbound((m) => {
       const snap = toolUsage.snapshot()
       void gateway.sendPlain(m.chatId, snap.length ? snap.map(fmt).join("\n") : "_no tool activity yet_")
     }
+    return
+  }
+  if (memBrowseOn && /^!memory\b/i.test(trimmed)) {
+    if (!isMemOperator(m.userId)) {
+      audit.record({ kind: "event", actor: `user:${m.userId}`, action: "memory_deny", outcome: "deny", detail: { via: "command" } })
+      void gateway.sendPlain(m.chatId, "🔒 `!memory` is operator-only."); return
+    }
+    const rest = trimmed.replace(/^!memory\b/i, "").trim()
+    void (async () => {
+      let notes: NoteSummary[]; let label: string
+      const searchM = /^search\s+(.+)$/i.exec(rest)
+      if (searchM) {
+        label = `search "${searchM[1]}"`
+        const scopes = ["global", "agents", "users", "channels"] as any  // all top-level scopes
+        try { notes = (await memoryRetriever.relevant(searchM[1]!, scopes)).notes.map(toSummary) } catch { notes = [] }
+      } else {
+        const scope = (rest || "global")
+        label = scope
+        notes = memBrowse.list([scope])
+      }
+      const corrId = memSessions.create({ chatId: m.chatId, scopes: [label], label, notes, pageSize: PAGE })
+      const pageCount = Math.max(1, Math.ceil(notes.length / PAGE))
+      await gateway.sendCard(m.chatId, renderListCard(notes.slice(0, PAGE), corrId, 0, pageCount, label, PAGE))
+    })()
     return
   }
   // Health rollup (operator-only): the same data /health serves, in chat.
