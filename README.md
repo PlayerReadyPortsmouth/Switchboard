@@ -4,7 +4,7 @@ One Discord bot, many Claude Code agents.
 
 Switchboard extends the official Claude Code Discord plugin (which is strictly **1 bot ↔ 1 session**) into a **hub** that fans a single Discord bot out to many Claude Code agents — each with its own working directory, model, tools, and MCP setup. A small Claude router (`claude -p --model claude-haiku-4-5`, reusing your Claude Code auth) decides which agent each message reaches, conversations stay stickily bound to an agent with confident auto-switching, and access is gated per Discord **role and user ID**.
 
-- **Persistent agents** — long-lived `claude -p --input-format stream-json` sessions (research, coding) the hub owns directly: it writes inbound messages to the agent's stdin and reads replies from its stdout. Cards/react/edit come through a thin MCP **shim**.
+- **Persistent agents** — long-lived `claude -p --input-format stream-json` sessions (research, coding) the hub owns directly: it writes inbound messages to the agent's stdin and reads replies from its stdout. Rich interactions — cards, **modal forms**, reactions, **file attachments**, **share links**, memory, inter-agent consult — come through a thin MCP **shim** (see [Rich interactions](#rich-interactions--cards-modals-files--links)).
 - **Ephemeral agents** — the same stream-json session spawned on demand per task (e.g. via a spawn trigger), torn down when it exits.
 
 On top of the router, the hub adds a small set of **config-driven integration primitives** — all optional, all generic, all defined as arrays in `config/hub.config.json`:
@@ -21,7 +21,7 @@ On top of routing, the hub also grows **intelligence with minimal human babysitt
 - **Memory vault** — an Obsidian-style `.md` note vault (global / per-user / per-agent / per-channel) that agents read via relevant-context injection and write via `remember`/`recall` tools, plus a background **distiller** that turns idle conversations into notes automatically. Retrieval is **fully local** (an in-process embedding model for recall + a small Claude *librarian* for precision) — no extra API key.
 - **Overseer** — an opt-in "outer agent" that judges each finished turn against the goal and keeps **prodding the agent until the task is actually done**, bounded by hard iteration/wallclock caps.
 
-> **Status:** implemented. All unit tests pass (`bun test`) and `bun run typecheck` is clean. The agent transport runs on the documented stream-json protocol (the earlier experimental `--channels` mechanism was removed when current Claude CLIs dropped its `command:` form); the stdin→reply + MCP-card round-trip is proven against a real `claude` via `scripts/smoke-streamjson.ts`. Manual full Discord end-to-end (a live bot in a guild) is the remaining check.
+> **Status:** implemented. All unit tests pass (`bun test`) and `bun run typecheck` is clean. The agent transport runs on the documented stream-json protocol (the earlier experimental `--channels` mechanism was removed when current Claude CLIs dropped its `command:` form); the stdin→reply + MCP-card round-trip is proven against a real `claude` via `scripts/smoke-streamjson.ts`. It also runs end-to-end as a live bot in a guild (in production).
 
 ## Why a hub?
 
@@ -35,7 +35,7 @@ Discord allows only one gateway connection per bot token, so you can't run N age
 
 ```
 hub/         the one process that owns the bot token + gateway + router
-shim/        per-agent MCP server for post_card/react/edit (hub ↔ agent over a socket)
+shim/        per-agent MCP server exposing the agent toolset — cards/modals, react/edit, memory, files, links (hub ↔ agent over a socket)
 config/      hub.config.json + agents.json (the agent registry)
 scripts/     smoke-streamjson.ts — real-CLI transport check; pair.ts — approve a paired user
 docs/        superpowers/ spec + plan
@@ -111,6 +111,29 @@ These optional arrays in `config/hub.config.json` wire the hub to the outside wo
 - **`approvals`** — `{ enabled?, channelId?, approvers?, ttlMs? }`. Human-in-the-loop gate: a `requireApproval` effect (today, an `outboundWebhooks[]` route) **parks instead of firing** and posts an **Approve / Deny** card; only a configured `approver` (default the deploy approver) may resolve it, and the effect runs **only on grant** — deny, a `ttlMs` timeout, or a hub restart all leave it unfired (fail-closed). Every step (`request`/`grant`/`deny`/`expire`) is an `approval` audit event threaded by `corr`. Off unless `enabled`; with it off, `requireApproval` is inert.
 - **`consult`** — `{ enabled?, timeoutMs? }`. Inter-agent consult: exposes an **`ask_agent`** MCP tool so one agent can ask another (by name) a question and get its reply back. An agent is consultable only if its `access.consultableBy` lists the requester (or `"*"`); a self-consult is always denied. Each consult is a `consult` audit event. Off unless `enabled` (with it off the tool isn't even exposed).
 
+## Rich interactions — cards, modals, files & links
+
+Beyond plain chat, an agent drives Discord through its MCP **shim** (registered via `--mcp-config`, relayed to the hub over a local socket). The full agent-facing tool surface:
+
+| Tool | What it does |
+|------|--------------|
+| `post_card` / `update_card` | Post a rich **card** (embed + fields + buttons), then edit it **in place** by `correlation_id` — one card per task, updated as work progresses. |
+| `react` / `edit_message` | Add an emoji reaction; edit a plain message the bot already sent. |
+| `remember` / `recall` | Write and read the memory vault (see below). |
+| `finish` | Signal the turn/task is complete (tears down an ephemeral session; just ends the turn for a persistent agent). |
+| `post_webhook` | Fire a pre-configured **outbound webhook** by route `id` — never a URL (the hub holds the destination + secret). |
+| `ask_agent` | Consult another agent by name and get its reply back. *Gated — only when `consult.enabled`.* |
+| `attach_file` | **Attach a file the agent produced** (a `.md`/`.pdf`/`.csv` report) to a Discord message. *Gated — `hub.outboundAttachments.enabled`.* |
+| `publish_link` | **Publish a file to a gated URL** for artifacts too big or unviewable as a Discord attachment. *Gated — `hub.shareLinks.enabled`.* |
+
+**Modals (popup forms).** Any card button can carry a `modal` spec, so clicking it opens a native Discord **popup form** (up to 5 short/paragraph inputs). The user's answers return to the agent as a single `[interaction] custom_id=… fields={…}` message — the right way to gather several answers at once instead of a back-and-forth of prose questions. Discord caps a modal at 5 fields; for more, an agent uses several buttons (each opening its own ≤5-field modal) and correlates the replies by `custom_id`. (A modal can only open from a button click, and cannot open in response to another modal's submission.)
+
+**Inbound attachments** (`hub.attachments.enabled`). When a user uploads files with a message, the hub downloads them under `<stateDir>/attachments/` (size-capped, `maxBytes` default 10 MB) and folds their local paths into the turn, so the agent can `Read` them. Off → byte-identical to before (paths simply aren't injected).
+
+**Outbound attachments — `attach_file`** (`hub.outboundAttachments.enabled`). An agent writes a file into its **per-agent outbox** and attaches it by relative path. The hub validates with **realpath containment** (no `..`/symlink-target escape; the agent identity is taken from the socket connection, never a tool arg, so one agent can't name another's outbox), size-caps it, reads it into a `Buffer` before handing it to discord.js (closing a TOCTOU swap window), and audits the real delivery outcome. Containment forces an explicit, audited copy into the outbox — it is **not** a sandbox against a hostile agent's own host access, so enable it only for agents you trust on the box; the genuine defenses are agent trust, the audit trail, and an optional extension allowlist.
+
+**Share links — `publish_link`** (`hub.shareLinks`). For artifacts too large or unviewable as a Discord attachment (PDF statements, rendered HTML mockups, large CSVs, long markdown reports), an agent publishes the file to a configured **artifacts directory** alongside a **`.sbmd` metadata sidecar** that tells a renderer how to present it — `download`, `page` (live HTML), or `view` (pretty PDF/markdown/CSV table) — and gets back a **gated URL**. The renderer is **decoupled and pluggable**: Switchboard only drops the file + sidecar atomically into the shared location (with realpath containment and a TTL); a **separate service you point it at** (`shareLinks.raHost`) reads the `.sbmd` and serves the artifact behind your own access control. A periodic sweep expires artifacts past `defaultTtlDays` (default 30). Off unless `shareLinks.enabled`.
+
 ## Memory, context & the overseer
 
 These make the hub more autonomous. All extra model calls reuse **Claude Code auth** (the router/librarian/distiller/judge are `claude -p` passes) and the embedder is a **local in-process model** — there is **no new API key or external service**.
@@ -123,6 +146,8 @@ These make the hub more autonomous. All extra model calls reuse **Claude Code au
 - **Hosted backend (optional).** The recall index and embedder both sit behind interfaces, selected by `memory` in `hub.config.json`: `index: "local" | "qdrant"` and `embedder: "local" | "openai"`. **Qdrant** (`memory.qdrant: { url, apiKeyEnv?, collection? }`) provides a hosted/self-hosted vector store; the embedder can target any **OpenAI-compatible `/embeddings` endpoint** (`memory.openai: { baseUrl, apiKeyEnv?, model }`) — OpenAI, Together, or a self-hosted TEI/Ollama. Keys come only from the named env var. Default is fully local, no secrets.
 - **Formation is two-way.** Agents write/read explicitly via the shim's `remember` / `recall` tools (scope defaults to the agent's own folder), **and** a background **distiller** turns an idle conversation (`distillIdleMs`) into note upserts — non-blocking, never on the hot path.
 - **Dedup is entity-aware and conservative.** After any write, a background pass finds same-scope near-duplicates and gates a merge on an LLM "same fact, or distinct facts about different entities?" check — it **never merges on cosine alone**, and fails safe to "distinct" on uncertainty. Distiller-generated dups auto-merge (the staler note is dropped); **agent-authored notes are sacred** — never overwritten or deleted, only flagged to `<memoryDir>/.dedup-review.jsonl` for human review. The distiller also refuses to overwrite a hand-written note at a colliding title.
+
+**Operator vault control.** A human can inspect and prune what agents have written: **`!memory browse [scope]`** pages the vault as cards (title, scope, tags, age, snippet, with paginated next/prev), **`!memory forget <id>`** archives a note, and **`!memory delete <id>`** removes it — operator-gated (same gate as `!status`). *(v1: global scope.)*
 
 **Access-weighting & the gardener.** Each note tracks usage (an `.access.json` sidecar — hits when a note is actually injected/recalled), with an exponentially-decayed importance so once-hot notes cool. When `gardener` is enabled, recall is re-ranked by importance and the top notes for the active scopes are **injected proactively** (a "hot set") so load-bearing facts surface without an explicit `recall`. A periodic background **gardener** then does whole-vault hygiene: cross-scope dedup, staleness flags, and **budgeted archival** of cold distiller notes (reversible; agent-authored notes are never archived/deleted, only flagged). Config: `gardener: { enabled, importanceWeight, hotSetSize, decayHalfLifeMs, staleAfterMs, archiveAfterMs, scopeBudget }`; off by default (access hits are still recorded so the signal is ready when you enable it). See [`docs/superpowers/specs/2026-06-13-vault-gardener-design.md`](docs/superpowers/specs/2026-06-13-vault-gardener-design.md).
 
@@ -145,6 +170,8 @@ Persistent agents are long-lived `claude` processes whose context grows unbounde
 **Session governor** (`runtime.sessionGovernor: { enabled, softPct?, hardPct?, strategy? }`). On each turn it reads the context fill: at `softPct` (default 0.75) it nudges the agent once to checkpoint important state via `remember`; at `hardPct` (default 0.90) it auto-compacts — asks for a ≤200-word handoff, persists it, resets the session (the existing fresh-session path), and seeds the new session with the handoff so continuity holds. Bounds context (and per-turn cost) without losing vault-persisted knowledge.
 
 **Live status board** (`statusChannelId`, `statusRefreshMs` default 15s). One self-editing embed showing every persistent agent (alive / busy / context% / queue / cost / replica count), what the overseer/governor is doing, the Haiku router's recent picks + rate, and live ephemeral agents. Edits are throttled to ≤1 / 5s. Allowlisted users can also pull it on demand with `!status` (aliases `!usage`, `!health`).
+
+**Tool observability.** The board also surfaces each agent's **live tool activity** (a ⚙ marker while a tool call is in flight, ⚠ on a tool error), and the hub keeps a per-agent **tool-usage tally** from the stream. **`!tools`** posts the breakdown — which tools each agent has used and how often — so you can see what the fleet is actually doing, not just that it's busy.
 
 **Agent auto-scaling** (`runtime.pool: { min?, max?, scaleUpQueue?, scaleUpSustainMs?, replicaIdleMs?, isolateCwd? }`). A hot agent is backed by 1..N replicas: conversations stick to a replica (context continuity), new ones load-balance, and **sustained** queue pressure (all replicas busy + queue over threshold, held for `scaleUpSustainMs`) spins up another replica up to `max`; idle, unbound spares retire down to `min`. *v1 boundary:* card interactions and session resets act on the primary replica, so don't combine `pool` with `sessionGovernor` on the same agent.
 
@@ -211,7 +238,13 @@ Each step runs on a hidden `mission:<id>` channel — the same run-and-capture p
 - **Control commands** (e.g. forcing/switching the bound agent).
 - **Haiku router** (`claude -p --model claude-haiku-4-5`) with **sticky** bindings and confident **auto-switching** above the configured threshold.
 - **stream-json agent transport** (`StreamJsonTransport`): the hub spawns each agent as a `claude -p --input-format stream-json` session, delivers inbound on stdin, and emits each turn's `result` as the reply. Proven against a real `claude` by `scripts/smoke-streamjson.ts`.
-- **MCP shim relay**: agents post cards / react / edit via the shim (registered with `--mcp-config`), forwarded to the hub over a socket.
+- **MCP shim relay**: agents drive Discord via the shim (registered with `--mcp-config`, forwarded to the hub over a socket) — `post_card`/`update_card`, `react`/`edit_message`, `remember`/`recall`, `finish`, `post_webhook`, and the gated `ask_agent`/`attach_file`/`publish_link`.
+- **Card modals** (`hub/modal.ts`): a card button can carry a `modal` spec → Discord popup form (≤5 inputs); submitted fields return to the agent as a tagged `[interaction] … fields={…}` message. The button handler always acknowledges, so a click never shows "interaction failed".
+- **Inbound attachments** (`hub/attachments.ts`): user file uploads are downloaded under `<stateDir>/attachments/` (size-capped) and their paths folded into the turn for the agent to `Read`. Off unless `hub.attachments.enabled`.
+- **Outbound attachments** (`attach_file` + `hub/outboxAttach.ts`): an agent attaches a produced file from its per-agent outbox — realpath containment, size cap, Buffer-before-handoff (TOCTOU-hardened), delivery audited. Off unless `hub.outboundAttachments.enabled`.
+- **Share links** (`publish_link` + `hub/publishLink.ts`): an agent publishes a file + a `.sbmd` metadata sidecar to a shared artifacts dir (atomic, realpath-contained, TTL-swept) for a decoupled renderer to serve as a gated URL. Off unless `hub.shareLinks.enabled`.
+- **Tool observability** (`hub/toolUsageRegistry.ts`/`toolBoard.ts`): live per-agent tool activity (⚙/⚠) on the status board + a per-agent usage tally, surfaced on demand with `!tools`.
+- **Operator vault control** (`!memory browse/forget/delete`): paged card UI to inspect, archive, and delete vault notes; operator-gated.
 - **Open tool permissions** (agents run `--dangerously-skip-permissions`); the only gate is the approver-only `deploy:` button namespace.
 - Message **tagging + chunking** (Discord 2000-char limit) and agent-prefix tagging.
 - **Bindings persistence** (sticky conversation → agent state survives restarts).
@@ -236,7 +269,6 @@ Each step runs on a hidden `mission:<id>` channel — the same run-and-capture p
 
 **Known gaps:**
 
-- **Manual full Discord end-to-end** (a live bot in a guild) is the remaining check; the transport itself is proven via the smoke script.
 - **Idle GC of spawned workers**: workers are torn down when their process exits; a long-idle-but-alive worker is not yet reaped on a timer.
 - **Local embedder runtime**: the embedding model downloads on first run and needs the `@huggingface/transformers` native runtime; until it's warmed, memory recall is empty (writes/distillation still work and index as soon as the model loads). Or point `memory.embedder`/`memory.index` at a hosted backend (OpenAI-compatible embeddings + Qdrant) — see above.
 - **Archived-note deep recall**: archived notes have their vector dropped, so they're excluded from recall (and browsable on disk under `<scope>/archive/`); searching archived notes on demand and auto-restoring on a hit is future work.
