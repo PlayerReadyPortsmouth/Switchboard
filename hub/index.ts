@@ -948,13 +948,13 @@ async function flushBoard(): Promise<void> {
   const card = renderBoard(statusRegistry.snapshot(Date.now()))
   if (boardMsgId == null) {
     boardMsgId = await gateway.sendCard(hub.statusChannelId, card)
-    try { writeFileSync(boardMsgPath, boardMsgId) } catch {}
+    try { if (boardMsgId) writeFileSync(boardMsgPath, boardMsgId) } catch {}
   } else {
     // If the message was deleted in Discord the edit will throw — fall back to a fresh post.
     try { await gateway.editCard(hub.statusChannelId, boardMsgId, card) }
     catch {
       boardMsgId = await gateway.sendCard(hub.statusChannelId, card)
-      try { writeFileSync(boardMsgPath, boardMsgId) } catch {}
+      try { if (boardMsgId) writeFileSync(boardMsgPath, boardMsgId) } catch {}
     }
   }
 }
