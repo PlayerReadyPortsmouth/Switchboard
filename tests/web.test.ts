@@ -46,8 +46,10 @@ test("status is degraded when agents exist but none are alive (matches /health)"
 
 // ---- DASHBOARD_HTML ----
 
-test("DASHBOARD_HTML is a self-contained page that polls /api/status", () => {
+test("DASHBOARD_HTML is a self-contained page that polls the status endpoint relatively", () => {
   expect(DASHBOARD_HTML.startsWith("<!doctype html>")).toBe(true)
-  expect(DASHBOARD_HTML).toContain("/api/status")
+  // Relative (no leading slash) so it works mounted under /switchboard/ as well as at root.
+  expect(DASHBOARD_HTML).toContain("fetch('api/status')")
+  expect(DASHBOARD_HTML).not.toContain("fetch('/api/status')")
   expect(DASHBOARD_HTML).toContain("Switchboard")
 })

@@ -68,7 +68,21 @@ export interface ClaudeArgvOpts {
   resumeSessionId?: string
 }
 
-/** Build the argv for a stream-json agent process. */
+/** Guidance appended to every interactive (card-posting) agent's system prompt,
+ *  steering them to collect structured answers from the user via Discord modals
+ *  (popup forms) instead of prose, and to handle Discord's hard 5-field-per-modal
+ *  cap by splitting larger question sets across multiple buttons. Shipped in code
+ *  so it applies to all stream-json agents without per-agent config. */
+export const INTERACTION_GUIDANCE = [
+  "## Asking the user questions",
+  "When you need specific answers from the user, prefer a Discord modal (a popup form) over asking in prose — especially when you have several questions at once. Post a card with `post_card` whose button carries a `modal`: give the modal a `title` and up to 5 `inputs`, each with an `id`, a `label`, and a `style` of \"short\" or \"paragraph\" (mark the essential ones `required`, add a `placeholder` to hint the expected answer). The user clicks the button, fills the form, and you receive their answers as one message of the form `[interaction] custom_id=<id> user_id=<id> fields={...}`, where the `fields` object is keyed by your input `id`s.",
+  "A modal can only open from a button click, so always present it behind a button — you cannot pop one unprompted, and a modal cannot be opened in response to another modal's submission.",
+  "Discord caps a modal at 5 fields. If you need more than 5 answers, do NOT cram them into one modal (the extra fields are silently dropped). Instead put several buttons on the one card, each opening its own modal of ≤5 related fields (e.g. buttons labelled \"Scope\", \"Deployment\", \"Risks\"). Each button's answers arrive as a separate interaction message that you correlate by its `custom_id`.",
+].join("\n\n")
+
+/** Build the argv for a stream-json agent process. The interaction guidance is
+ *  always appended (before any per-agent prompt) so every card-posting agent
+ *  knows to use modals. */
 export function buildClaudeArgv(o: ClaudeArgvOpts): string[] {
   const argv = [
     "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
@@ -77,7 +91,10 @@ export function buildClaudeArgv(o: ClaudeArgvOpts): string[] {
   ]
   if (o.resumeSessionId) argv.push("--resume", o.resumeSessionId)
   if (o.model) argv.push("--model", o.model)
-  if (o.appendSystemPrompt) argv.push("--append-system-prompt", o.appendSystemPrompt)
+  const system = o.appendSystemPrompt
+    ? `${INTERACTION_GUIDANCE}\n\n${o.appendSystemPrompt}`
+    : INTERACTION_GUIDANCE
+  argv.push("--append-system-prompt", system)
   if (o.claudeArgs?.length) argv.push(...o.claudeArgs)
   return argv
 }

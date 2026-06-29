@@ -1,7 +1,7 @@
 import { test, expect } from "bun:test"
 import {
   parseStreamEvent, userMessageFrame, interactionFrame,
-  buildClaudeArgv, buildShimMcpConfig,
+  buildClaudeArgv, buildShimMcpConfig, INTERACTION_GUIDANCE,
 } from "../hub/transports/streamJsonFraming"
 
 test("parseStreamEvent extracts a result reply", () => {
@@ -44,14 +44,27 @@ test("buildClaudeArgv assembles the proven flags", () => {
   expect(argv).toContain("--strict-mcp-config")
   expect(argv).toContain("--dangerously-skip-permissions")
   expect(argv).toContain("--model"); expect(argv).toContain("claude-haiku-4-5")
-  expect(argv).toContain("--append-system-prompt"); expect(argv).toContain("be terse")
+  // The per-agent prompt is appended AFTER the always-on interaction guidance.
+  expect(argv).toContain("--append-system-prompt")
+  const system = argv[argv.indexOf("--append-system-prompt") + 1]
+  expect(system).toContain("be terse")
+  expect(system).toContain(INTERACTION_GUIDANCE)
+  expect(system.endsWith("be terse")).toBe(true)
   expect(argv.slice(-2)).toEqual(["--add-dir", "/x"])
 })
 
-test("buildClaudeArgv omits optional flags when absent", () => {
+test("buildClaudeArgv always appends the interaction guidance, even with no per-agent prompt", () => {
   const argv = buildClaudeArgv({ mcpConfigPath: "/tmp/m.json" })
   expect(argv).not.toContain("--model")
-  expect(argv).not.toContain("--append-system-prompt")
+  expect(argv).toContain("--append-system-prompt")
+  expect(argv[argv.indexOf("--append-system-prompt") + 1]).toBe(INTERACTION_GUIDANCE)
+})
+
+test("INTERACTION_GUIDANCE tells agents to use modals and to split past 5 fields", () => {
+  expect(INTERACTION_GUIDANCE).toContain("modal")
+  expect(INTERACTION_GUIDANCE).toContain("post_card")
+  expect(INTERACTION_GUIDANCE).toContain("5")
+  expect(INTERACTION_GUIDANCE).toContain("custom_id")
 })
 
 test("buildShimMcpConfig registers the shim with its env", () => {
