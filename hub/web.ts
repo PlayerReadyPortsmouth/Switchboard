@@ -113,7 +113,7 @@ function render(d){
   }).join('') || '<div class="muted">no events</div>';
   $('updated').textContent='updated '+fmtTime(Date.now());
 }
-function poll(){ fetch('/api/status').then(function(r){ return r.json(); }).then(render).catch(function(){}); }
+function poll(){ fetch('api/status').then(function(r){ return r.json(); }).then(render).catch(function(){}); }
 poll(); setInterval(poll, 3000);
 </script>
 </body>
