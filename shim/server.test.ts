@@ -58,3 +58,8 @@ ut("attach_file maps to an attach wire message", () => {
     t: "attach", chatId: "C1", path: "report.pdf", caption: "here you go", filename: "Report.pdf",
   })
 })
+
+ut("publish_link maps to a publish wire message", () => {
+  ue(wire("publish_link", { path: "r.pdf", mode: "view", title: "R", scope: "staff", ttl_days: 7 }) as any)
+    .toEqual({ t: "publish", path: "r.pdf", mode: "view", title: "R", scope: "staff", ttlDays: 7 })
+})

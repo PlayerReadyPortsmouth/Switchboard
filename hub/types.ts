@@ -289,6 +289,7 @@ export interface HubConfig {
   workflow?: WorkflowConfig      // workflow engine config (default off)
   attachments?: AttachmentConfig // pass Discord file uploads through to agents (default off)
   outboundAttachments?: OutboundAttachmentConfig // agents attach produced files to Discord (default off)
+  shareLinks?: ShareLinksConfig  // publish_link: agents publish staff-only Entra-gated artifact URLs (default off)
   toolObservability?: ToolObservabilityConfig  // capture + surface per-agent tool usage (default off)
   memoryBrowse?: MemoryBrowseConfig  // operator memory browse & forget UI (default off)
 }
@@ -328,6 +329,18 @@ export interface OutboundAttachmentConfig {
   outboxDir?: string             // base outbox dir (default <stateDir>/outbox)
   maxBytes?: number              // reject larger files (default 8388608 = 8 MB)
   allowedExtensions?: string[]   // empty/absent = allow any; e.g. ["md","pdf","png","csv"]
+}
+
+/** publish_link producer. Absent/disabled ⇒ the tool is not offered and a stray
+ *  publish frame is ignored (byte-identical). Writes <artifactsDir>/<token>/ for
+ *  the RA /share renderer; agents publish from their own outbox. */
+export interface ShareLinksConfig {
+  enabled?: boolean
+  artifactsDir?: string          // shared with the RA renderer (default <stateDir>/share-artifacts)
+  raHost?: string                // default "readyapp.player-ready.co.uk"
+  defaultTtlDays?: number        // default 30
+  maxBytes?: number              // default 26214400 (25 MB)
+  cleanupIntervalMs?: number     // default 86400000 (daily)
 }
 
 /** One step of a workflow: run `agent` with a templated `prompt` ({{input}} and

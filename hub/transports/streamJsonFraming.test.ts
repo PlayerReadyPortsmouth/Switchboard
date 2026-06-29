@@ -75,3 +75,9 @@ test("parseStreamEvent parses tool_result blocks off a user frame", () => {
 test("parseStreamEvent: a user frame with no tool_result → null (noise)", () => {
   expect(parseStreamEvent(JSON.stringify({ type: "user", message: { content: [{ type: "text", text: "hi" }] } }))).toBeNull()
 })
+
+test("publishEnabled injects PUBLISH_LINK=1 into the shim MCP env", () => {
+  const env = buildShimMcpConfig("/shim.ts", "/sock", "ada", false, false, true)
+    .mcpServers["switchboard-shim"].env as Record<string, string>
+  expect(env.PUBLISH_LINK).toBe("1")
+})

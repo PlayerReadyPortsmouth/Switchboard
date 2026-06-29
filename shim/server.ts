@@ -24,6 +24,8 @@ export function toolCallToWire(name: string, args: Record<string, any>) {
       return { t: "post_webhook", target: args.target, body: args.body }
     case "attach_file":
       return { t: "attach", chatId: args.chat_id, path: args.path, caption: args.caption, filename: args.filename }
+    case "publish_link":
+      return { t: "publish", path: args.path, mode: args.mode, title: args.title, scope: args.scope, ttlDays: args.ttl_days }
     default:
       return null
   }
@@ -50,19 +52,22 @@ async function main() {
   let reqCounter = 0
   const pending = new Map<string, (notes: { title: string; body: string }[]) => void>()
   const pendingAsk = new Map<string, (answer: string) => void>()
+  const pendingPublish = new Map<string, (r: { url?: string; error?: string }) => void>()
   const decoder = new LineDecoder()
   const sock = await Bun.connect({
     unix: SOCKET,
     socket: {
       data(_s, data) {
         for (const obj of decoder.push(data.toString())) {
-          const m = obj as { t?: string; id?: string; notes?: { title: string; body: string }[]; answer?: string }
+          const m = obj as { t?: string; id?: string; notes?: { title: string; body: string }[]; answer?: string; url?: string; error?: string }
           if (m.t === "recall_result" && m.id && pending.has(m.id)) {
             pending.get(m.id)!(m.notes ?? [])
             pending.delete(m.id)
           } else if (m.t === "ask_agent_result" && m.id && pendingAsk.has(m.id)) {
             pendingAsk.get(m.id)!(m.answer ?? "")
             pendingAsk.delete(m.id)
+          } else if (m.t === "publish_result" && m.id && pendingPublish.has(m.id)) {
+            pendingPublish.get(m.id)!({ url: m.url, error: m.error }); pendingPublish.delete(m.id)
           }
         }
       },
@@ -169,6 +174,17 @@ async function main() {
           filename: { type: "string", description: "Optional display name for the attachment." } },
           required: ["chat_id", "path"] },
       }] : []),
+      ...(process.env.PUBLISH_LINK === "1" ? [{
+        name: "publish_link",
+        description: "Publish a file you produced (write it into your outbox first) to a staff-only Entra-gated URL and get the link back. Use for artifacts too big or unviewable as Discord attachments (PDF statements, rendered HTML dashboards, large CSVs, markdown reports). `mode`: download | page (live HTML) | view (pretty pdf/markdown/csv); inferred from the file type if omitted. `scope`: \"staff\" (default) or an RA permission string for sensitive data. `ttl_days`: link lifetime (default 30).",
+        inputSchema: { type: "object", properties: {
+          path: { type: "string", description: "Path relative to your outbox." },
+          mode: { type: "string", enum: ["download", "page", "view"] },
+          title: { type: "string" },
+          scope: { type: "string", description: "\"staff\" or an RA permission string." },
+          ttl_days: { type: "number" } },
+          required: ["path"] },
+      }] : []),
     ],
   }))
 
@@ -198,6 +214,17 @@ async function main() {
         ;(timer as { unref?: () => void }).unref?.()
       })
       return { content: [{ type: "text", text: answer }] }
+    }
+    if (req.params.name === "publish_link") {
+      const id = `p${++reqCounter}`
+      const result = await new Promise<{ url?: string; error?: string }>((resolve) => {
+        pendingPublish.set(id, resolve)
+        sock.write(encode({ t: "publish", id, path: args.path, mode: args.mode, title: args.title, scope: args.scope, ttlDays: args.ttl_days }))
+        const timer = setTimeout(() => { if (pendingPublish.delete(id)) resolve({ error: "timed out" }) }, 30000)
+        ;(timer as { unref?: () => void }).unref?.()
+      })
+      const text = result.url ? `Published: ${result.url}` : `publish failed: ${result.error ?? "unknown"}`
+      return { content: [{ type: "text", text }] }
     }
     const wire = toolCallToWire(req.params.name, args)
     if (!wire) return { content: [{ type: "text", text: `unknown tool: ${req.params.name}` }], isError: true }
