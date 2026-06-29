@@ -55,6 +55,7 @@ import { renderHealth, type MetricsInput } from "./metrics"
 import { startWebServer } from "./webServer"
 import { type WebInput } from "./web"
 import { ConsultRegistry, mayConsult, consultAnswerFromReply } from "./consult"
+import { resolveFederation, isRemoteTarget, consultRemote, startFederationListener } from "./federation"
 import { MissionRegistry, findWorkflow, renderStepPrompt, renderMissionCard, type MissionRun } from "./workflow"
 import type { AgentConfig, AgentReply, InboundMessage, SpawnTrigger, SpawnCardUpdate, CardSpec, DirectCommand, OutboundRoute } from "./types"
 import { resolveOutboxFile } from "./outboxAttach"
@@ -71,6 +72,10 @@ const { hub, agents } = loadConfigs(CONFIG_DIR)
 
 loadEnv(join(hub.stateDir, ".env"))   // load DISCORD_BOT_TOKEN + agent env if present
 const startedAt = Date.now()          // for the metrics/health uptime gauge
+// Inter-hub federation runtime (peer keys read from env after loadEnv). Null when
+// federation is disabled; a "<hub>:<agent>" consult then resolves like any unknown
+// agent. Listener is started later, once the consult plumbing exists.
+const fedRuntime = resolveFederation(hub.federation, process.env)
 const token = process.env[hub.botTokenEnv]
 if (!token) { console.error(`missing ${hub.botTokenEnv}`); process.exit(1) }
 
@@ -260,6 +265,51 @@ async function runConsultRetry(
   }
 }
 
+/** Run a consult against a LOCAL target agent and resolve with its answer. Shared
+ *  by the in-process ask_agent handler and the federation listener (a remote hub's
+ *  consult dispatched to one of our agents). Access is gated by the target's
+ *  `consultableBy` (which may list a "<hub>:<agent>"-qualified remote requester or
+ *  "*"). `requesterKey` is the requester's own transport key when it is local (for
+ *  overflow routing); omit for remote callers. */
+function runLocalConsult(requester: string, targetName: string, message: string, requesterKey?: string): Promise<string> {
+  return new Promise<string>((resolveAnswer) => {
+    if (!mayConsult(requester, targetName, agents[targetName])) {
+      audit.record({ kind: "consult", actor: `agent:${requester}`, action: "ask", target: targetName, outcome: "deny" })
+      resolveAnswer(`(not permitted to consult "${targetName}")`)
+      return
+    }
+    // Wrap resolveAnswer so the retry loop can tell when the consult has been settled
+    // by external means (e.g. the target finished its current turn and answered).
+    let consultSettled = false
+    const settle = (answer: string) => {
+      if (consultSettled) return
+      consultSettled = true
+      resolveAnswer(answer)
+    }
+    const e = consultRegistry.open(requester, targetName, settle)
+    audit.record({ kind: "consult", actor: `agent:${requester}`, action: "ask", target: targetName, chat: e.channel, outcome: "ok", corr: e.id })
+    const inbound: InboundMessage = { chatId: e.channel, messageId: `consult:${requester}`, userId: "system", user: "hub",
+      content: message, ts: new Date().toISOString(), isDM: false }
+    // Try immediate delivery if target is free; otherwise start the retry loop.
+    const target = pools.get(targetName) ?? transports.get(targetName)
+    if (!target?.isAvailable()) {
+      // Agent is completely down — no point retrying; settle immediately.
+      settle(`(agent "${targetName}" is unavailable)`)
+      return
+    }
+    if (!target.isBusy()) {
+      // Agent is free — deliver directly (no retry needed).
+      dispatcher.dispatch(targetName, e.channel, inbound)
+      return
+    }
+    // Agent is alive but busy — start the retry loop. The requester's active
+    // Discord channel (for overflow notices) is only known for a local caller.
+    const discordCh = (requesterKey ? transports.get(requesterKey)?.getLastChatId() : "") ?? ""
+    retryingConsults.add(e.channel)
+    void runConsultRetry(targetName, e.channel, inbound, discordCh, settle, () => consultSettled)
+  })
+}
+
 /** Spawn a one-shot ephemeral clone of `targetName` to handle a single consult
  *  question. The clone starts with a fresh session (no --resume, no memory
  *  injection) and exits after the first reply. */
@@ -341,44 +391,21 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonT
   // consult.enabled + the target's access.consultableBy; recorded as a `consult`
   // event. The target runs on a virtual channel so its reply is intercepted in
   // onAgentReply and returned here, not posted to Discord.
-  socket.onAskAgent(({ agent: targetName, message }) => new Promise<string>((resolveAnswer) => {
+  socket.onAskAgent(({ agent: targetName, message }) => {
     const requester = name
-    if (!hub.consult?.enabled || !mayConsult(requester, targetName, agents[targetName])) {
+    if (!hub.consult?.enabled) {
       audit.record({ kind: "consult", actor: `agent:${requester}`, action: "ask", target: targetName, outcome: "deny" })
-      resolveAnswer(`(not permitted to consult "${targetName}")`)
-      return
+      return Promise.resolve(`(not permitted to consult "${targetName}")`)
     }
-    // Wrap resolveAnswer so the retry loop can tell when the consult has been settled
-    // by external means (e.g. the target finished its current turn and answered).
-    let consultSettled = false
-    const settle = (answer: string) => {
-      if (consultSettled) return
-      consultSettled = true
-      resolveAnswer(answer)
+    // Remote target "<hub>:<agent>" — route out over the federation transport to
+    // the named peer. The remote hub enforces its own access on dispatch. When
+    // federation is off, fall through and let the local path reject it as unknown.
+    if (fedRuntime && isRemoteTarget(targetName)) {
+      audit.record({ kind: "consult", actor: `agent:${requester}`, action: "ask", target: targetName, outcome: "ok", detail: { remote: true } })
+      return consultRemote(fedRuntime, targetName, message, requester, hub.consult.timeoutMs ?? 90_000)
     }
-    const e = consultRegistry.open(requester, targetName, settle)
-    audit.record({ kind: "consult", actor: `agent:${requester}`, action: "ask", target: targetName, chat: e.channel, outcome: "ok", corr: e.id })
-    const inbound: InboundMessage = { chatId: e.channel, messageId: `consult:${requester}`, userId: "system", user: "hub",
-      content: message, ts: new Date().toISOString(), isDM: false }
-    // Try immediate delivery if target is free; otherwise start the retry loop.
-    const target = pools.get(targetName) ?? transports.get(targetName)
-    if (!target?.isAvailable()) {
-      // Agent is completely down — no point retrying; settle immediately.
-      settle(`(agent "${targetName}" is unavailable)`)
-      return
-    }
-    if (!target.isBusy()) {
-      // Agent is free — deliver directly (no retry needed).
-      dispatcher.dispatch(targetName, e.channel, inbound)
-      return
-    }
-    // Agent is alive but busy — start the retry loop.
-    // Retrieve the requester's active Discord channel now — safe because this
-    // handler only fires mid-turn, so the transport is live and lastChatId is set.
-    const discordCh = transports.get(key)?.getLastChatId() ?? ""
-    retryingConsults.add(e.channel)
-    void runConsultRetry(targetName, e.channel, inbound, discordCh, settle, () => consultSettled)
-  }))
+    return runLocalConsult(requester, targetName, message, key)
+  })
   // Agent-initiated outbound file attachment. Disabled ⇒ handler ignores the
   // frame (double-gate alongside the tool not being listed). The agent identity
   // is this transport's `name`, never taken from the frame.
@@ -1141,6 +1168,20 @@ const webhookHandlers: WebhookHandler[] = (hub.webhooks ?? []).map((w) => ({
 }))
 const listener = startWebhookListener(hub.webhookPort ?? 0, webhookHandlers)
 void listener
+
+// Inter-hub federation: stand up the peer listener (intended to bind a WireGuard
+// interface IP). Off unless federation.enabled AND consult.enabled — an inbound
+// consult is dispatched through the same local consult plumbing as ask_agent.
+let fedListener: { stop: () => void; port: number } | null = null
+if (fedRuntime && hub.consult?.enabled) {
+  fedListener = startFederationListener(fedRuntime, {
+    consultLocal: ({ from, to, message }) => runLocalConsult(from, to, message),
+  })
+  process.stderr.write(
+    `federation: listening on ${fedRuntime.host}:${fedListener.port} as "${fedRuntime.selfName}" (${Object.keys(fedRuntime.peers).length} peer(s))\n`,
+  )
+}
+void fedListener
 
 // Schedules: 1-minute tick evaluating each entry's cron (timezone-aware,
 // default Europe/London) or legacy daily hourUtc. Dedupe is persisted per job
