@@ -216,15 +216,17 @@ export class Gateway {
         await interaction.update({ content: `${interaction.message.content}\n\n${label}`, components: [] }).catch(() => {})
         return
       }
-      if (parseNotifyCustomId(interaction.customId)) {
-        if (!this.notifyGate(interaction.customId, interaction.user.id)) {
-          await interaction.reply({ content: "🔒 Not authorized for this action.", ephemeral: true }).catch(() => {})
-          return
-        }
-        this.notifyButtonCb(interaction.customId, interaction.user.id)
-        await interaction.deferUpdate().catch(() => {})   // hub edits the card to reflect the action
+      // Any other button is a card button the hub posted. Authorize it, route it
+      // to its owning agent (the notify router no-ops if the id isn't registered),
+      // and ALWAYS acknowledge — otherwise Discord shows "This interaction failed"
+      // after 3s. The `ns:action:arg` convention is preferred for clarity but is
+      // NOT required for routing: agents may register their own button ids.
+      if (!this.notifyGate(interaction.customId, interaction.user.id)) {
+        await interaction.reply({ content: "🔒 Not authorized for this action.", ephemeral: true }).catch(() => {})
         return
       }
+      this.notifyButtonCb(interaction.customId, interaction.user.id)
+      await interaction.deferUpdate().catch(() => {})   // hub/agent edits the card to reflect the action
     })
     this.client.on("messageReactionAdd", async (reaction, user) => {
       try {
