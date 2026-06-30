@@ -59,6 +59,8 @@ export interface StreamJsonOpts {
   attachEnabled?: boolean
   /** Expose the publish_link share-links tool to this agent (PUBLISH_LINK=1). */
   publishEnabled?: boolean
+  /** Expose the notify_peer + ask_peer cross-hub tools to this agent (PEERING=1). */
+  peeringEnabled?: boolean
   /** Persist+resume the CLI session across restarts (persistent agents). */
   resumable?: boolean
   /** Path to read/write the captured session id. */
@@ -138,7 +140,7 @@ export class StreamJsonTransport implements AgentTransport {
     await socket.listen()
 
     const write = this.opts.writeMcpConfig ?? ((p, c) => writeFileSync(p, c))
-    write(mcpConfigPath, JSON.stringify(buildShimMcpConfig(shimPath, socketPath, this.name, this.opts.consultEnabled, this.opts.attachEnabled, this.opts.publishEnabled)))
+    write(mcpConfigPath, JSON.stringify(buildShimMcpConfig(shimPath, socketPath, this.name, this.opts.consultEnabled, this.opts.attachEnabled, this.opts.publishEnabled, this.opts.peeringEnabled)))
 
     const initialSessionId = this.opts.resumable
       ? (this.opts.readSession?.() ?? (this.opts.sessionPath ? readSessionFile(this.opts.sessionPath) : undefined))

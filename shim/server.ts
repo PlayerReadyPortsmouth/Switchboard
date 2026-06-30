@@ -26,6 +26,8 @@ export function toolCallToWire(name: string, args: Record<string, any>) {
       return { t: "attach", chatId: args.chat_id, path: args.path, caption: args.caption, filename: args.filename }
     case "publish_link":
       return { t: "publish", path: args.path, mode: args.mode, title: args.title, scope: args.scope, ttlDays: args.ttl_days }
+    case "notify_peer":
+      return { t: "notify_peer", target: args.target, text: args.text }
     default:
       return null
   }
@@ -52,6 +54,7 @@ async function main() {
   let reqCounter = 0
   const pending = new Map<string, (notes: { title: string; body: string }[]) => void>()
   const pendingAsk = new Map<string, (answer: string) => void>()
+  const pendingPeerAsk = new Map<string, (answer: string) => void>()
   const pendingPublish = new Map<string, (r: { url?: string; error?: string }) => void>()
   const decoder = new LineDecoder()
   const sock = await Bun.connect({
@@ -66,6 +69,9 @@ async function main() {
           } else if (m.t === "ask_agent_result" && m.id && pendingAsk.has(m.id)) {
             pendingAsk.get(m.id)!(m.answer ?? "")
             pendingAsk.delete(m.id)
+          } else if (m.t === "ask_peer_result" && m.id && pendingPeerAsk.has(m.id)) {
+            pendingPeerAsk.get(m.id)!(m.answer ?? "")
+            pendingPeerAsk.delete(m.id)
           } else if (m.t === "publish_result" && m.id && pendingPublish.has(m.id)) {
             pendingPublish.get(m.id)!({ url: m.url, error: m.error }); pendingPublish.delete(m.id)
           }
@@ -185,6 +191,20 @@ async function main() {
           ttl_days: { type: "number" } },
           required: ["path"] },
       }] : []),
+      ...(process.env.PEERING === "1" ? [
+        { name: "notify_peer",
+          description: "Send a one-way message to an agent on another Switchboard hub (no reply). Address it `peer:agent` — the peer name from hub config and the remote agent's name. Delivery is queued + retried; you get back a queued ack, not the remote agent's response.",
+          inputSchema: { type: "object", properties: {
+            target: { type: "string", description: "Remote address as \"peer:agent\"." },
+            text: { type: "string", description: "The message to deliver." } },
+            required: ["target", "text"] } },
+        { name: "ask_peer",
+          description: "Ask an agent on another Switchboard hub a question and get its answer back. Address it `peer:agent`. The remote hub runs that agent and returns its reply; expect a wait while it thinks. Only agents the remote operator has made peer-reachable will answer.",
+          inputSchema: { type: "object", properties: {
+            target: { type: "string", description: "Remote address as \"peer:agent\"." },
+            message: { type: "string", description: "Your question or task for the remote agent." } },
+            required: ["target", "message"] } },
+      ] : []),
     ],
   }))
 
@@ -203,6 +223,17 @@ async function main() {
         ? notes.map((n) => `## ${n.title}\n${n.body}`).join("\n\n")
         : "(no relevant memory found)"
       return { content: [{ type: "text", text }] }
+    }
+    // ask_peer is request/response: send, await the remote hub's reply.
+    if (req.params.name === "ask_peer") {
+      const id = `pa${++reqCounter}`
+      const answer = await new Promise<string>((resolve) => {
+        pendingPeerAsk.set(id, resolve)
+        sock.write(encode({ t: "ask_peer", id, target: args.target, message: args.message }))
+        const timer = setTimeout(() => { if (pendingPeerAsk.delete(id)) resolve("(the peer agent did not respond in time)") }, 310000)
+        ;(timer as { unref?: () => void }).unref?.()
+      })
+      return { content: [{ type: "text", text: answer }] }
     }
     // ask_agent is request/response: send, await the consulted agent's reply.
     if (req.params.name === "ask_agent") {
