@@ -4,12 +4,12 @@ import type { PeeringConfig } from "./types"
 
 const cfg: PeeringConfig = {
   selfName: "a", selfBaseUrl: "http://127.0.0.1:1", peers: [
-    { name: "peer-staging", baseUrl: "http://127.0.0.1:8787", secretEnv: "S" },
+    { name: "hub-b", baseUrl: "http://127.0.0.1:8788", secretEnv: "S" },
   ],
 }
 
 test("parseTarget splits peer:agent, rejects malformed", () => {
-  expect(parseTarget("peer-staging:agent-b")).toEqual({ peer: "peer-staging", agent: "agent-b" })
+  expect(parseTarget("hub-b:agent-b")).toEqual({ peer: "hub-b", agent: "agent-b" })
   expect(parseTarget("noColon")).toBeNull()
   expect(parseTarget(":agent-b")).toBeNull()
   expect(parseTarget("peer:")).toBeNull()
@@ -25,7 +25,7 @@ test("sign/verify roundtrip; reject tampered body and wrong secret", () => {
 })
 
 test("resolvePeer finds by name", () => {
-  expect(resolvePeer(cfg, "peer-staging")?.baseUrl).toBe("http://127.0.0.1:8787")
+  expect(resolvePeer(cfg, "hub-b")?.baseUrl).toBe("http://127.0.0.1:8788")
   expect(resolvePeer(cfg, "nope")).toBeUndefined()
 })
 

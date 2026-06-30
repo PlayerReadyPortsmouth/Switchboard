@@ -369,8 +369,8 @@ export interface WorkflowConfig {
 }
 
 export interface PeerDef {
-  name: string        // logical peer id, e.g. "peer-staging"
-  baseUrl: string     // WireGuard origin, e.g. "http://127.0.0.1:8787"
+  name: string        // logical peer id, e.g. "hub-b"
+  baseUrl: string     // peer's reachable origin, e.g. "http://127.0.0.1:8788"
   secretEnv: string   // env var holding this peer's shared HMAC secret
 }
 

@@ -111,6 +111,43 @@ These optional arrays in `config/hub.config.json` wire the hub to the outside wo
 - **`approvals`** — `{ enabled?, channelId?, approvers?, ttlMs? }`. Human-in-the-loop gate: a `requireApproval` effect (today, an `outboundWebhooks[]` route) **parks instead of firing** and posts an **Approve / Deny** card; only a configured `approver` (default the deploy approver) may resolve it, and the effect runs **only on grant** — deny, a `ttlMs` timeout, or a hub restart all leave it unfired (fail-closed). Every step (`request`/`grant`/`deny`/`expire`) is an `approval` audit event threaded by `corr`. Off unless `enabled`; with it off, `requireApproval` is inert.
 - **`consult`** — `{ enabled?, timeoutMs? }`. Inter-agent consult: exposes an **`ask_agent`** MCP tool so one agent can ask another (by name) a question and get its reply back. An agent is consultable only if its `access.consultableBy` lists the requester (or `"*"`); a self-consult is always denied. Each consult is a `consult` audit event. Off unless `enabled` (with it off the tool isn't even exposed).
 
+### Cross-VPS peering
+
+A hub can reach agents running on a **separate hub instance** (on another host or loopback) via the `peering` config block. Off by default (`enabled: false`); when on, the hub registers `/peer/notify`, `/peer/ask`, and `/peer/reply` HTTP routes and exposes two additional MCP tools to agents.
+
+**Config block** (`config/hub.config.json`):
+
+```jsonc
+"peering": {
+  "enabled": false,
+  "listenPath": "/peer",          // route prefix for inbound peer traffic
+  "selfName": "hub-a",            // this hub's identity as seen by peers
+  "selfBaseUrl": "http://127.0.0.1:8787",  // reachable base URL for this hub (used as ask replyTo)
+  "askTimeoutMs": 300000,         // how long to wait for a reply to an ask (ms)
+  "mirrorChannelId": null,        // optional Discord channel to mirror all liaison messages
+  "dedupeWindowMs": 600000,       // corrId dedup window (ms)
+  "maxClockSkewMs": 120000,       // max tolerated clock skew between hubs (ms)
+  "ratePerPeerPerMin": 120,       // max inbound requests per peer per minute (0 = unlimited)
+  "notifyRetry": { "maxAttempts": 5, "baseDelayMs": 2000 },
+  "peers": [
+    { "name": "hub-b", "baseUrl": "http://127.0.0.1:8788", "secretEnv": "PEER_HUB_B_SECRET" }
+  ]
+}
+```
+
+Each entry in `peers[]` is `{ name, baseUrl, secretEnv }`. `secretEnv` names an environment variable that holds the **shared HMAC secret** for that peer — the secret is never written to config, only the env var name. Both hubs must configure each other as peers with the same secret; a mismatch produces a 401 and an `onRejected` log entry.
+
+**Addressing a peer's agent** uses `peer:agent` notation — e.g. `hub-b:researcher`. The hub splits on the first `:` to identify the target peer and agent name.
+
+**Agent tools** (exposed only when `peering.enabled`):
+
+- **`notify_peer`** — fire-and-forget: sends a `notify` envelope to a named target (`"hub-b:researcher"`). The message is spooled for durable delivery with HMAC signing, clock-skew checking, corrId dedup, and per-peer rate limiting on the receiving side. The calling agent does not wait for a reply.
+- **`ask_peer`** — request/reply: sends an `ask` envelope and waits up to `askTimeoutMs` for the remote agent's reply, which comes back as a `reply` envelope POSTed to this hub's `/peer/reply` route. The reply text is returned to the calling agent as the tool result. Both tools are additionally gated by the **target agent's `access.peerableBy`** allowlist on the remote hub (the remote hub enforces this; the local hub enforces `peering.enabled`).
+
+**Logging:** message bodies are written to `<stateDir>/liaison.log.jsonl` (one JSON line per envelope, including text). Only **metadata** (peer name, corrId, kind, outcome) goes to the audit ledger as `kind: "liaison"` rows — no message text in the audit log.
+
+**Security:** all peer-to-peer HTTP traffic is signed with HMAC-SHA256 (`X-Switchboard-Signature: sha256=<hex>`) using the per-peer shared secret. The receiver verifies the signature, checks the timestamp against `maxClockSkewMs`, and deduplicates by `corrId` within `dedupeWindowMs`. Rejected envelopes (bad signature, unknown peer, stale timestamp, duplicate, rate-exceeded) are logged and return 4xx — they are never delivered. Run hubs behind a private network or VPN tunnel; `peering` does not add transport encryption on top of HTTP.
+
 ## Rich interactions — cards, modals, files & links
 
 Beyond plain chat, an agent drives Discord through its MCP **shim** (registered via `--mcp-config`, relayed to the hub over a local socket). The full agent-facing tool surface:
