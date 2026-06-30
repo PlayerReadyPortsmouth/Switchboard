@@ -63,3 +63,8 @@ ut("publish_link maps to a publish wire message", () => {
   ue(wire("publish_link", { path: "r.pdf", mode: "view", title: "R", scope: "staff", ttl_days: 7 }) as any)
     .toEqual({ t: "publish", path: "r.pdf", mode: "view", title: "R", scope: "staff", ttlDays: 7 })
 })
+
+ut("notify_peer maps to a fire-and-forget wire frame", () => {
+  ue(wire("notify_peer", { target: "p:agent", text: "hi" }) as any)
+    .toEqual({ t: "notify_peer", target: "p:agent", text: "hi" })
+})

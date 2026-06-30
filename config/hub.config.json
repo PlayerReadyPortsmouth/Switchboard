@@ -144,6 +144,21 @@
     "approvers": ["<discord user id>"],
     "ttlMs": 3600000
   },
+  "peering": {
+    "enabled": false,
+    "listenPath": "/peer",
+    "selfName": "hub-a",
+    "selfBaseUrl": "http://127.0.0.1:8787",
+    "askTimeoutMs": 300000,
+    "mirrorChannelId": null,
+    "dedupeWindowMs": 600000,
+    "maxClockSkewMs": 120000,
+    "ratePerPeerPerMin": 120,
+    "notifyRetry": { "maxAttempts": 5, "baseDelayMs": 2000 },
+    "peers": [
+      { "name": "hub-b", "baseUrl": "http://127.0.0.1:8788", "secretEnv": "PEER_HUB_B_SECRET" }
+    ]
+  },
   "consult": {
     "enabled": true,
     "timeoutMs": 90000

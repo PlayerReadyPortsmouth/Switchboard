@@ -70,6 +70,7 @@ export interface AgentAccess {
   roles: string[]       // role names; "*" means any paired user
   users?: string[]      // user snowflakes
   consultableBy?: string[]  // agent names allowed to consult this agent via ask_agent ("*" = any); absent ⇒ none
+  peerableBy?: string[]   // remote peer names allowed to reach this agent via ask_peer ("*" = any); absent ⇒ none
 }
 
 /** Per-agent overseer policy: keep prodding the agent until a judge says the
@@ -285,6 +286,7 @@ export interface HubConfig {
   audit?: AuditConfig            // append-only ledger of every governed effect (default off)
   approvals?: ApprovalConfig     // human-in-the-loop approval gate for requireApproval effects (default off)
   consult?: ConsultConfig        // inter-agent ask_agent tool (default off; per-agent access via consultableBy)
+  peering?: PeeringConfig        // cross-VPS hub liaison (default off; per-agent access via peerableBy)
   workflows?: WorkflowRoute[]    // declarative multi-step agent missions (run via !run)
   workflow?: WorkflowConfig      // workflow engine config (default off)
   attachments?: AttachmentConfig // pass Discord file uploads through to agents (default off)
@@ -366,6 +368,26 @@ export interface WorkflowConfig {
   stepTimeoutMs?: number         // per-step hub-side wait (default 120000)
 }
 
+export interface PeerDef {
+  name: string        // logical peer id, e.g. "hub-b"
+  baseUrl: string     // peer's reachable origin, e.g. "http://127.0.0.1:8788"
+  secretEnv: string   // env var holding this peer's shared HMAC secret
+}
+
+export interface PeeringConfig {
+  enabled?: boolean
+  listenPath?: string          // default "/peer"
+  selfName: string             // this hub's identity to peers
+  selfBaseUrl: string          // this hub's reachable base, for ask replyTo
+  askTimeoutMs?: number        // default 300000
+  mirrorChannelId?: string | null
+  dedupeWindowMs?: number      // default 600000
+  maxClockSkewMs?: number      // default 120000
+  ratePerPeerPerMin?: number   // default 0 (off)
+  notifyRetry?: { maxAttempts?: number; baseDelayMs?: number }
+  peers: PeerDef[]
+}
+
 /** Inter-agent consult config. Absent/disabled ⇒ the ask_agent tool isn't even
  *  exposed to agents. Per-pair access is still governed by `access.consultableBy`. */
 export interface ConsultConfig {
@@ -377,6 +399,7 @@ export interface ConsultConfig {
 export type AuditKind =
   | "route" | "spawn" | "exec" | "outbound"
   | "session" | "access" | "approval" | "event" | "card" | "consult" | "mission"
+  | "liaison"
 
 /** One ledger record: who (`actor`) did what (`kind`/`action`) to what (`target`)
  *  in which conversation (`chat`), and how it resolved (`outcome`). Metadata only

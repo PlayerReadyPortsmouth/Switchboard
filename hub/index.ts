@@ -61,10 +61,15 @@ import { resolveOutboxFile } from "./outboxAttach"
 import { makeAttachHandler } from "./attachHandler"
 import { publishArtifact } from "./publishLink"
 import { selectExpired } from "./publishCleanup"
-import { randomBytes } from "crypto"
+import { randomBytes, randomUUID } from "crypto"
 import { MemoryBrowse } from "./memoryBrowse"
 import { BrowseSessions } from "./memoryBrowseSessions"
 import { renderListCard, renderDetailCard, renderConfirmCard, parseMemArg, type NoteSummary } from "./memoryCard"
+import { parseTarget, resolvePeer, peerSecret, PeerDedupe, PeerRateLimiter, type PeerEnvelope } from "./peering"
+import { postPeer } from "./peerClient"
+import { PeerSpool, type SpoolItem } from "./peerSpool"
+import { LiaisonLog } from "./liaisonLog"
+import { handlePeerRequest, type PeerRouteDeps } from "./peerRoutes"
 
 const CONFIG_DIR = process.env.SWITCHBOARD_CONFIG ?? join(import.meta.dir, "..", "config")
 const { hub, agents } = loadConfigs(CONFIG_DIR)
@@ -379,6 +384,39 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonT
     retryingConsults.add(e.channel)
     void runConsultRetry(targetName, e.channel, inbound, discordCh, settle, () => consultSettled)
   }))
+  // Outbound peer notify: queue + spool. Fire-and-forget from the agent's view.
+  socket.onNotifyPeer(({ target, text }) => {
+    if (!peeringOn || !peering) return
+    const parsed = parseTarget(target)
+    if (!parsed || !resolvePeer(peering, parsed.peer)) {
+      audit.record({ kind: "liaison", actor: `agent:${name}`, action: "notify", target, outcome: "deny" })
+      return
+    }
+    const body: PeerEnvelope = { from: peering.selfName, to: target, corrId: randomUUID(), kind: "notify", text, ts: Date.now() }
+    audit.record({ kind: "liaison", actor: `agent:${name}`, action: "notify", target, outcome: "ok", corr: body.corrId, detail: { dir: "out", bytes: Buffer.byteLength(text) } })
+    liaison.write({ dir: "out", kind: "notify", corrId: body.corrId, peer: parsed.peer, localAgent: name, remoteAgent: parsed.agent, text, ok: true })
+    liaisonMirror(`↗ ${name} → ${target}: notify`)
+    peerSpool.enqueue(target, body)
+    persistSpool()
+  })
+  // Outbound peer ask: open a pending entry, POST /peer/ask, await /peer/reply.
+  socket.onAskPeer(({ target, message }) => new Promise<string>((resolveAnswer) => {
+    if (!peeringOn || !peering) { resolveAnswer("(peering disabled)"); return }
+    const parsed = parseTarget(target)
+    const def = parsed ? resolvePeer(peering, parsed.peer) : undefined
+    const secret = parsed ? secretForPeer(parsed.peer) : undefined
+    if (!parsed || !def || !secret) { resolveAnswer(`(unknown peer in "${target}")`); return }
+    const corrId = randomUUID()
+    const e = peerAskRegistry.open(name, target, resolveAnswer)
+    peerAskByCorr.set(corrId, e.channel)
+    audit.record({ kind: "liaison", actor: `agent:${name}`, action: "ask", target, outcome: "pending", corr: corrId, detail: { dir: "out", bytes: Buffer.byteLength(message) } })
+    liaison.write({ dir: "out", kind: "ask", corrId, peer: parsed.peer, localAgent: name, remoteAgent: parsed.agent, text: message, ok: true })
+    liaisonMirror(`↗ ${name} → ${target}: ask`)
+    const body: PeerEnvelope = { from: peering.selfName, to: target, corrId, kind: "ask", text: message, ts: Date.now(), replyTo: `${peering.selfBaseUrl}${peering.listenPath ?? "/peer"}/reply` }
+    void postPeer(peering.selfName, def, secret, `${peering.listenPath ?? "/peer"}/ask`, body, realFetch).then((r) => {
+      if (!r.ok) { peerAskByCorr.delete(corrId); peerAskRegistry.settle(e.channel, `(peer unreachable: ${r.status})`) }
+    })
+  }))
   // Agent-initiated outbound file attachment. Disabled ⇒ handler ignores the
   // frame (double-gate alongside the tool not being listed). The agent identity
   // is this transport's `name`, never taken from the frame.
@@ -427,6 +465,7 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonT
     consultEnabled: !!hub.consult?.enabled,
     attachEnabled: !!hub.outboundAttachments?.enabled,
     publishEnabled: shareLinksOn,
+    peeringEnabled: peeringOn,
     onOverflow: (inbound) => {
       // Consults in the retry loop own their own retry/settle lifecycle — don't
       // short-circuit them here, just drop the overflow silently.
@@ -556,6 +595,83 @@ let missionStepCounter = 0
 let missionRunCounter = 0
 const missionRegistry = new MissionRegistry(() => `s${++missionStepCounter}`)
 const missionCards = new Map<string, { chatId: string; messageId: string }>()
+
+// Cross-VPS peering: agents on this hub can notify/ask agents on a remote hub
+// (and vice versa) over an HMAC-signed HTTP channel. All inert when peering is
+// absent or disabled. Singletons declared here so the makeTransport callbacks and
+// the inbound route handlers (both later in this file) close over them.
+const peering = hub.peering
+const peeringOn = !!peering?.enabled
+const liaisonLogPath = join(hub.stateDir, "liaison.log.jsonl")
+const liaison = new LiaisonLog({ append: (l) => { try { appendFileSync(liaisonLogPath, l) } catch {} }, now: Date.now })
+const peerDedupe = new PeerDedupe(Date.now, peering?.dedupeWindowMs ?? 600_000)
+const peerRate = new PeerRateLimiter(Date.now, peering?.ratePerPeerPerMin ?? 0)
+// Outbound asks awaiting a /peer/reply, keyed by corrId. Reuse ConsultRegistry's
+// open/settle/sweepExpired shape (virtual "channel" = the consult id).
+let peerAskSeq = 0
+const peerAskRegistry = new ConsultRegistry(Date.now, () => `pk${++peerAskSeq}`, peering?.askTimeoutMs ?? 300_000)
+// corrId -> the peerAskRegistry channel for the outbound ask awaiting that reply.
+const peerAskByCorr = new Map<string, string>()
+
+// Outbound poster + spool. A real fetch adapter; the spool retries notify
+// deliveries with exponential backoff and dead-letters after maxAttempts.
+const realFetch = async (url: string, init: { method: string; headers: Record<string, string>; body: string }) => {
+  const res = await fetch(url, init); return { status: res.status }
+}
+function secretForPeer(peerName: string): string | undefined {
+  if (!peering) return undefined
+  const def = resolvePeer(peering, peerName)
+  return def ? peerSecret(process.env, def) : undefined
+}
+const peerSpool = new PeerSpool({
+  now: Date.now,
+  maxAttempts: peering?.notifyRetry?.maxAttempts ?? 5,
+  baseDelayMs: peering?.notifyRetry?.baseDelayMs ?? 2000,
+  send: async (item: SpoolItem) => {
+    const parsed = parseTarget(item.target)
+    if (!parsed) return true   // unparseable target → drop (don't spin forever)
+    const def = peering ? resolvePeer(peering, parsed.peer) : undefined
+    const secret = secretForPeer(parsed.peer)
+    if (!def || !secret) return true   // unresolvable → drop
+    const r = await postPeer(peering!.selfName, def, secret, `${peering!.listenPath ?? "/peer"}/notify`, item.body, realFetch)
+    return r.ok
+  },
+  onDeadLetter: (item) => {
+    const { peer, agent } = parseTarget(item.target) ?? { peer: "?", agent: "?" }
+    audit.record({ kind: "liaison", actor: "hub", action: "deadletter", target: item.target, outcome: "error", corr: item.body.corrId })
+    liaison.write({ dir: "out", kind: "deadletter", corrId: item.body.corrId, peer, remoteAgent: agent, text: item.body.text, ok: false, error: "max attempts" })
+    persistSpool()
+  },
+})
+// Durable notify spool: persist snapshot to disk so queued/retrying notifies
+// survive a hub restart. Inert when peering is off. Atomic write via tmp+rename
+// (mirrors cron-state.json / bindings.json); restore runs before any enqueue so
+// the spool's seq is correct. Corrupt/missing file → start empty, never throw.
+const peerSpoolPath = join(hub.stateDir, "peer-spool.json")
+function persistSpool(): void {
+  if (!peeringOn) return
+  try {
+    const tmp = peerSpoolPath + ".tmp"
+    writeFileSync(tmp, JSON.stringify(peerSpool.snapshot()))
+    renameSync(tmp, peerSpoolPath)
+  } catch {}
+}
+if (peeringOn) {
+  try {
+    if (existsSync(peerSpoolPath)) peerSpool.restore(JSON.parse(readFileSync(peerSpoolPath, "utf8")))
+  } catch {}
+}
+// Drain the spool on a timer (only when peering is on).
+if (peeringOn) {
+  const drain = setInterval(() => { void peerSpool.drainOnce().then(persistSpool) }, 2000)
+  ;(drain as { unref?: () => void }).unref?.()
+}
+
+// Mirror peer traffic to a Discord channel (read-only transcript) when configured.
+function liaisonMirror(line: string): void {
+  const ch = peering?.mirrorChannelId
+  if (ch) void gateway.sendPlain(ch, line)
+}
 
 /** Run one mission step: dispatch the prompt to `agent` on a hidden channel and
  *  await the captured reply. Resolves {ok:false} on an unavailable/busy agent or
@@ -717,6 +833,17 @@ async function onAgentReply(reply: AgentReply, key: string): Promise<void> {
         target: settled.requester, chat: reply.chatId, outcome: "ok", corr: settled.id,
       })
     }
+    return
+  }
+  // Inbound peer ask: a reply on a peerAskRegistry consult channel (opened by
+  // deliverPeerAsk for a remote caller) is the local agent's answer — settle it so
+  // sendBack POSTs the answer to the caller's replyTo, and never run the normal
+  // Discord pipeline. peerAskRegistry also holds OUTBOUND pending-asks, but those
+  // channels never receive a local agent reply (they settle via the route onReply /
+  // peerAskByCorr), so this branch only ever matches inbound local-consults.
+  if (peerAskRegistry.isConsultChannel(reply.chatId)) {
+    const answer = consultAnswerFromReply(reply)
+    if (answer !== undefined) peerAskRegistry.settle(reply.chatId, answer)
     return
   }
   // Mission step: a reply on a virtual mission channel is a workflow step's output
@@ -1139,7 +1266,76 @@ const webhookHandlers: WebhookHandler[] = (hub.webhooks ?? []).map((w) => ({
     deliverToAgent(w.agent, w.channelId, `webhook:${w.path}`, content)
   },
 }))
-const listener = startWebhookListener(hub.webhookPort ?? 0, webhookHandlers)
+// Inbound peer ask: run a LOCAL consult against the addressed agent, then POST
+// the answer back to the caller's replyTo. The local agent is the `agent` half of
+// the envelope's `to` ("<thisHubsPeerName>:<localAgent>").
+function deliverPeerAsk(e: PeerEnvelope): void {
+  const parsed = parseTarget(e.to)
+  const agentName = parsed ? parsed.agent : e.to
+  const cfg = agents[agentName]
+  const callerPeer = e.from
+  const allowed = !!cfg && !!(cfg.access.peerableBy?.includes("*") || cfg.access.peerableBy?.includes(callerPeer))
+  const replyTo = e.replyTo
+  const def = peering ? resolvePeer(peering, callerPeer) : undefined
+  const secret = secretForPeer(callerPeer)
+  const sendBack = (answer: string, ok: boolean, errKind: "reply" | "timeout" = "reply") => {
+    liaison.write({ dir: "out", kind: errKind, corrId: e.corrId, peer: callerPeer, localAgent: agentName, remoteAgent: undefined, text: answer, ok })
+    audit.record({ kind: "liaison", actor: `agent:${agentName}`, action: errKind, target: callerPeer, outcome: ok ? "ok" : "error", corr: e.corrId })
+    if (replyTo && def && secret && peering) {
+      const body: PeerEnvelope = { from: peering.selfName, to: callerPeer, corrId: e.corrId, kind: "reply", text: answer, ts: Date.now() }
+      // replyTo comes from the remote envelope but is only reached after HMAC
+      // verification against the configured peer's shared secret, so only an
+      // operator-trusted peer can set it.
+      // POST straight to the absolute replyTo URL (not baseUrl + path).
+      void postPeer(peering.selfName, { ...def, baseUrl: "" }, secret, replyTo, body, realFetch)
+    }
+  }
+  if (!allowed) { sendBack(`(agent "${agentName}" is not peer-reachable from "${callerPeer}")`, false); return }
+  liaison.write({ dir: "in", kind: "ask", corrId: e.corrId, peer: callerPeer, localAgent: agentName, text: e.text, ok: true })
+  audit.record({ kind: "liaison", actor: `peer:${callerPeer}`, action: "ask", target: agentName, outcome: "ok", corr: e.corrId })
+  liaisonMirror(`↘ ${callerPeer} → ${agentName}: ask`)
+  const consult = peerAskRegistry.open(`peer:${callerPeer}`, agentName, (answer) => sendBack(answer, true))
+  const inbound: InboundMessage = { chatId: consult.channel, messageId: `peerask:${e.corrId}`, userId: "system", user: "hub", content: e.text, ts: new Date().toISOString(), isDM: false }
+  const target = pools.get(agentName) ?? transports.get(agentName)
+  if (!target?.isAvailable()) { peerAskRegistry.settle(consult.channel, `(agent "${agentName}" is unavailable)`); return }
+  dispatcher.dispatch(agentName, consult.channel, inbound)
+}
+
+const peerRouteDeps: PeerRouteDeps | null = peeringOn && peering ? {
+  cfg: peering,
+  secretFor: secretForPeer,
+  dedupe: peerDedupe,
+  now: Date.now,
+  rateOk: (p) => peerRate.ok(p),
+  onNotify: (e) => {
+    const parsed = parseTarget(e.to); const agentName = parsed ? parsed.agent : e.to
+    const cfg = agents[agentName]
+    const allowed = !!cfg && !!(cfg.access.peerableBy?.includes("*") || cfg.access.peerableBy?.includes(e.from))
+    liaison.write({ dir: "in", kind: "notify", corrId: e.corrId, peer: e.from, localAgent: agentName, text: e.text, ok: allowed })
+    audit.record({ kind: "liaison", actor: `peer:${e.from}`, action: "notify", target: agentName, outcome: allowed ? "ok" : "deny", corr: e.corrId })
+    if (allowed) { liaisonMirror(`↘ ${e.from} → ${agentName}: notify`); deliverToAgent(agentName, "", `peer:${e.from}`, e.text) }
+  },
+  onAsk: deliverPeerAsk,
+  onReply: (e) => {
+    const channel = peerAskByCorr.get(e.corrId)
+    if (channel) { peerAskByCorr.delete(e.corrId); peerAskRegistry.settle(channel, e.text) }
+    liaison.write({ dir: "in", kind: "reply", corrId: e.corrId, peer: e.from, text: e.text, ok: true })
+    audit.record({ kind: "liaison", actor: `peer:${e.from}`, action: "reply", target: e.from, outcome: "ok", corr: e.corrId })
+  },
+  onRejected: (peerName, reason) => {
+    audit.record({ kind: "liaison", actor: `peer:${peerName}`, action: "rejected", outcome: "deny", detail: { reason } })
+    liaison.write({ dir: "in", kind: "rejected", corrId: "-", peer: peerName, ok: false, error: reason })
+  },
+} : null
+
+const extraHandler = peerRouteDeps
+  ? (req: Request) => {
+      const base = peering!.listenPath ?? "/peer"
+      return new URL(req.url).pathname.startsWith(base) ? handlePeerRequest(req, peerRouteDeps) : Promise.resolve(null)
+    }
+  : undefined
+
+const listener = startWebhookListener(hub.webhookPort ?? 0, webhookHandlers, extraHandler)
 void listener
 
 // Schedules: 1-minute tick evaluating each entry's cron (timezone-aware,
@@ -1492,4 +1688,19 @@ if (hub.consult?.enabled) {
       audit.record({ kind: "consult", actor: "hub", action: "timeout", target: e.requester, outcome: "error", corr: e.id })
     }
   }, 10_000).unref()
+}
+
+// Time out outbound peer asks (and inbound local-consults) whose answer never
+// arrived. sweepExpired removes each entry and returns it; resolve once more.
+if (peeringOn) {
+  const sweep = setInterval(() => {
+    for (const e of peerAskRegistry.sweepExpired()) {
+      e.resolve("(peer ask timed out)")
+      // Drop any peerAskByCorr side-index entry pointing at this swept channel so
+      // the map can't grow under sustained outbound-ask timeouts.
+      for (const [corr, ch] of peerAskByCorr) if (ch === e.channel) peerAskByCorr.delete(corr)
+      audit.record({ kind: "liaison", actor: "hub", action: "timeout", target: e.target, outcome: "error", corr: e.id })
+    }
+  }, 5000)
+  ;(sweep as { unref?: () => void }).unref?.()
 }
