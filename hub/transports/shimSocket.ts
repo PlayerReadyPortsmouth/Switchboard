@@ -25,6 +25,8 @@ export class ShimSocketServer {
   private recallCb: (q: { query: string; scopes?: string[] }) => Promise<RecalledNote[]> = async () => []
   private postWebhookCb: (w: { target: string; body?: string }) => void = () => {}
   private askAgentCb: (q: { agent: string; message: string }) => Promise<string> = async () => ""
+  private notifyPeerCb: (n: { target: string; text: string }) => void = () => {}
+  private askPeerCb: (q: { target: string; message: string }) => Promise<string> = async () => ""
   private attachCb: (a: { chatId: string; path: string; caption?: string; filename?: string }) => void = () => {}
   private publishCb: (a: { path: string; mode?: string; title?: string; scope?: string; ttlDays?: number }) => Promise<{ url?: string; error?: string }> = async () => ({})
 
@@ -40,6 +42,8 @@ export class ShimSocketServer {
   onRecall(cb: typeof this.recallCb) { this.recallCb = cb }
   onPostWebhook(cb: typeof this.postWebhookCb) { this.postWebhookCb = cb }
   onAskAgent(cb: typeof this.askAgentCb) { this.askAgentCb = cb }
+  onNotifyPeer(cb: typeof this.notifyPeerCb) { this.notifyPeerCb = cb }
+  onAskPeer(cb: typeof this.askPeerCb) { this.askPeerCb = cb }
   onAttach(cb: typeof this.attachCb) { this.attachCb = cb }
   onPublish(cb: typeof this.publishCb) { this.publishCb = cb }
   isRegistered() { return this.registered }
@@ -83,6 +87,14 @@ export class ShimSocketServer {
         // Request/response: run the consulted agent, then write its answer back by id.
         void this.askAgentCb({ agent: m.agent, message: m.message }).then((answer) => {
           try { socket.write(encode({ t: "ask_agent_result", id: m.id, answer })) } catch {}
+        })
+        break
+      case "notify_peer":
+        this.notifyPeerCb({ target: m.target, text: m.text }); break
+      case "ask_peer":
+        // Request/response: run peer ask, then write its answer back by id.
+        void this.askPeerCb({ target: m.target, message: m.message }).then((answer) => {
+          try { socket.write(encode({ t: "ask_peer_result", id: m.id, answer })) } catch {}
         })
         break
       case "publish":
