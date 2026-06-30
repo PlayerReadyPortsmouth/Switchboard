@@ -51,3 +51,15 @@ export class PeerDedupe {
     return false
   }
 }
+
+export class PeerRateLimiter {
+  private hits = new Map<string, number[]>()
+  constructor(private now: () => number, private perMin: number) {}
+  ok(peer: string): boolean {
+    if (this.perMin <= 0) return true
+    const t = this.now()
+    const arr = (this.hits.get(peer) ?? []).filter((ts) => t - ts < 60_000)
+    if (arr.length >= this.perMin) { this.hits.set(peer, arr); return false }
+    arr.push(t); this.hits.set(peer, arr); return true
+  }
+}

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { parseTarget, signPeerBody, verifyPeerBody, resolvePeer, PeerDedupe, freshTs } from "./peering"
+import { parseTarget, signPeerBody, verifyPeerBody, resolvePeer, PeerDedupe, freshTs, PeerRateLimiter } from "./peering"
 import type { PeeringConfig } from "./types"
 
 const cfg: PeeringConfig = {
@@ -42,4 +42,17 @@ test("freshTs rejects stale/future beyond skew", () => {
   expect(freshTs(1000, 1000, 100)).toBe(true)
   expect(freshTs(1000, 1201, 100)).toBe(false) // too old
   expect(freshTs(1300, 1000, 100)).toBe(false) // too far future
+})
+
+test("PeerRateLimiter caps per peer per minute; 0 = unlimited", () => {
+  let t = 0
+  const rl = new PeerRateLimiter(() => t, 2)
+  expect(rl.ok("p")).toBe(true)
+  expect(rl.ok("p")).toBe(true)
+  expect(rl.ok("p")).toBe(false)      // 3rd within the minute
+  expect(rl.ok("q")).toBe(true)       // other peer independent
+  t = 61_000
+  expect(rl.ok("p")).toBe(true)       // window rolled
+  const off = new PeerRateLimiter(() => 0, 0)
+  for (let i = 0; i < 100; i++) expect(off.ok("p")).toBe(true)
 })
