@@ -397,6 +397,7 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonT
     liaison.write({ dir: "out", kind: "notify", corrId: body.corrId, peer: parsed.peer, localAgent: name, remoteAgent: parsed.agent, text, ok: true })
     liaisonMirror(`↗ ${name} → ${target}: notify`)
     peerSpool.enqueue(target, body)
+    persistSpool()
   })
   // Outbound peer ask: open a pending entry, POST /peer/ask, await /peer/reply.
   socket.onAskPeer(({ target, message }) => new Promise<string>((resolveAnswer) => {
@@ -639,11 +640,30 @@ const peerSpool = new PeerSpool({
     const { peer, agent } = parseTarget(item.target) ?? { peer: "?", agent: "?" }
     audit.record({ kind: "liaison", actor: "hub", action: "deadletter", target: item.target, outcome: "error", corr: item.body.corrId })
     liaison.write({ dir: "out", kind: "deadletter", corrId: item.body.corrId, peer, remoteAgent: agent, text: item.body.text, ok: false, error: "max attempts" })
+    persistSpool()
   },
 })
+// Durable notify spool: persist snapshot to disk so queued/retrying notifies
+// survive a hub restart. Inert when peering is off. Atomic write via tmp+rename
+// (mirrors cron-state.json / bindings.json); restore runs before any enqueue so
+// the spool's seq is correct. Corrupt/missing file → start empty, never throw.
+const peerSpoolPath = join(hub.stateDir, "peer-spool.json")
+function persistSpool(): void {
+  if (!peeringOn) return
+  try {
+    const tmp = peerSpoolPath + ".tmp"
+    writeFileSync(tmp, JSON.stringify(peerSpool.snapshot()))
+    renameSync(tmp, peerSpoolPath)
+  } catch {}
+}
+if (peeringOn) {
+  try {
+    if (existsSync(peerSpoolPath)) peerSpool.restore(JSON.parse(readFileSync(peerSpoolPath, "utf8")))
+  } catch {}
+}
 // Drain the spool on a timer (only when peering is on).
 if (peeringOn) {
-  const drain = setInterval(() => { void peerSpool.drainOnce() }, 2000)
+  const drain = setInterval(() => { void peerSpool.drainOnce().then(persistSpool) }, 2000)
   ;(drain as { unref?: () => void }).unref?.()
 }
 
@@ -813,6 +833,17 @@ async function onAgentReply(reply: AgentReply, key: string): Promise<void> {
         target: settled.requester, chat: reply.chatId, outcome: "ok", corr: settled.id,
       })
     }
+    return
+  }
+  // Inbound peer ask: a reply on a peerAskRegistry consult channel (opened by
+  // deliverPeerAsk for a remote caller) is the local agent's answer — settle it so
+  // sendBack POSTs the answer to the caller's replyTo, and never run the normal
+  // Discord pipeline. peerAskRegistry also holds OUTBOUND pending-asks, but those
+  // channels never receive a local agent reply (they settle via the route onReply /
+  // peerAskByCorr), so this branch only ever matches inbound local-consults.
+  if (peerAskRegistry.isConsultChannel(reply.chatId)) {
+    const answer = consultAnswerFromReply(reply)
+    if (answer !== undefined) peerAskRegistry.settle(reply.chatId, answer)
     return
   }
   // Mission step: a reply on a virtual mission channel is a workflow step's output
@@ -1252,6 +1283,9 @@ function deliverPeerAsk(e: PeerEnvelope): void {
     audit.record({ kind: "liaison", actor: `agent:${agentName}`, action: errKind, target: callerPeer, outcome: ok ? "ok" : "error", corr: e.corrId })
     if (replyTo && def && secret && peering) {
       const body: PeerEnvelope = { from: peering.selfName, to: callerPeer, corrId: e.corrId, kind: "reply", text: answer, ts: Date.now() }
+      // replyTo comes from the remote envelope but is only reached after HMAC
+      // verification against the configured peer's shared secret, so only an
+      // operator-trusted peer can set it.
       // POST straight to the absolute replyTo URL (not baseUrl + path).
       void postPeer(peering.selfName, { ...def, baseUrl: "" }, secret, replyTo, body, realFetch)
     }
@@ -1662,6 +1696,9 @@ if (peeringOn) {
   const sweep = setInterval(() => {
     for (const e of peerAskRegistry.sweepExpired()) {
       e.resolve("(peer ask timed out)")
+      // Drop any peerAskByCorr side-index entry pointing at this swept channel so
+      // the map can't grow under sustained outbound-ask timeouts.
+      for (const [corr, ch] of peerAskByCorr) if (ch === e.channel) peerAskByCorr.delete(corr)
       audit.record({ kind: "liaison", actor: "hub", action: "timeout", target: e.target, outcome: "error", corr: e.id })
     }
   }, 5000)

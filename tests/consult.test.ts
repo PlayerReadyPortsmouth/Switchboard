@@ -82,6 +82,36 @@ test("consultAnswerFromReply ignores non-answering reply kinds (consult keeps wa
   expect(consultAnswerFromReply(reply({ kind: "card", card: undefined }))).toBeUndefined()
 })
 
+// ---- inbound peer-ask settle contract (regression for the onAgentReply branch
+// that settles a peerAskRegistry channel; the hub routes a local agent's reply on
+// that channel through exactly this consultAnswerFromReply + settle sequence). ----
+
+test("an agent reply on a pending inbound-ask channel settles it via the answer", () => {
+  const h = harness()
+  let sentBack: string | undefined
+  // deliverPeerAsk opens the inbound local-consult; resolve POSTs back to replyTo.
+  const e = h.r.open("peer:remote", "localAgent", (ans) => { sentBack = ans })
+  // The local agent answers on that channel — the onAgentReply branch runs this:
+  const agentReply = reply({ chatId: e.channel, kind: "reply", text: "remote, here is your answer" })
+  const answer = consultAnswerFromReply(agentReply)
+  expect(answer).toBe("remote, here is your answer")
+  const settled = h.r.settle(e.channel, answer ?? "")
+  expect(settled?.id).toBe(e.id)
+  expect(sentBack).toBe("remote, here is your answer")
+  expect(h.r.pendingCount()).toBe(0)
+})
+
+test("a card answer on a pending inbound-ask channel still settles it (serialized)", () => {
+  const h = harness()
+  let sentBack: string | undefined
+  const e = h.r.open("peer:remote", "localAgent", (ans) => { sentBack = ans })
+  const agentReply = reply({ chatId: e.channel, kind: "card", card: { title: "Done", body: "the result", buttons: [] } })
+  const answer = consultAnswerFromReply(agentReply)
+  const settled = h.r.settle(e.channel, answer ?? "")
+  expect(settled?.id).toBe(e.id)
+  expect(sentBack).toBe("Done\n\nthe result")
+})
+
 test("sweepExpired returns only past-deadline consults", () => {
   const h = harness(1000)
   h.at(0)
