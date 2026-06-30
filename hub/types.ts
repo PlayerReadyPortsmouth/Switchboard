@@ -9,6 +9,7 @@ export interface InboundMessage {
   isDM: boolean
   attachments?: { name: string; type: string; size: number; url?: string }[]
   quote?: { user: string; content: string }   // the message this one quote-replies to
+  forwards?: { content: string }[]             // forwarded message snapshot text (Discord forward feature; no author)
 }
 
 /** A text-input popup a button can open instead of acting immediately. */

@@ -1,5 +1,5 @@
 import {
-  Client, GatewayIntentBits, Partials, ChannelType,
+  Client, GatewayIntentBits, Partials, ChannelType, MessageReferenceType,
   ButtonBuilder, ButtonStyle, ActionRowBuilder, EmbedBuilder, AttachmentBuilder,
   type Message, type Interaction,
 } from "discord.js"
@@ -94,6 +94,33 @@ export function buildWorkingRow(): ActionRowBuilder<ButtonBuilder> {
   )
 }
 
+/** A forwarded message snapshot, normalised. Discord delivers forwards in
+ *  `message_snapshots` (not `content`), and strips the original author. */
+export interface ForwardSnapshot {
+  content: string
+  attachments: { name: string; type: string; size: number; url?: string }[]
+}
+
+/** Pull forwarded message snapshots off a Discord message. discord.js reconstructs
+ *  each snapshot as a Message (content/attachments/embeds) in `messageSnapshots`,
+ *  but with NO author. Duck-typed on `.values()` so it's unit-testable with Maps. */
+export function extractForwards(msg: {
+  messageSnapshots?: { values(): Iterable<{ content?: string; attachments?: { values(): Iterable<any> } }> }
+}): ForwardSnapshot[] {
+  const snaps = msg.messageSnapshots
+  if (!snaps || typeof snaps.values !== "function") return []
+  const out: ForwardSnapshot[] = []
+  for (const s of snaps.values()) {
+    const attachments = s.attachments && typeof s.attachments.values === "function"
+      ? [...s.attachments.values()].map((a) => ({
+          name: a.name ?? a.id, type: a.contentType ?? "unknown", size: a.size ?? 0, url: a.url,
+        }))
+      : []
+    out.push({ content: s.content ?? "", attachments })
+  }
+  return out
+}
+
 /** Build the discord.js `files` payload from in-memory buffers. Clamps to
  *  Discord's 10-attachment limit; each attachment carries its own display name. */
 export function buildAttachmentFiles(attachments: { data: Buffer; name: string }[]): AttachmentBuilder[] {
@@ -178,20 +205,30 @@ export class Gateway {
       if (msg.author.bot) return
       void (async () => {
         // Capture a quote-reply target — it isn't visible in fetched history.
+        // A forward (reference.type === Forward) carries no fetchable reply; its
+        // body lives in message_snapshots, handled separately below.
         let quote: { user: string; content: string } | undefined
-        if (msg.reference?.messageId) {
+        if (msg.reference?.messageId && msg.reference.type !== MessageReferenceType.Forward) {
           try {
             const ref = await msg.fetchReference()
             if (ref && !ref.author.bot && ref.content) quote = { user: ref.author.username, content: ref.content }
           } catch {}
         }
+        // Surface forwarded messages (Discord "forward" feature). Snapshots carry
+        // no author. Forwarded files are merged into the attachment list so they
+        // flow through the existing download/Read pipeline.
+        const forwards = extractForwards(msg)
         this.onMessage({
           chatId: msg.channelId, messageId: msg.id, userId: msg.author.id,
           user: msg.author.username, content: msg.content,
           ts: msg.createdAt.toISOString(), isDM: msg.channel.type === ChannelType.DM,
-          attachments: [...msg.attachments.values()].map(a => ({
-            name: a.name ?? a.id, type: a.contentType ?? "unknown", size: a.size, url: a.url })),
+          attachments: [
+            ...[...msg.attachments.values()].map(a => ({
+              name: a.name ?? a.id, type: a.contentType ?? "unknown", size: a.size, url: a.url })),
+            ...forwards.flatMap(f => f.attachments),
+          ],
           quote,
+          forwards: forwards.length ? forwards.map(f => ({ content: f.content })) : undefined,
         })
       })()
     })

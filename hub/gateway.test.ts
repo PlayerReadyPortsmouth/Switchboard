@@ -1,6 +1,34 @@
 import { test, expect } from "bun:test"
-import { buildCardComponents, parseNotifyCustomId } from "./gateway"
+import { buildCardComponents, parseNotifyCustomId, extractForwards } from "./gateway"
 import { isDeployAuthorized } from "./deployGate"
+
+test("extractForwards reads forwarded snapshots (content + attachments), no author", () => {
+  const att = new Map([["a1", { id: "a1", name: "shot.png", contentType: "image/png", size: 2048, url: "http://x/shot.png" }]])
+  const msg = {
+    messageSnapshots: new Map([["m1", { content: "forwarded body", attachments: att }]]),
+  }
+  expect(extractForwards(msg)).toEqual([
+    { content: "forwarded body", attachments: [{ name: "shot.png", type: "image/png", size: 2048, url: "http://x/shot.png" }] },
+  ])
+})
+
+test("extractForwards is empty when there are no snapshots", () => {
+  expect(extractForwards({})).toEqual([])
+  expect(extractForwards({ messageSnapshots: new Map() })).toEqual([])
+})
+
+test("extractForwards tolerates a snapshot with no content and no attachments", () => {
+  const msg = { messageSnapshots: new Map([["m1", {}]]) }
+  expect(extractForwards(msg)).toEqual([{ content: "", attachments: [] }])
+})
+
+test("extractForwards falls back to id/unknown for nameless attachments", () => {
+  const att = new Map([["a1", { id: "a1", size: 10 }]])
+  const msg = { messageSnapshots: new Map([["m1", { content: "x", attachments: att }]]) }
+  expect(extractForwards(msg)).toEqual([
+    { content: "x", attachments: [{ name: "a1", type: "unknown", size: 10, url: undefined }] },
+  ])
+})
 
 test("buildCardComponents maps CardSpec buttons to an embed + action row", () => {
   const { embed, row } = buildCardComponents({

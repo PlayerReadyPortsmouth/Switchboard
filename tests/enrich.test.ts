@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test"
-import { enrich, foldQuote, foldAttachments } from "../hub/enrich"
+import { enrich, foldQuote, foldAttachments, foldForward } from "../hub/enrich"
 
 test("returns the bare content when no blocks", () => {
   expect(enrich("hello", {})).toBe("hello")
@@ -20,6 +20,26 @@ test("foldQuote inlines a reply target, no-op without one", () => {
     .toBe('(replying to alice: "should we ship?")\nyes do that')
   expect(foldQuote("hi", undefined)).toBe("hi")
   expect(foldQuote("hi", { user: "a", content: "   " })).toBe("hi")
+})
+
+test("foldForward inlines a forwarded message, no-op without one", () => {
+  expect(foldForward("look at this", [{ content: "the original text" }]))
+    .toBe('↪️ Forwarded message: "the original text"\nlook at this')
+  expect(foldForward("hi", undefined)).toBe("hi")
+  expect(foldForward("hi", [])).toBe("hi")
+})
+
+test("foldForward marks a media-only forward (no text)", () => {
+  expect(foldForward("see this", [{ content: "" }]))
+    .toBe("↪️ Forwarded message (no text — see attachments)\nsee this")
+  expect(foldForward("see this", [{ content: "   " }]))
+    .toBe("↪️ Forwarded message (no text — see attachments)\nsee this")
+})
+
+test("foldForward collapses whitespace, clamps length, handles multiple", () => {
+  const long = "x".repeat(1500)
+  const out = foldForward("base", [{ content: "a\n\nb   c" }, { content: long }])
+  expect(out).toBe(`↪️ Forwarded message: "a b c"\n↪️ Forwarded message: "${"x".repeat(1000)}"\nbase`)
 })
 
 test("foldAttachments is a no-op with no files", () => {

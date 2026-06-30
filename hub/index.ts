@@ -21,7 +21,7 @@ import { matchGatedAction, requiresApprover } from "./gatedActions"
 import { isDeployAuthorized } from "./deployGate"
 import { clearReactionAgent } from "./channelPin"
 import { MessageCache } from "./messageCache"
-import { enrich, foldQuote, foldAttachments } from "./enrich"
+import { enrich, foldQuote, foldAttachments, foldForward } from "./enrich"
 import { materializeAttachments } from "./attachments"
 import { mkdir as mkdirAsync, writeFile as writeFileAsync } from "fs/promises"
 import { expandHome } from "./config"
@@ -1427,8 +1427,9 @@ const orchestrator = new Orchestrator(hub, agents, {
     const policy = rt?.injectContext ?? "onSwitch"
     const wantContext = policy === "always" || (policy === "onSwitch" && isSwitch)
     const context = wantContext ? messageCache.render(inbound.chatId) : ""
-    // Fold any quote-reply target into the live message so the agent sees it.
-    let live = foldQuote(inbound.content, inbound.quote)
+    // Fold any quote-reply target and forwarded message(s) into the live message
+    // so the agent sees them (Discord delivers neither in the typed content).
+    let live = foldForward(foldQuote(inbound.content, inbound.quote), inbound.forwards)
     // Pass user-uploaded files through: download them locally and tell the agent
     // where to Read them. Off unless attachments.enabled (then byte-identical).
     if (hub.attachments?.enabled && inbound.attachments?.length) {

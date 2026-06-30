@@ -16,6 +16,22 @@ export function foldQuote(content: string, quote?: { user: string; content: stri
   return `(replying to ${quote.user}: "${q}")\n${content}`
 }
 
+/** Inline forwarded message(s) into the message, so the agent sees content a user
+ *  forwarded from elsewhere (Discord delivers it in `message_snapshots`, separate
+ *  from the typed text). Snapshots carry no author — Discord strips identity — so
+ *  the block is unattributed. Forwarded attachments flow through the normal
+ *  attachment pipeline (and are surfaced by `foldAttachments`); this handles text. */
+export function foldForward(content: string, forwards?: { content: string }[]): string {
+  if (!forwards || forwards.length === 0) return content
+  const blocks = forwards.map((f) => {
+    const t = f.content.replace(/\s+/g, " ").trim().slice(0, 1000)
+    return t
+      ? `↪️ Forwarded message: "${t}"`
+      : "↪️ Forwarded message (no text — see attachments)"
+  })
+  return `${blocks.join("\n")}\n${content}`
+}
+
 /** A user-uploaded file after the hub has tried to download it locally. `path` is
  *  the on-disk location the agent can Read; absent ⇒ it wasn't downloaded. */
 export interface FoldableAttachment {
