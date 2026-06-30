@@ -79,6 +79,21 @@ export function renderAgentList(reg: AgentRegistry, permitted: string[], current
   return lines.length ? lines.join("\n") : "(no agents available to you)"
 }
 
+/** A single disabled "Working" button row. Swapped in when a user clicks a card
+ *  button (or submits a card modal) so the card immediately reflects "handed off,
+ *  in progress" and can't be double-clicked. The agent's later editCard replaces
+ *  it with the final state; if the agent never edits, the card simply rests here. */
+export function buildWorkingRow(): ActionRowBuilder<ButtonBuilder> {
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId("working:noop")
+      .setLabel("Working")
+      .setEmoji("⏳")
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(true),
+  )
+}
+
 /** A forwarded message snapshot, normalised. Discord delivers forwards in
  *  `message_snapshots` (not `content`), and strips the original author. */
 export interface ForwardSnapshot {
@@ -226,8 +241,14 @@ export class Gateway {
         }
         const fields: Record<string, string> = {}
         for (const [key, comp] of interaction.fields.fields) fields[key] = (comp as any).value
+        // Swap the originating card to a disabled "Working" button first (instant
+        // feedback, no double-submit), then hand off. The agent's editCard wins later.
+        if (interaction.isFromMessage()) {
+          await interaction.update({ components: [buildWorkingRow()] }).catch(() => {})
+        } else {
+          await interaction.deferUpdate().catch(() => {})
+        }
         this.modalSubmitCb(interaction.customId, interaction.user.id, fields)
-        await interaction.deferUpdate().catch(() => {})
         return
       }
       if (!interaction.isButton()) return
@@ -262,8 +283,11 @@ export class Gateway {
         await interaction.reply({ content: "🔒 Not authorized for this action.", ephemeral: true }).catch(() => {})
         return
       }
+      // Swap the card to a single disabled "Working" button first — instant
+      // feedback that the action was taken and prevents a double-click — then route
+      // to the agent. The agent's later editCard replaces the Working row.
+      await interaction.update({ components: [buildWorkingRow()] }).catch(() => {})
       this.notifyButtonCb(interaction.customId, interaction.user.id)
-      await interaction.deferUpdate().catch(() => {})   // hub/agent edits the card to reflect the action
     })
     this.client.on("messageReactionAdd", async (reaction, user) => {
       try {
