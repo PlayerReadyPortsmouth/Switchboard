@@ -30,6 +30,33 @@ test("extractForwards falls back to id/unknown for nameless attachments", () => 
   ])
 })
 
+test("extractForwards renders a rich embed into the snapshot content (no typed text)", () => {
+  const msg = {
+    messageSnapshots: new Map([["m1", {
+      content: "",
+      embeds: [{
+        title: "Deploy #40 — Complete",
+        fields: [{ name: "Branch", value: "live" }, { name: "Step", value: "done" }],
+        url: "http://x/deploy/40",
+      }],
+    }]]),
+  }
+  expect(extractForwards(msg)).toEqual([{
+    content: "Deploy #40 — Complete\nBranch: live\nStep: done\nhttp://x/deploy/40",
+    attachments: [],
+  }])
+})
+
+test("extractForwards appends embed text after typed content", () => {
+  const msg = {
+    messageSnapshots: new Map([["m1", {
+      content: "see this card",
+      embeds: [{ description: "the body" }],
+    }]]),
+  }
+  expect(extractForwards(msg)).toEqual([{ content: "see this card\n\nthe body", attachments: [] }])
+})
+
 test("buildCardComponents maps CardSpec buttons to an embed + action row", () => {
   const { embed, row } = buildCardComponents({
     title: "Build failed", body: "logs…",

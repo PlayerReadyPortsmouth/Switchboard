@@ -101,11 +101,29 @@ export interface ForwardSnapshot {
   attachments: { name: string; type: string; size: number; url?: string }[]
 }
 
+/** Flatten a forwarded embed into readable lines. Forwarded bot cards (deploy
+ *  notifications, link previews, etc.) carry all their text in `embeds`, not
+ *  `content`, so without this they'd surface blank. */
+function renderEmbed(e: {
+  title?: string | null; description?: string | null; url?: string | null
+  fields?: { name: string; value: string }[]
+}): string {
+  const parts: string[] = []
+  if (e.title) parts.push(e.title)
+  if (e.description) parts.push(e.description)
+  for (const f of e.fields ?? []) if (f?.name || f?.value) parts.push(`${f.name}: ${f.value}`)
+  if (e.url) parts.push(e.url)
+  return parts.join("\n")
+}
+
 /** Pull forwarded message snapshots off a Discord message. discord.js reconstructs
  *  each snapshot as a Message (content/attachments/embeds) in `messageSnapshots`,
- *  but with NO author. Duck-typed on `.values()` so it's unit-testable with Maps. */
+ *  but with NO author. Embeds are flattened into the content so forwarded bot cards
+ *  aren't lost. Duck-typed on `.values()` so it's unit-testable with Maps. */
 export function extractForwards(msg: {
-  messageSnapshots?: { values(): Iterable<{ content?: string; attachments?: { values(): Iterable<any> } }> }
+  messageSnapshots?: { values(): Iterable<{
+    content?: string; attachments?: { values(): Iterable<any> }; embeds?: any[]
+  }> }
 }): ForwardSnapshot[] {
   const snaps = msg.messageSnapshots
   if (!snaps || typeof snaps.values !== "function") return []
@@ -116,7 +134,10 @@ export function extractForwards(msg: {
           name: a.name ?? a.id, type: a.contentType ?? "unknown", size: a.size ?? 0, url: a.url,
         }))
       : []
-    out.push({ content: s.content ?? "", attachments })
+    const embedText = (Array.isArray(s.embeds) ? s.embeds : [])
+      .map(renderEmbed).filter((t) => t.trim()).join("\n\n")
+    const content = [s.content ?? "", embedText].filter((t) => t && t.trim()).join("\n\n")
+    out.push({ content, attachments })
   }
   return out
 }
