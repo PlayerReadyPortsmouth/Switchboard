@@ -59,3 +59,12 @@ test("handleWebhookRequest routes by path to the matching secret/handler", async
   expect(res.status).toBe(202)
   expect(seen).toEqual(["b:{}"])
 })
+
+test("extraHandler is consulted first; null falls through to routes", async () => {
+  // pure-level check via a tiny inline composition mirroring startWebhookListener's fetch
+  const extra = async (req: Request) =>
+    new URL(req.url).pathname.startsWith("/peer") ? new Response("peer", { status: 202 }) : null
+  const compose = async (req: Request) => (await extra(req)) ?? new Response("fell-through", { status: 200 })
+  expect((await compose(new Request("http://h/peer/x", { method: "POST" }))).status).toBe(202)
+  expect((await compose(new Request("http://h/other", { method: "POST" }))).status).toBe(200)
+})

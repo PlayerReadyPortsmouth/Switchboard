@@ -36,12 +36,19 @@ export async function handleWebhookRequest(
  *  null (no-op) if there is no port or no usable route. */
 export function startWebhookListener(
   port: number, routes: WebhookHandler[],
+  extraHandler?: (req: Request) => Promise<Response | null>,
 ): { stop: () => void } | null {
   const usable = routes.filter((r) => r.secret)
-  if (!port || usable.length === 0) return null
+  if (!port || (usable.length === 0 && !extraHandler)) return null
   const server = Bun.serve({
     port,
-    fetch: (req) => handleWebhookRequest(req, usable),
+    fetch: async (req) => {
+      if (extraHandler) {
+        const r = await extraHandler(req)
+        if (r) return r
+      }
+      return handleWebhookRequest(req, usable)
+    },
   })
   return { stop: () => server.stop(true) }
 }
