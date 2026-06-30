@@ -60,6 +60,17 @@ gt("buildModal integrates for a feedback button (smoke)", () => {
   ge(m.data.custom_id).toBe("fix:feedback:T1")
 })
 
+import { buildWorkingRow } from "./gateway"
+
+test("buildWorkingRow is a single disabled Working button", () => {
+  const row = buildWorkingRow()
+  expect(row.components.length).toBe(1)
+  const b = row.components[0].data as any
+  expect(b.label).toBe("Working")
+  expect(b.disabled).toBe(true)
+  expect(b.custom_id).toBe("working:noop")
+})
+
 import { buildAttachmentFiles } from "./gateway"
 import { AttachmentBuilder } from "discord.js"
 
