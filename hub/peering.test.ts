@@ -1,0 +1,45 @@
+import { expect, test } from "bun:test"
+import { parseTarget, signPeerBody, verifyPeerBody, resolvePeer, PeerDedupe, freshTs } from "./peering"
+import type { PeeringConfig } from "./types"
+
+const cfg: PeeringConfig = {
+  selfName: "a", selfBaseUrl: "http://127.0.0.1:1", peers: [
+    { name: "peer-staging", baseUrl: "http://127.0.0.1:8787", secretEnv: "S" },
+  ],
+}
+
+test("parseTarget splits peer:agent, rejects malformed", () => {
+  expect(parseTarget("peer-staging:agent-b")).toEqual({ peer: "peer-staging", agent: "agent-b" })
+  expect(parseTarget("noColon")).toBeNull()
+  expect(parseTarget(":agent-b")).toBeNull()
+  expect(parseTarget("peer:")).toBeNull()
+})
+
+test("sign/verify roundtrip; reject tampered body and wrong secret", () => {
+  const body = JSON.stringify({ hello: "world" })
+  const sig = signPeerBody(body, "s3cr3t")
+  expect(sig.startsWith("sha256=")).toBe(true)
+  expect(verifyPeerBody(body, sig, "s3cr3t")).toBe(true)
+  expect(verifyPeerBody(body + "x", sig, "s3cr3t")).toBe(false)
+  expect(verifyPeerBody(body, sig, "other")).toBe(false)
+})
+
+test("resolvePeer finds by name", () => {
+  expect(resolvePeer(cfg, "peer-staging")?.baseUrl).toBe("http://127.0.0.1:8787")
+  expect(resolvePeer(cfg, "nope")).toBeUndefined()
+})
+
+test("PeerDedupe flags repeats inside the window only", () => {
+  let t = 1000
+  const d = new PeerDedupe(() => t, 500)
+  expect(d.seen("c1")).toBe(false)  // first sight
+  expect(d.seen("c1")).toBe(true)   // duplicate
+  t = 1600                          // past window
+  expect(d.seen("c1")).toBe(false)  // pruned → fresh again
+})
+
+test("freshTs rejects stale/future beyond skew", () => {
+  expect(freshTs(1000, 1000, 100)).toBe(true)
+  expect(freshTs(1000, 1201, 100)).toBe(false) // too old
+  expect(freshTs(1300, 1000, 100)).toBe(false) // too far future
+})
