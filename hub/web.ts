@@ -359,7 +359,7 @@ function renderAgentPreview(p){
   lastPreviewId = p.id;
   var beforeStr = p.before ? JSON.stringify(p.before, null, 2) : '(new agent)';
   var afterStr = p.after ? JSON.stringify(p.after, null, 2) : '(removed)';
-  $('agentDiff').textContent = 'BEFORE:\n'+beforeStr+'\n\nAFTER:\n'+afterStr+'\n\nCLASSIFICATION: '+p.classification.tier+
+  $('agentDiff').textContent = 'BEFORE:\\n'+beforeStr+'\\n\\nAFTER:\\n'+afterStr+'\\n\\nCLASSIFICATION: '+p.classification.tier+
     (p.classification.fullRestart.length ? ' ('+p.classification.fullRestart.join(', ')+')' : '');
   var row = $('agentConfirmRow');
   row.innerHTML = '';
@@ -390,7 +390,7 @@ document.addEventListener('click', function(ev){
     method: 'POST', headers: {'content-type':'application/json'},
     body: JSON.stringify({id: lastPreviewId, hard: hard}),
   }).then(function(r){ return r.json(); }).then(function(result){
-    $('agentDiff').textContent += '\n\nRESULT: '+JSON.stringify(result);
+    $('agentDiff').textContent += '\\n\\nRESULT: '+JSON.stringify(result);
     $('agentConfirmRow').innerHTML = '';
     lastPreviewId = null;
     loadAgentsAfterConfirm();
@@ -433,7 +433,7 @@ function renderHubConfigPreview(p){
   lastHubConfigPreviewId = p.id;
   var beforeStr = JSON.stringify(p.before, null, 2);
   var afterStr = JSON.stringify(p.after, null, 2);
-  $('hubConfigDiff').textContent = 'BEFORE:\n'+beforeStr+'\n\nAFTER:\n'+afterStr+'\n\nCLASSIFICATION: '+p.classification.tier+
+  $('hubConfigDiff').textContent = 'BEFORE:\\n'+beforeStr+'\\n\\nAFTER:\\n'+afterStr+'\\n\\nCLASSIFICATION: '+p.classification.tier+
     (p.classification.fullRestart.length ? ' ('+p.classification.fullRestart.join(', ')+')' : '');
   var row = $('hubConfigConfirmRow');
   row.innerHTML = '';
@@ -449,7 +449,7 @@ document.addEventListener('click', function(ev){
     method: 'POST', headers: {'content-type':'application/json'},
     body: JSON.stringify({id: lastHubConfigPreviewId}),
   }).then(function(r){ return r.json(); }).then(function(result){
-    $('hubConfigDiff').textContent += '\n\nRESULT: '+JSON.stringify(result);
+    $('hubConfigDiff').textContent += '\\n\\nRESULT: '+JSON.stringify(result);
     $('hubConfigConfirmRow').innerHTML = '';
     lastHubConfigPreviewId = null;
   });
