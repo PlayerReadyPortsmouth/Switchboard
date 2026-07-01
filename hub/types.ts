@@ -514,6 +514,8 @@ export interface ReloadConfig {
 export interface TraceConfig {
   enabled?: boolean              // default false
   file?: string                 // default <stateDir>/trace.jsonl
+  retentionDays?: number         // periodic sweep drops records older than this (default 14)
+  sweepIntervalMs?: number       // sweep cadence (default 6h)
 }
 
 /** Access-weighted recall + the periodic vault-tending pass. Absent ⇒ recall
