@@ -123,3 +123,11 @@ test("the customId matches the gateway notify scheme (ns:action:arg, ns≠perm)"
   expect(/^([a-z][a-z0-9_]*):([a-z0-9_]+):(.+)$/.test(id)).toBe(true)
   expect(id.startsWith("perm:")).toBe(false)
 })
+
+test("list() returns every pending entry, none resolved/expired", () => {
+  const h = harness()
+  const a = h.r.request(req({ target: "route-a" }), () => {})
+  const b = h.r.request(req({ target: "route-b" }), () => {})
+  h.r.resolve(a.id, "grant")
+  expect(h.r.list()).toEqual([b])
+})
