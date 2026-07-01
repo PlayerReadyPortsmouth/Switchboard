@@ -285,6 +285,7 @@ export interface HubConfig {
   webPort?: number               // port for the read-only web dashboard (absent ⇒ off)
   webHost?: string               // bind host for the web dashboard (default 127.0.0.1; set 0.0.0.0 to expose)
   audit?: AuditConfig            // append-only ledger of every governed effect (default off)
+  trace?: TraceConfig            // full-fidelity per-turn trace with message bodies (default off)
   approvals?: ApprovalConfig     // human-in-the-loop approval gate for requireApproval effects (default off)
   consult?: ConsultConfig        // inter-agent ask_agent tool (default off; per-agent access via consultableBy)
   peering?: PeeringConfig        // cross-VPS hub liaison (default off; per-agent access via peerableBy)
@@ -470,6 +471,13 @@ export interface AuditConfig {
   redactEnv?: string[]          // extra secret env names whose values are masked in detail
   maxBytes?: number             // optional size-based rotation threshold
   keepFiles?: number            // optional rotated-file retention count
+}
+
+/** Full-fidelity per-turn trace (message bodies included), separate from the
+ *  metadata-only AuditLog. Default off; when on, writes JSONL to <stateDir>/trace.jsonl. */
+export interface TraceConfig {
+  enabled?: boolean              // default false
+  file?: string                 // default <stateDir>/trace.jsonl
 }
 
 /** Access-weighted recall + the periodic vault-tending pass. Absent ⇒ recall
