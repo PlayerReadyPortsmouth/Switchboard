@@ -29,3 +29,8 @@ test("the dashboard HTML has an approvals panel and a channel chat pane", () => 
   expect(DASHBOARD_HTML).toContain('id="chat"')
   expect(DASHBOARD_HTML).toContain("api/channels")
 })
+
+test("the [data-cmd] click handler renders the command result into the chat pane via chatLine", () => {
+  expect(DASHBOARD_HTML).toContain("fetch('api/command/'+cmd")
+  expect(DASHBOARD_HTML).toContain("chatLine({ts: Date.now(), origin: 'agent', author: cmd, content: d.text})")
+})

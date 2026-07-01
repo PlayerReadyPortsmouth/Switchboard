@@ -175,9 +175,14 @@ $('channelPicker').addEventListener('change', function(){ openChannel(this.value
 document.addEventListener('click', function(ev){
   var btn = ev.target.closest('[data-cmd]');
   if (!btn || !currentChannel) return;
-  fetch('api/command/'+btn.getAttribute('data-cmd'), {
+  var cmd = btn.getAttribute('data-cmd');
+  fetch('api/command/'+cmd, {
     method: 'POST', headers: {'content-type':'application/json'},
     body: JSON.stringify({channelId: currentChannel}),
+  }).then(function(r){ return r.json(); }).then(function(d){
+    if (!d || typeof d.text !== 'string') return;
+    $('chat').appendChild(chatLine({ts: Date.now(), origin: 'agent', author: cmd, content: d.text}));
+    $('chat').scrollTop = $('chat').scrollHeight;
   });
 });
 $('chatForm').addEventListener('submit', function(ev){
