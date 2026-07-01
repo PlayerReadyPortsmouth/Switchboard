@@ -7,6 +7,23 @@ test("the dashboard polls a RELATIVE api/status (works under a subpath mount)", 
   expect(DASHBOARD_HTML).not.toContain("fetch('/api/status')")
 })
 
+test("the dashboard's <script> block is syntactically valid JS", () => {
+  // DASHBOARD_HTML is itself a backtick template literal, so a literal \n
+  // typed inside it — even inside what's meant to be a nested single-quoted
+  // JS string for the browser — gets consumed by the OUTER TypeScript
+  // template literal and turned into a real newline character before the
+  // browser ever sees it, landing a raw newline inside a single-quoted
+  // string literal (a syntax error). Because a syntax error anywhere in a
+  // <script> block prevents ANY of that block's code from running — not
+  // just the offending line — this one check stands in for the whole
+  // dashboard's basic functionality. The other tests in this file only
+  // assert DASHBOARD_HTML.toContain(...) on string markers, which cannot
+  // catch this class of bug (it's a real string, just an invalid one).
+  const m = DASHBOARD_HTML.match(/<script>([\s\S]*)<\/script>/)
+  expect(m).not.toBeNull()
+  expect(() => new Function(m![1]!)).not.toThrow()
+})
+
 test("renderDashboardJson projects pendingApprovalList via webActions", () => {
   const e: PendingApproval = {
     id: "appr-1", kind: "outbound", target: "route-a", actor: "hub",
