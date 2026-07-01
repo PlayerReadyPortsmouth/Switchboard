@@ -4,6 +4,8 @@ import { config as loadEnv } from "./env"
 import { loadConfigs } from "./config"
 import { escalatedRuntime, countErrors, RateCap } from "./escalation"
 import { planReload } from "./configReload"
+import { classifyAgentChange, invalidAgentConfigShape, type AgentChangeClassification } from "./agentConfigDraft"
+import { AgentConfigPreviewRegistry } from "./agentConfigPreview"
 import { BaseGate } from "./baseGate"
 import { Gateway, parseNotifyCustomId } from "./gateway"
 import { Dispatcher, type AgentTransport } from "./transports/index"
@@ -80,7 +82,26 @@ import { LiaisonLog } from "./liaisonLog"
 import { handlePeerRequest, type PeerRouteDeps } from "./peerRoutes"
 
 const CONFIG_DIR = process.env.SWITCHBOARD_CONFIG ?? join(import.meta.dir, "..", "config")
+const AGENTS_JSON_PATH = join(CONFIG_DIR, "agents.json")
 const { hub, agents } = loadConfigs(CONFIG_DIR)
+
+/** Read config/agents.json fresh, in its raw on-disk shape — NOT loadConfigs
+ *  (which also reads hub.config.json, validates the whole registry, and expands
+ *  `~` in every cwd). Phase 3 works with the raw shape end to end so an edit
+ *  round-trips exactly: GET returns what's on disk, POST writes back what was
+ *  typed, no expansion mismatch ever appears in a diff. */
+function readAgentsJson(): AgentRegistry {
+  return JSON.parse(readFileSync(AGENTS_JSON_PATH, "utf8")) as AgentRegistry
+}
+
+/** Atomically write the full agent registry back to config/agents.json
+ *  (temp-file-then-rename, matching the pattern already used for trace.jsonl's
+ *  sweep rewrite). */
+function writeAgentsJson(registry: AgentRegistry): void {
+  const tmp = `${AGENTS_JSON_PATH}.tmp-${process.pid}`
+  writeFileSync(tmp, JSON.stringify(registry, null, 2))
+  renameSync(tmp, AGENTS_JSON_PATH)
+}
 
 loadEnv(join(hub.stateDir, ".env"))   // load DISCORD_BOT_TOKEN + agent env if present
 const startedAt = Date.now()          // for the metrics/health uptime gauge
@@ -630,6 +651,12 @@ const approvalRegistry = new ApprovalRegistry(
   () => `appr-${++approvalCounter}`,
   hub.approvals?.ttlMs ?? 3_600_000,
 )
+let agentPreviewCounter = 0
+const agentConfigPreviews = new AgentConfigPreviewRegistry(
+  () => Date.now(),
+  () => `agentprev-${++agentPreviewCounter}`,
+  5 * 60_000,   // 5 minute TTL — a stale preview must be re-generated, not silently confirmed
+)
 const approvalCards = new Map<string, { chatId: string; messageId: string }>()
 const channelActivity = new Map<string, { agent: string; lastActive: number }>()
 const channelStream = new ChannelStream()
@@ -1156,6 +1183,14 @@ async function resetAgentSession(name: string, channelId: string, reason = "manu
     kind: "session", actor: "hub", action: "reset", target: name, chat: channelId, detail: { reason },
   })
   void gateway.sendPlain(channelId, "🧹 context cleared — fresh session.")
+}
+
+/** Hot-swap the one field !reload's safe tier ever applies live: per-agent
+ *  access. Shared by the Discord !reload loop (called once per agent) and the
+ *  web confirm endpoint (called once for the single agent being edited) so
+ *  there's exactly one place this hot-swap logic lives. */
+function applySafeAgentFields(name: string, next: AgentConfig): void {
+  if (agents[name]) agents[name]!.access = next.access
 }
 
 /** Respawn a persistent agent's process from its CURRENT registry config so a
@@ -1746,7 +1781,7 @@ gateway.handleInbound((m) => {
     hub.directCommands = next.hub.directCommands
     commands = next.hub.commands ?? []
     directCommands = next.hub.directCommands ?? []
-    for (const [name, cfg] of Object.entries(next.agents)) if (agents[name]) agents[name]!.access = cfg.access
+    for (const [name, cfg] of Object.entries(next.agents)) applySafeAgentFields(name, cfg)
     audit.record({ kind: "event", actor: `user:${m.userId}`, action: hard ? "reload_hard" : "reload_safe", chat: m.chatId, outcome: "ok", detail: { restartAgents: plan.restartAgents, fullRestart: plan.fullRestart } })
     const lines = [`🔧 **reload (${hard ? "hard" : "safe"})** — config re-read, safe subset hot-swapped.`]
     void (async () => {
@@ -1975,6 +2010,76 @@ const webDeps: WebDeps = {
     }
     return null
   },
+
+  listAgents: async (): Promise<Record<string, AgentConfig>> => {
+    return readAgentsJson()
+  },
+
+  previewAgentChange: async (name, config) => {
+    if (config) {
+      const shapeError = invalidAgentConfigShape(config)
+      if (shapeError) return { error: shapeError }
+    }
+    const current = readAgentsJson()
+    const before = current[name] ?? null
+    const classification = classifyAgentChange(name, before, config, hub)
+    const preview = agentConfigPreviews.create(name, before, config, classification)
+    return { id: preview.id, before: preview.before, after: preview.after, classification: preview.classification }
+  },
+
+  confirmAgentChange: async (name, id, hard, actor) => {
+    const preview = agentConfigPreviews.consume(id)
+    if (!preview || preview.agentName !== name) return { state: "not_found", restarted: [], fullRestart: [] }
+
+    // Drift check: re-read disk fresh and compare against what the preview
+    // captured as `before` — if someone else already changed this agent since
+    // the preview was generated, refuse rather than silently clobber it.
+    const current = readAgentsJson()
+    const liveBefore = current[name] ?? null
+    if (JSON.stringify(liveBefore) !== JSON.stringify(preview.before)) {
+      return { state: "conflict", restarted: [], fullRestart: [] }
+    }
+
+    // Write to disk: add/replace/remove this one agent's entry.
+    const next = { ...current }
+    if (preview.after) next[name] = preview.after
+    else delete next[name]
+    writeAgentsJson(next)
+
+    const restarted: string[] = []
+    const fullRestart = [...preview.classification.fullRestart]
+    if (preview.after) {
+      // access is always safe to hot-swap regardless of this edit's overall tier.
+      applySafeAgentFields(name, preview.after)
+      if (hard && preview.classification.tier === "hard") {
+        try {
+          // The live `agents` registry always holds EXPANDED cwds (loadConfigs
+          // expands `~` for every agent at boot) — but `preview.after` came from
+          // readAgentsJson's raw on-disk shape (cwd still literally "~" when
+          // that's what's on disk), by design, so the web editor's diff never
+          // sees an expansion mismatch. Expand here, for the in-memory object
+          // only, before it's used to respawn a live process — Bun.spawn does
+          // NOT expand `~`, so passing the raw value through would spawn with a
+          // nonexistent cwd (ENOENT) after the old process is already closed,
+          // leaving the agent dead. Disk (already written above via
+          // writeAgentsJson) correctly keeps the raw `~` form.
+          agents[name] = { ...preview.after, runtime: { ...preview.after.runtime, cwd: expandHome(preview.after.runtime.cwd) } }
+          await respawnAgent(name)
+          restarted.push(name)
+        } catch (e) {
+          process.stderr.write(`agent config confirm: respawn ${name} failed: ${e}\n`)
+          fullRestart.push(`respawn-failed:${name}`)
+        }
+      }
+    }
+
+    audit.record({
+      kind: "event", actor: `web:${actor}`, action: "agent_config_change", target: name, outcome: "ok",
+      detail: { before: preview.before, after: preview.after, classification: preview.classification },
+    })
+
+    return { state: "applied", restarted, fullRestart }
+  },
 }
 const webServer = startWebServer(hub.webPort ?? 0, webDeps, hub.webHost)
 if (webServer) console.error(`switchboard hub: web dashboard on ${hub.webHost ?? "127.0.0.1"}:${hub.webPort}`)
@@ -1990,6 +2095,10 @@ if (approvalsEnabled) {
     }
   }, 60_000).unref()
 }
+
+// Sweep expired agent-config previews (5min TTL) so a stale preview id can
+// never be silently confirmed after the operator's edit window has lapsed.
+setInterval(() => { agentConfigPreviews.sweepExpired() }, 60_000).unref()
 
 // Time out consults whose target never answered: resolve the caller's tool call
 // with a note and audit the lapse.

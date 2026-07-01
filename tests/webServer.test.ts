@@ -2,6 +2,7 @@ import { test, expect } from "bun:test"
 import { handleWebRequest } from "../hub/webServer"
 import type { WebInput, DashboardJson } from "../hub/web"
 import type { WebDeps } from "../hub/webServer"
+import type { AgentConfig } from "../hub/types"
 
 const baseInput = (): WebInput => ({
   now: 1000, startedAt: 0,
@@ -21,6 +22,9 @@ function fakeDeps(overrides: Partial<WebDeps> = {}): WebDeps {
     subscribeChannel: () => () => {},
     sendChannelMessage: async () => {},
     runCommand: async () => null,
+    listAgents: async () => ({}),
+    previewAgentChange: async () => ({ id: "prev-1", before: null, after: null, classification: { tier: "safe", fullRestart: [] } }),
+    confirmAgentChange: async () => ({ state: "not_found", restarted: [], fullRestart: [] }),
     ...overrides,
   }
 }
@@ -128,6 +132,70 @@ test("POST /api/command/:name → 200 with text, unknown command → 404", async
   expect(await ok.json()).toEqual({ text: "📜 audit: no matching events." })
   const bad = await handleWebRequest(post("/api/command/nope", { channelId: "c1" }, { "x-switchboard-user": "a@b.com" }), deps)
   expect(bad.status).toBe(404)
+})
+
+test("GET /api/agents → 200 JSON registry", async () => {
+  const agentCfg: AgentConfig = { emoji: "🤖", description: "d", mode: "persistent", access: { roles: ["*"] }, runtime: { cwd: "~" } }
+  const deps = fakeDeps({ listAgents: async () => ({ qa: agentCfg }) })
+  const res = await handleWebRequest(get("/api/agents", { "x-switchboard-user": "a@b.com" }), deps)
+  expect(res.status).toBe(200)
+  expect(await res.json()).toEqual({ qa: agentCfg })
+})
+
+test("GET /api/agents without X-Switchboard-User → 400", async () => {
+  const res = await handleWebRequest(get("/api/agents"), fakeDeps())
+  expect(res.status).toBe(400)
+})
+
+test("POST /api/agents/:name/preview → 200, forwards name and config", async () => {
+  // Wrapped in an object (not a bare `let`) so TS's control-flow narrowing doesn't
+  // collapse the read below to the closure-unreachable `null` initializer type.
+  const called: { v: [string, unknown] | null } = { v: null }
+  const deps = fakeDeps({
+    previewAgentChange: async (name, config) => {
+      called.v = [name, config]
+      return { id: "prev-1", before: null, after: config as any, classification: { tier: "restart", fullRestart: ["+agent:qa"] } }
+    },
+  })
+  const res = await handleWebRequest(post("/api/agents/qa/preview", { config: { emoji: "🤖" } }, { "x-switchboard-user": "a@b.com" }), deps)
+  expect(res.status).toBe(200)
+  expect(called.v).toEqual(["qa", { emoji: "🤖" }])
+  expect(await res.json()).toEqual({ id: "prev-1", before: null, after: { emoji: "🤖" }, classification: { tier: "restart", fullRestart: ["+agent:qa"] } })
+})
+
+test("POST /api/agents/:name/preview → 400 when previewAgentChange reports a shape error", async () => {
+  const deps = fakeDeps({
+    previewAgentChange: async () => ({ error: "runtime.cwd must be a string" }),
+  })
+  const res = await handleWebRequest(post("/api/agents/qa/preview", { config: { emoji: "🤖" } }, { "x-switchboard-user": "a@b.com" }), deps)
+  expect(res.status).toBe(400)
+  expect(await res.json()).toEqual({ error: "runtime.cwd must be a string" })
+})
+
+test("POST /api/agents/:name/confirm → 200 on applied, forwards id, hard, and the caller's email as actor", async () => {
+  const called: { v: [string, string, boolean, string] | null } = { v: null }
+  const deps = fakeDeps({
+    confirmAgentChange: async (name, id, hard, actor) => { called.v = [name, id, hard, actor]; return { state: "applied", restarted: [], fullRestart: [] } },
+  })
+  const res = await handleWebRequest(post("/api/agents/qa/confirm", { id: "prev-1", hard: true }, { "x-switchboard-user": "a@b.com" }), deps)
+  expect(res.status).toBe(200)
+  expect(called.v).toEqual(["qa", "prev-1", true, "a@b.com"])
+  expect(await res.json()).toEqual({ state: "applied", restarted: [], fullRestart: [] })
+})
+
+test("POST /api/agents/:name/confirm → 409 on not_found or conflict", async () => {
+  const notFound = fakeDeps({ confirmAgentChange: async () => ({ state: "not_found", restarted: [], fullRestart: [] }) })
+  const res1 = await handleWebRequest(post("/api/agents/qa/confirm", { id: "x", hard: false }, { "x-switchboard-user": "a@b.com" }), notFound)
+  expect(res1.status).toBe(409)
+
+  const conflict = fakeDeps({ confirmAgentChange: async () => ({ state: "conflict", restarted: [], fullRestart: [] }) })
+  const res2 = await handleWebRequest(post("/api/agents/qa/confirm", { id: "x", hard: false }, { "x-switchboard-user": "a@b.com" }), conflict)
+  expect(res2.status).toBe(409)
+})
+
+test("DELETE /api/agents with valid identity header → 405 (known guarded path, wrong method)", async () => {
+  const res = await handleWebRequest(del("/api/agents", { "x-switchboard-user": "a@b.com" }), fakeDeps())
+  expect(res.status).toBe(405)
 })
 
 test("GET /api/channel/:id/stream → SSE headers, subscribes and unsubscribes on cancel", async () => {
