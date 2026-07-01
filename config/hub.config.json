@@ -139,16 +139,18 @@
     "keepFiles": 5
   },
   "escalation": {
-    "enabled": false,
-    "model": "<stronger model id for the !hard / auto-escalation clone, or omit to keep the agent's model>",
-    "auto": false,
+    "enabled": true,
+    "auto": true,
     "autoMaxPerHour": 4
   },
   "reload": {
-    "enabled": false
+    "enabled": true
   },
   "trace": {
     "enabled": false
+  },
+  "receipts": {
+    "enabled": true
   },
   "approvals": {
     "enabled": true,
