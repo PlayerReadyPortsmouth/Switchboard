@@ -49,7 +49,6 @@ import { OutboundDelivery } from "./outboundDelivery"
 import { matchOutbound, renderBody } from "./outbound"
 import { AuditLog } from "./auditLog"
 import { parseJsonlTail, shouldRotate, rotationsToPrune } from "./audit"
-import { parseAuditCommand, renderAuditLines, renderAuditSummary } from "./auditCommand"
 import { TurnTrace, parseTraceTail, renderTrace, type TraceFilter } from "./turnTrace"
 import { runDoctor, renderDoctor, type DoctorFacts } from "./doctor"
 import { buildReplay, renderReplay, chunkLines } from "./replay"
@@ -58,6 +57,10 @@ import { startMetricsServer } from "./metricsServer"
 import { renderHealth, type MetricsInput } from "./metrics"
 import { startWebServer } from "./webServer"
 import { type WebInput } from "./web"
+import { ChannelStream, type ChannelEvent } from "./channelStream"
+import { pendingApprovalsToJson, buildWebInboundMessage, formatMirrorLine } from "./webActions"
+import { buildAuditText, buildToolsText } from "./commandActions"
+import type { WebDeps, ChannelInfo, ChannelMessageJson } from "./webServer"
 import { ConsultRegistry, mayConsult, consultAnswerFromReply } from "./consult"
 import { MissionRegistry, findWorkflow, renderStepPrompt, renderMissionCard, type MissionRun } from "./workflow"
 import type { AgentConfig, AgentReply, InboundMessage, SpawnTrigger, SpawnCardUpdate, CardSpec, DirectCommand, OutboundRoute, HubConfig, AgentRegistry, SendOutcome } from "./types"
@@ -602,6 +605,8 @@ const approvalRegistry = new ApprovalRegistry(
   hub.approvals?.ttlMs ?? 3_600_000,
 )
 const approvalCards = new Map<string, { chatId: string; messageId: string }>()
+const channelActivity = new Map<string, { agent: string; lastActive: number }>()
+const channelStream = new ChannelStream()
 // Inter-agent consult: ask_agent dispatches the question to the target on a
 // virtual "consult:<id>" channel; the target's reply is intercepted in
 // onAgentReply and returned to the caller. Off unless consult.enabled.
@@ -917,6 +922,8 @@ async function onAgentReply(reply: AgentReply, key: string): Promise<void | Send
       role: "agent", text: reply.text, ts: Date.now(), agent: reply.agent,
     })
     convActivity.set(reply.chatId, Date.now())
+    channelActivity.set(reply.chatId, { agent: reply.agent, lastActive: Date.now() })
+    channelStream.publish(reply.chatId, { ts: Date.now(), author: reply.agent, content: reply.text, origin: "agent" })
   }
   await gateway.sendReply(reply, agents[reply.agent])
   // F3 auto-escalation: if this real persistent-agent turn logged tool errors, re-run
@@ -933,6 +940,7 @@ async function onAgentReply(reply: AgentReply, key: string): Promise<void | Send
 // Monotonic job-id counter for spawn triggers (Math.random forbidden).
 let jobCounter = 0
 const nextJobId = (): string => `job-${++jobCounter}`
+let webMsgCounter = 0
 
 /** Interpolate $1,$2… (regex capture groups) and $jobId into a template. */
 function interpolate(tmpl: string, groups: string[], jobId: string): string {
@@ -1633,6 +1641,7 @@ async function runDirectCommand(cmd: DirectCommand, args: string, chatId: string
 let commands = hub.commands ?? []
 let directCommands = hub.directCommands ?? []
 gateway.handleInbound((m) => {
+  channelStream.publish(m.chatId, { ts: Date.now(), author: m.user, content: m.content, origin: "discord" })
   const trimmed = m.content.trim()
   // Audit ledger query (operator-only): list recent governed effects or a rollup.
   // Workflows: list configured missions (operator-only).
@@ -1667,12 +1676,7 @@ gateway.handleInbound((m) => {
   if (/^!audit\b/i.test(trimmed)) {
     if (!baseGate.listAllowed().includes(m.userId)) return
     if (!hub.audit?.enabled) { void gateway.sendPlain(m.chatId, "📜 audit logging is off (set `hub.audit.enabled`)."); return }
-    const q = parseAuditCommand(trimmed.replace(/^!audit\b/i, ""))
-    if (q.summary) void gateway.sendPlain(m.chatId, renderAuditSummary(audit.summary(q.filter)))
-    else void gateway.sendPlain(m.chatId, renderAuditLines(
-      audit.recent({ ...q.filter, limit: q.filter.limit ?? 25 }),
-      (ts) => new Date(ts).toISOString().slice(11, 19),
-    ))
+    void gateway.sendPlain(m.chatId, buildAuditText(trimmed.replace(/^!audit\b/i, ""), audit, (ts) => new Date(ts).toISOString().slice(11, 19)))
     return
   }
   // Two-tier config reload (operator-only). `!reload` re-reads the config file and
@@ -1774,18 +1778,7 @@ gateway.handleInbound((m) => {
   }
   if (toolObs && /^!tools\b/i.test(trimmed)) {
     if (!baseGate.listAllowed().includes(m.userId)) return
-    const who = trimmed.replace(/^!tools\b/i, "").trim()
-    const fmt = (a: { agent: string; tools: Record<string, { count: number; errors: number }> }) =>
-      `**${a.agent}** — ` + (Object.entries(a.tools)
-        .sort((x, y) => y[1].count - x[1].count)
-        .map(([n, s]) => `${n} ×${s.count}${s.errors ? ` (${s.errors}✗)` : ""}`).join(" · ") || "_none_")
-    if (who) {
-      const a = toolUsage.forAgent(who)
-      void gateway.sendPlain(m.chatId, a ? fmt(a) : `_no tool activity for ${who}_`)
-    } else {
-      const snap = toolUsage.snapshot()
-      void gateway.sendPlain(m.chatId, snap.length ? snap.map(fmt).join("\n") : "_no tool activity yet_")
-    }
+    void gateway.sendPlain(m.chatId, buildToolsText(trimmed.replace(/^!tools\b/i, "").trim(), toolUsage))
     return
   }
   if (memBrowseOn && /^!memory\b/i.test(trimmed)) {
@@ -1874,9 +1867,76 @@ if (metricsServer) console.error(`switchboard hub: metrics/health on ${hub.metri
 // Read-only web dashboard: the same data, plus a recent-activity feed, as a page
 // on webPort. Off unless webPort is set. Serves only aggregated, non-secret data.
 function collectWeb(): WebInput {
-  return { ...collectMetrics(), recent: audit.recent({ limit: 30 }) }
+  return { ...collectMetrics(), recent: audit.recent({ limit: 30 }), pendingApprovalList: approvalRegistry.list() }
 }
-const webServer = startWebServer(hub.webPort ?? 0, collectWeb, hub.webHost)
+const webDeps: WebDeps = {
+  collect: collectWeb,
+  requireUser: (req) => req.headers.get("x-switchboard-user"),
+
+  resolveApproval: async (id, decision, actor) => {
+    // Deliberately NOT calling the existing resolveApproval(id, decision, userId) —
+    // it hardcodes `actor: \`user:${userId}\`` for the audit row, which would
+    // double-prefix a web actor as "user:web:<email>". Inline the same steps
+    // (registry resolve → audit → card edit → fire) with a clean "web:<email>" actor.
+    const e = approvalRegistry.resolve(id, decision)
+    if (!e) return "not_found"
+    audit.record({
+      kind: "approval", actor: `web:${actor}`, action: decision === "grant" ? "grant" : "deny",
+      target: e.target, chat: e.chat, outcome: decision === "grant" ? "ok" : "deny", corr: e.id,
+    })
+    const loc = approvalCards.get(e.id); approvalCards.delete(e.id)
+    if (loc) await gateway.editCard(loc.chatId, loc.messageId, renderApprovalCard(e))
+    if (decision === "grant") {
+      try { await e.fire(e.id) } catch (err) { process.stderr.write(`approval ${e.id} fire failed: ${err}\n`) }
+    }
+    return decision === "grant" ? "granted" : "denied"
+  },
+
+  listChannels: (): ChannelInfo[] => {
+    const now = Date.now()
+    return [...channelActivity.entries()]
+      .filter(([, v]) => now - v.lastActive < 24 * 60 * 60 * 1000)   // last 24h
+      .sort((a, b) => b[1].lastActive - a[1].lastActive)
+      .map(([channelId, v]) => ({ channelId, agent: v.agent }))
+  },
+
+  fetchChannelHistory: async (channelId): Promise<ChannelMessageJson[]> => {
+    try {
+      const ch = await gateway.client.channels.fetch(channelId)
+      if (!ch || !("messages" in ch)) return []
+      const msgs = await (ch as any).messages.fetch({ limit: 50 })
+      return [...msgs.values()].reverse().map((msg: any) => ({
+        ts: msg.createdTimestamp,
+        author: msg.author.username,
+        content: msg.content,
+        origin: msg.author.bot ? "agent" : "discord",
+      }))
+    } catch { return [] }
+  },
+
+  subscribeChannel: (channelId, cb) => channelStream.subscribe(channelId, cb as (e: ChannelEvent) => void),
+
+  sendChannelMessage: async (channelId, email, text) => {
+    await gateway.sendPlain(channelId, formatMirrorLine(email, text))
+    channelStream.publish(channelId, { ts: Date.now(), author: email, content: text, origin: "web" })
+    const inbound = buildWebInboundMessage(channelId, email, text, Date.now(), () => `web-${++webMsgCounter}`)
+    void orchestrator.handleMessage(inbound)
+  },
+
+  // `channelId` is accepted to match the WebDeps interface shape but is currently
+  // unused — a future phase may also post the result back to the Discord channel.
+  runCommand: async (name, channelId): Promise<string | null> => {
+    if (name === "audit") {
+      if (!hub.audit?.enabled) return "📜 audit logging is off (set `hub.audit.enabled`)."
+      return buildAuditText("", audit, (ts) => new Date(ts).toISOString().slice(11, 19))
+    }
+    if (name === "tools" && toolObs) {
+      return buildToolsText("", toolUsage)
+    }
+    return null
+  },
+}
+const webServer = startWebServer(hub.webPort ?? 0, webDeps, hub.webHost)
 if (webServer) console.error(`switchboard hub: web dashboard on ${hub.webHost ?? "127.0.0.1"}:${hub.webPort}`)
 
 // Auto-deny pending approvals past their TTL: edit the card to "Expired" and

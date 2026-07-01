@@ -72,6 +72,10 @@ export class ApprovalRegistry {
   pendingCount(): number {
     return this.pending.size
   }
+
+  list(): PendingApproval[] {
+    return [...this.pending.values()]
+  }
 }
 
 /** Button customId for an approval decision, in the gateway's `ns:action:arg`
