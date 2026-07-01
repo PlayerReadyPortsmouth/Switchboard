@@ -1712,6 +1712,8 @@ const webDeps: WebDeps = {
     void orchestrator.handleMessage(inbound)
   },
 
+  // `channelId` is accepted to match the WebDeps interface shape but is currently
+  // unused — a future phase may also post the result back to the Discord channel.
   runCommand: async (name, channelId): Promise<string | null> => {
     if (name === "audit") {
       if (!hub.audit?.enabled) return "📜 audit logging is off (set `hub.audit.enabled`)."
