@@ -34,3 +34,11 @@ test("the [data-cmd] click handler renders the command result into the chat pane
   expect(DASHBOARD_HTML).toContain("fetch('api/command/'+cmd")
   expect(DASHBOARD_HTML).toContain("chatLine({ts: Date.now(), origin: 'agent', author: cmd, content: d.text})")
 })
+
+test("the dashboard HTML has a Doctor command button and a Chat/Timeline mode toggle", () => {
+  expect(DASHBOARD_HTML).toContain('data-cmd="doctor"')
+  expect(DASHBOARD_HTML).toContain('data-mode="chat"')
+  expect(DASHBOARD_HTML).toContain('data-mode="timeline"')
+  expect(DASHBOARD_HTML).toContain("api/channel/'+")
+  expect(DASHBOARD_HTML).toContain("/timeline")
+})

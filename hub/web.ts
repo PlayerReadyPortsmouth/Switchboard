@@ -74,6 +74,7 @@ export const DASHBOARD_HTML = `<!doctype html>
   .dot { display:inline-block; width:8px; height:8px; border-radius:50%; }
   .alive { background:#3ad07f; } .dead { background:#5a5f6b; }
   section h2 { font-size:13px; text-transform:uppercase; letter-spacing:.05em; color:#8b93a7; margin:0 0 8px; }
+  #viewMode button.mode-active { background:#1d2129; border-color:#4f8cff; }
 </style>
 </head>
 <body>
@@ -94,6 +95,10 @@ export const DASHBOARD_HTML = `<!doctype html>
   <section>
     <h2>Channel chat</h2>
     <select id="channelPicker"><option value="">select a channel…</option></select>
+    <div id="viewMode" style="margin:4px 0">
+      <button data-mode="chat" class="mode-active">Chat</button>
+      <button data-mode="timeline">Timeline</button>
+    </div>
     <div id="cmdRow" style="margin:8px 0"></div>
     <div id="chat" class="feed" style="max-height:320px;overflow-y:auto"></div>
     <form id="chatForm" style="margin-top:8px;display:flex;gap:8px">
@@ -149,15 +154,41 @@ document.addEventListener('click', function(ev){
   }).then(poll);
 });
 
-var currentChannel = null, es = null;
+var currentChannel = null, es = null, currentMode = 'chat';
 function chatLine(e){
   var div = document.createElement('div');
   div.textContent = fmtTime(e.ts)+' ['+e.origin+'] '+e.author+': '+e.content;
   return div;
 }
+function timelineLine(r){
+  var div = document.createElement('div');
+  var who = r.agent || r.author || '?';
+  var head = fmtTime(r.ts)+' ['+who+'] '+r.kind;
+  var tail = '';
+  if (r.kind === 'tool_use' && r.tools) {
+    tail = ' ' + r.tools.map(function(t){ return t.name; }).join(', ');
+  } else if (r.kind === 'tool_result' && r.results) {
+    var errs = 0;
+    for (var i=0;i<r.results.length;i++) { if (r.results[i].isError) errs++; }
+    tail = ' ' + r.results.length + ' result' + (r.results.length===1?'':'s') + (errs ? ' ('+errs+'✗)' : '');
+  } else {
+    var text = r.text !== undefined ? r.text : r.content;
+    if (text) {
+      var oneLine = String(text).replace(/\s+/g,' ');
+      tail = ' ' + (oneLine.length > 160 ? oneLine.slice(0,157)+'…' : oneLine);
+    }
+  }
+  div.textContent = head + tail;
+  return div;
+}
 function openChannel(id){
   if (es) { es.close(); es = null; }
   currentChannel = id;
+  currentMode = 'chat';
+  var modeButtons = document.querySelectorAll('#viewMode [data-mode]');
+  for (var mi=0; mi<modeButtons.length; mi++) {
+    modeButtons[mi].className = modeButtons[mi].getAttribute('data-mode') === 'chat' ? 'mode-active' : '';
+  }
   $('chat').innerHTML = '';
   if (!id) return;
   fetch('api/channel/'+id+'/history').then(function(r){ return r.json(); }).then(function(rows){
@@ -166,10 +197,17 @@ function openChannel(id){
   });
   es = new EventSource('api/channel/'+id+'/stream');
   es.onmessage = function(ev){
-    $('chat').appendChild(chatLine(JSON.parse(ev.data)));
+    var e = JSON.parse(ev.data);
+    if (currentMode === 'timeline') {
+      $('chat').appendChild(timelineLine(e));
+    } else if (e.kind === 'chat') {
+      $('chat').appendChild(chatLine(e));
+    } else {
+      return;
+    }
     $('chat').scrollTop = $('chat').scrollHeight;
   };
-  $('cmdRow').innerHTML = '<button data-cmd="audit">Audit</button> <button data-cmd="tools">Tools</button>';
+  $('cmdRow').innerHTML = '<button data-cmd="audit">Audit</button> <button data-cmd="tools">Tools</button> <button data-cmd="doctor">Doctor</button>';
 }
 $('channelPicker').addEventListener('change', function(){ openChannel(this.value || null); });
 document.addEventListener('click', function(ev){
@@ -184,6 +222,29 @@ document.addEventListener('click', function(ev){
     $('chat').appendChild(chatLine({ts: Date.now(), origin: 'agent', author: cmd, content: d.text}));
     $('chat').scrollTop = $('chat').scrollHeight;
   });
+});
+document.addEventListener('click', function(ev){
+  var btn = ev.target.closest('[data-mode]');
+  if (!btn || !currentChannel) return;
+  var mode = btn.getAttribute('data-mode');
+  if (mode === currentMode) return;
+  currentMode = mode;
+  var buttons = document.querySelectorAll('#viewMode [data-mode]');
+  for (var i=0;i<buttons.length;i++) {
+    buttons[i].className = buttons[i].getAttribute('data-mode') === mode ? 'mode-active' : '';
+  }
+  $('chat').innerHTML = '';
+  if (mode === 'timeline') {
+    fetch('api/channel/'+currentChannel+'/timeline').then(function(r){ return r.json(); }).then(function(rows){
+      rows.forEach(function(r){ $('chat').appendChild(timelineLine(r)); });
+      $('chat').scrollTop = $('chat').scrollHeight;
+    });
+  } else {
+    fetch('api/channel/'+currentChannel+'/history').then(function(r){ return r.json(); }).then(function(rows){
+      rows.forEach(function(e){ $('chat').appendChild(chatLine(e)); });
+      $('chat').scrollTop = $('chat').scrollHeight;
+    });
+  }
 });
 $('chatForm').addEventListener('submit', function(ev){
   ev.preventDefault();
