@@ -4,6 +4,31 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js"
 import { encode, LineDecoder } from "../hub/framing"
 
+/** Validate a card argument for post_card / update_card. Returns a human-readable
+ *  reason string when the card is malformed, or null when it is well-formed. The
+ *  caller rejects the tool call with this reason so the AGENT sees exactly what is
+ *  wrong (and can reproduce/fix it) rather than emitting a broken embed to Discord. */
+export function validateCard(card: any): string | null {
+  if (card == null || typeof card !== "object" || Array.isArray(card))
+    return "card is required and must be an object with title, body, and buttons"
+  if (typeof card.title !== "string" || card.title.trim() === "")
+    return "card.title is required and must be a non-empty string"
+  if (typeof card.body !== "string")
+    return "card.body is required and must be a string (use \"\" for none)"
+  if (!Array.isArray(card.buttons))
+    return "card.buttons is required and must be an array (use [] for no buttons)"
+  for (let i = 0; i < card.buttons.length; i++) {
+    const b = card.buttons[i]
+    if (b == null || typeof b !== "object" || Array.isArray(b))
+      return `card.buttons[${i}] must be an object with customId and label`
+    if (typeof b.customId !== "string" || b.customId === "")
+      return `card.buttons[${i}].customId is required and must be a non-empty string`
+    if (typeof b.label !== "string" || b.label === "")
+      return `card.buttons[${i}].label is required and must be a non-empty string`
+  }
+  return null
+}
+
 /** Translate a fire-and-forget MCP tool call from CC into the wire message for
  *  the hub. `recall` is request/response and handled separately. */
 export function toolCallToWire(name: string, args: Record<string, any>) {
@@ -256,6 +281,12 @@ async function main() {
       })
       const text = result.url ? `Published: ${result.url}` : `publish failed: ${result.error ?? "unknown"}`
       return { content: [{ type: "text", text }] }
+    }
+    // Reject a malformed card BEFORE it reaches Discord: fail the tool call with a
+    // descriptive reason so the agent can fix + retry, never a broken embed for the user.
+    if (req.params.name === "post_card" || req.params.name === "update_card") {
+      const reason = validateCard(args.card)
+      if (reason) return { content: [{ type: "text", text: `${req.params.name} failed: ${reason}` }], isError: true }
     }
     const wire = toolCallToWire(req.params.name, args)
     if (!wire) return { content: [{ type: "text", text: `unknown tool: ${req.params.name}` }], isError: true }

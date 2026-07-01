@@ -34,12 +34,15 @@ export interface ShimSocketLike {
 const SNOWFLAKE = /^\d{17,20}$/
 
 /** Coerce a possibly-malformed agent card into a renderable CardSpec — a card
- *  missing `buttons` / `title` / `body` must not crash the card pipeline. */
+ *  missing `buttons` / `title` / `body` must not crash the card pipeline. A
+ *  missing title stays EMPTY (not a placeholder) so buildCardComponents' own
+ *  `if(!title && !body) → "(no details)"` fallback can render something legible
+ *  instead of a blank "(untitled)" header. */
 export function normalizeCard(card: any): CardSpec {
   const c = card ?? {}
   return {
     ...c,
-    title: typeof c.title === "string" ? c.title : "(untitled)",
+    title: typeof c.title === "string" ? c.title : "",
     body: typeof c.body === "string" ? c.body : "",
     buttons: Array.isArray(c.buttons) ? c.buttons : [],
   }
