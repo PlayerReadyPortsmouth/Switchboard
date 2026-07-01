@@ -1,6 +1,6 @@
 // hub/hubConfigDraft.test.ts
 import { test, expect } from "bun:test"
-import { classifyHubChange } from "./hubConfigDraft"
+import { classifyHubChange, invalidSafeFieldValue } from "./hubConfigDraft"
 import type { HubConfig } from "./types"
 
 const base: HubConfig = {
@@ -37,4 +37,26 @@ test("a mixed change (one safe field + one unsafe field) classifies as restart, 
 
 test("no change at all classifies as safe with an empty fullRestart", () => {
   expect(classifyHubChange(base, { ...base })).toEqual({ tier: "safe", fullRestart: [] })
+})
+
+test("invalidSafeFieldValue rejects an empty-string routerModel change", () => {
+  const after: HubConfig = { ...base, routerModel: "" }
+  expect(invalidSafeFieldValue(base, after)).toBe("routerModel must be a non-empty string")
+})
+
+test("invalidSafeFieldValue rejects a non-array commands change", () => {
+  const before: HubConfig = { ...base, commands: [{ match: "!ping", agent: "qa", channelId: "1", message: "ping" }] }
+  const after: HubConfig = { ...before, commands: "!reload" as unknown as HubConfig["commands"] }
+  expect(invalidSafeFieldValue(before, after)).toBe("commands must be an array")
+})
+
+test("invalidSafeFieldValue allows a legitimate routerModel change", () => {
+  const after: HubConfig = { ...base, routerModel: "claude-sonnet-4-6" }
+  expect(invalidSafeFieldValue(base, after)).toBeNull()
+})
+
+test("invalidSafeFieldValue does not flag an already-empty field the operator left unchanged", () => {
+  const before: HubConfig = { ...base, routerModel: "" }
+  const after: HubConfig = { ...before, defaultAgent: "triage" }
+  expect(invalidSafeFieldValue(before, after)).toBeNull()
 })

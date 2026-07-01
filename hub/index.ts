@@ -6,7 +6,7 @@ import { escalatedRuntime, countErrors, RateCap } from "./escalation"
 import { planReload } from "./configReload"
 import { classifyAgentChange, invalidAgentConfigShape, type AgentChangeClassification } from "./agentConfigDraft"
 import { AgentConfigPreviewRegistry } from "./agentConfigPreview"
-import { classifyHubChange, type HubChangeClassification } from "./hubConfigDraft"
+import { classifyHubChange, invalidSafeFieldValue, type HubChangeClassification } from "./hubConfigDraft"
 import { HubConfigPreviewRegistry } from "./hubConfigPreview"
 import { BaseGate } from "./baseGate"
 import { Gateway, parseNotifyCustomId } from "./gateway"
@@ -2160,6 +2160,8 @@ const webDeps: WebDeps = {
       botTokenEnv: current.botTokenEnv, socketPath: current.socketPath,
       stateDir: current.stateDir, guildIds: current.guildIds,
     }
+    const invalidSafeField = invalidSafeFieldValue(current, after)
+    if (invalidSafeField) return { error: invalidSafeField }
     const classification = classifyHubChange(current, after)
     const preview = hubConfigPreviews.create(current, after, classification)
     return {
@@ -2188,7 +2190,7 @@ const webDeps: WebDeps = {
 
     audit.record({
       kind: "event", actor: `web:${actor}`, action: "hub_config_change", outcome: "ok",
-      detail: { before: preview.before, after: preview.after, classification: preview.classification },
+      detail: { before: redactHubConfig(preview.before), after: redactHubConfig(preview.after), classification: preview.classification },
     })
 
     return { state: "applied", fullRestart: preview.classification.fullRestart }

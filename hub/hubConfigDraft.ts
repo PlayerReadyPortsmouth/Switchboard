@@ -13,7 +13,9 @@ export interface HubChangeClassification {
 
 // The exact 7 fields !reload's existing apply logic hot-swaps live today
 // (see hub/index.ts's !reload branch and the applySafeHubFields helper it uses).
-const SAFE_KEYS: (keyof HubConfig)[] = [
+// Exported so hub/index.ts's previewHubConfigChange can run invalidSafeFieldValue
+// (below) against the same list before a preview is ever created.
+export const SAFE_KEYS: (keyof HubConfig)[] = [
   "routerModel", "librarianModel", "distillerModel", "overseerModel",
   "contextWindows", "commands", "directCommands",
 ]
@@ -31,4 +33,28 @@ export function classifyHubChange(before: HubConfig, after: HubConfig): HubChang
     if (j(before[k]) !== j(after[k]) && !SAFE_KEYS.includes(k)) fullRestart.push(key)
   }
   return fullRestart.length > 0 ? { tier: "restart", fullRestart } : { tier: "safe", fullRestart: [] }
+}
+
+/** Minimal proportionate guard on the 7 fields that get hot-swapped live
+ *  immediately on confirm (see confirmHubConfigChange) — NOT full schema
+ *  validation (explicit non-goal), just enough to stop an empty/wrong-typed/
+ *  dropped safe field from reaching the live hub instantly. Only checks fields
+ *  that actually CHANGED (before !== after) — an already-broken field the
+ *  operator didn't touch isn't this feature's problem to fix. */
+export function invalidSafeFieldValue(before: HubConfig, after: HubConfig): string | null {
+  for (const key of SAFE_KEYS) {
+    if (j(before[key]) === j(after[key])) continue   // unchanged — not this feature's concern
+    if (key === "routerModel" || key === "librarianModel" || key === "distillerModel" || key === "overseerModel") {
+      if (typeof after[key] !== "string" || !after[key]) return `${key} must be a non-empty string`
+    }
+    if (key === "commands" || key === "directCommands") {
+      if (after[key] !== undefined && !Array.isArray(after[key])) return `${key} must be an array`
+    }
+    if (key === "contextWindows") {
+      if (after[key] !== undefined && (typeof after[key] !== "object" || after[key] === null || Array.isArray(after[key]))) {
+        return "contextWindows must be an object"
+      }
+    }
+  }
+  return null
 }
