@@ -42,3 +42,7 @@ test("the dashboard HTML has a Doctor command button and a Chat/Timeline mode to
   expect(DASHBOARD_HTML).toContain("api/channel/'+")
   expect(DASHBOARD_HTML).toContain("/timeline")
 })
+
+test("the Timeline view shows an explicit empty state instead of a silent blank pane", () => {
+  expect(DASHBOARD_HTML).toContain('no trace records')
+})

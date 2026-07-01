@@ -236,7 +236,14 @@ document.addEventListener('click', function(ev){
   $('chat').innerHTML = '';
   if (mode === 'timeline') {
     fetch('api/channel/'+currentChannel+'/timeline').then(function(r){ return r.json(); }).then(function(rows){
-      rows.forEach(function(r){ $('chat').appendChild(timelineLine(r)); });
+      if (rows.length === 0) {
+        var div = document.createElement('div');
+        div.className = 'muted';
+        div.textContent = 'no trace records (trace may be off, or nothing has happened yet)';
+        $('chat').appendChild(div);
+      } else {
+        rows.forEach(function(r){ $('chat').appendChild(timelineLine(r)); });
+      }
       $('chat').scrollTop = $('chat').scrollHeight;
     });
   } else {

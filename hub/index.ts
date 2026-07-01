@@ -1947,6 +1947,7 @@ const webDeps: WebDeps = {
   },
 
   fetchChannelTimeline: async (channelId): Promise<TraceRecord[]> => {
+    if (!hub.trace?.enabled) return []
     return trace.recent({ chat: channelId, limit: 50 })
   },
 
