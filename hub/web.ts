@@ -94,7 +94,7 @@ export const DASHBOARD_HTML = `<!doctype html>
   </section>
   <section id="hubConfigEditor" style="display:none">
     <h2>Edit hub config</h2>
-    <textarea id="hubConfigEditorText" rows="16" style="width:100%;background:#1a1d24;border:1px solid #232733;color:#e6e6e6;padding:8px;font-family:ui-monospace,monospace;font-size:12px"></textarea>
+    <div id="hubConfigEditorTree" style="font-family:ui-monospace,monospace;font-size:12px"></div>
     <div style="margin-top:8px">
       <button id="hubConfigPreviewBtn" type="button">Preview</button>
       <button id="hubConfigEditorCancel" type="button">Cancel</button>
@@ -547,11 +547,13 @@ function loadAgentsAfterConfirm(){
 }
 
 var lastHubConfigPreviewId = null;
+var hubConfigTreeData = null;
 
 document.getElementById('editHubConfigBtn').addEventListener('click', function(){
   fetch('api/hub-config').then(function(r){ return r.json(); }).then(function(config){
     lastHubConfigPreviewId = null;
-    $('hubConfigEditorText').value = JSON.stringify(config, null, 2);
+    hubConfigTreeData = config;
+    jsonTreeRenderRoot($('hubConfigEditorTree'), hubConfigTreeData);
     $('hubConfigDiff').textContent = '';
     $('hubConfigConfirmRow').innerHTML = '';
     $('hubConfigEditor').style.display = 'block';
@@ -563,12 +565,9 @@ document.getElementById('hubConfigEditorCancel').addEventListener('click', funct
 });
 
 document.getElementById('hubConfigPreviewBtn').addEventListener('click', function(){
-  var parsed;
-  try { parsed = JSON.parse($('hubConfigEditorText').value); }
-  catch (e) { $('hubConfigDiff').textContent = 'invalid JSON: '+e.message; return; }
   fetch('api/hub-config/preview', {
     method: 'POST', headers: {'content-type':'application/json'},
-    body: JSON.stringify({config: parsed}),
+    body: JSON.stringify({config: hubConfigTreeData}),
   }).then(function(r){ return r.json(); }).then(renderHubConfigPreview);
 });
 
