@@ -1,7 +1,10 @@
 import { unlinkSync } from "fs"
 import type { Socket } from "bun"
-import type { CardSpec } from "../types"
+import type { CardSpec, SendOutcome } from "../types"
 import { LineDecoder, encode } from "../framing"
+
+/** A cb that may report a SendOutcome for a receipt (or nothing when it doesn't). */
+type OutcomeReturn = void | SendOutcome | Promise<void | SendOutcome>
 
 type Conn = { socket: Socket<unknown>; decoder: LineDecoder }
 
@@ -16,10 +19,10 @@ export class ShimSocketServer {
   private server?: ReturnType<typeof Bun.listen>
   private registered = false
   private regCb: () => void = () => {}
-  private notifyCb: (n: { chatId: string; card: CardSpec; correlationId: string }) => void = () => {}
+  private notifyCb: (n: { chatId: string; card: CardSpec; correlationId: string }) => OutcomeReturn = () => {}
   private reactCb: (r: { chatId: string; messageId: string; emoji: string }) => void = () => {}
   private editCb: (e: { chatId: string; messageId: string; text: string }) => void = () => {}
-  private updateCb: (u: { chatId: string; card: CardSpec; correlationId: string }) => void = () => {}
+  private updateCb: (u: { chatId: string; card: CardSpec; correlationId: string }) => OutcomeReturn = () => {}
   private finishCb: () => void = () => {}
   private rememberCb: (r: RememberMsg) => void = () => {}
   private recallCb: (q: { query: string; scopes?: string[] }) => Promise<RecalledNote[]> = async () => []
@@ -27,7 +30,7 @@ export class ShimSocketServer {
   private askAgentCb: (q: { agent: string; message: string }) => Promise<string> = async () => ""
   private notifyPeerCb: (n: { target: string; text: string }) => void = () => {}
   private askPeerCb: (q: { target: string; message: string }) => Promise<string> = async () => ""
-  private attachCb: (a: { chatId: string; path: string; caption?: string; filename?: string }) => void = () => {}
+  private attachCb: (a: { chatId: string; path: string; caption?: string; filename?: string }) => OutcomeReturn = () => {}
   private publishCb: (a: { path: string; mode?: string; title?: string; scope?: string; ttlDays?: number }) => Promise<{ url?: string; error?: string }> = async () => ({})
 
   constructor(private socketPath: string) {}
@@ -63,15 +66,37 @@ export class ShimSocketServer {
     })
   }
 
+  /** Write a `<t>_result` receipt back to the shim, keyed by the request id, once
+   *  the send outcome settles. Only invoked when the frame carried an `id` (i.e.
+   *  the shim is running with receipts enabled) — otherwise nothing is written and
+   *  the outbound path behaves exactly as before. */
+  private writeReceipt(socket: Socket<unknown>, t: string, id: string, r: OutcomeReturn): void {
+    void Promise.resolve(r).then((o) => {
+      const out = o ?? { ok: true }
+      try { socket.write(encode({ t, id, ok: out.ok, messageId: out.messageId, error: out.error })) } catch {}
+    })
+  }
+
   private dispatch(m: any, socket: Socket<unknown>): void {
     switch (m.t) {
       case "register": this.registered = true; this.regCb(); break
-      case "notify": this.notifyCb({ chatId: m.chatId, card: m.card, correlationId: m.correlationId }); break
+      case "notify": {
+        const r = this.notifyCb({ chatId: m.chatId, card: m.card, correlationId: m.correlationId })
+        if (m.id !== undefined) this.writeReceipt(socket, "notify_result", m.id, r)
+        break
+      }
       case "react": this.reactCb({ chatId: m.chatId, messageId: m.messageId, emoji: m.emoji }); break
       case "edit": this.editCb({ chatId: m.chatId, messageId: m.messageId, text: m.text }); break
-      case "attach":
-        this.attachCb({ chatId: m.chatId, path: m.path, caption: m.caption, filename: m.filename }); break
-      case "update": this.updateCb({ chatId: m.chatId, card: m.card, correlationId: m.correlationId }); break
+      case "attach": {
+        const r = this.attachCb({ chatId: m.chatId, path: m.path, caption: m.caption, filename: m.filename })
+        if (m.id !== undefined) this.writeReceipt(socket, "attach_result", m.id, r)
+        break
+      }
+      case "update": {
+        const r = this.updateCb({ chatId: m.chatId, card: m.card, correlationId: m.correlationId })
+        if (m.id !== undefined) this.writeReceipt(socket, "update_result", m.id, r)
+        break
+      }
       case "finish": this.finishCb(); break
       case "remember":
         this.rememberCb({ scope: m.scope, title: m.title, tags: m.tags, body: m.body }); break

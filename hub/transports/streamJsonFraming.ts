@@ -105,8 +105,9 @@ export function buildClaudeArgv(o: ClaudeArgvOpts): string[] {
  *  hub's process.env), so per-feature tool gates must be injected here.
  *  `consultEnabled` sets CONSULT=1 (exposes ask_agent); `attachEnabled` sets
  *  ATTACH_FILES=1 (exposes attach_file); `peeringEnabled` sets PEERING=1
- *  (exposes notify_peer + ask_peer). */
-export function buildShimMcpConfig(shimPath: string, socketPath: string, agentName: string, consultEnabled = false, attachEnabled = false, publishEnabled = false, peeringEnabled = false) {
+ *  (exposes notify_peer + ask_peer); `receiptsEnabled` sets RECEIPTS=1 (the shim
+ *  turns post_card/update_card/attach_file into request/response with a receipt). */
+export function buildShimMcpConfig(shimPath: string, socketPath: string, agentName: string, consultEnabled = false, attachEnabled = false, publishEnabled = false, peeringEnabled = false, receiptsEnabled = false) {
   return {
     mcpServers: {
       "switchboard-shim": {
@@ -117,6 +118,7 @@ export function buildShimMcpConfig(shimPath: string, socketPath: string, agentNa
           ...(attachEnabled ? { ATTACH_FILES: "1" } : {}),
           ...(publishEnabled ? { PUBLISH_LINK: "1" } : {}),
           ...(peeringEnabled ? { PEERING: "1" } : {}),
+          ...(receiptsEnabled ? { RECEIPTS: "1" } : {}),
         },
       },
     },

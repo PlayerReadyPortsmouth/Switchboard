@@ -29,6 +29,33 @@ export function validateCard(card: any): string | null {
   return null
 }
 
+/** Required non-empty string args per tool. Card tools also delegate to
+ *  validateCard. Tools not listed have no required scalar args. */
+const REQUIRED_STRING_ARGS: Record<string, string[]> = {
+  post_card: ["chat_id"],
+  update_card: ["chat_id", "correlation_id"],
+  react: ["chat_id", "message_id", "emoji"],
+  edit_message: ["chat_id", "message_id", "text"],
+  attach_file: ["chat_id", "path"],
+  post_webhook: ["target"],
+  remember: ["title", "body"],
+  notify_peer: ["target", "text"],
+}
+
+/** Validate a tool call's arguments at the shim boundary BEFORE the frame is
+ *  written to the hub socket. Returns a human-readable reason when the args are
+ *  malformed (so the AGENT sees exactly what's wrong and can reproduce/fix),
+ *  or null when they are well-formed. Card tools additionally run validateCard. */
+export function validateToolArgs(name: string, args: Record<string, any>): string | null {
+  for (const field of REQUIRED_STRING_ARGS[name] ?? []) {
+    if (typeof args[field] !== "string" || args[field] === "")
+      return `${field} is required and must be a non-empty string`
+  }
+  if (name === "post_card" || name === "update_card")
+    return validateCard(args.card)
+  return null
+}
+
 /** Translate a fire-and-forget MCP tool call from CC into the wire message for
  *  the hub. `recall` is request/response and handled separately. */
 export function toolCallToWire(name: string, args: Record<string, any>) {
@@ -76,18 +103,26 @@ async function main() {
   // Connect to the hub socket to FORWARD tool calls (agent → hub) and to read
   // back `recall` results. Inbound messages and button interactions reach this
   // agent via its stdin (the hub owns the process), not through this socket.
+  // When RECEIPTS=1 the hub confirms outbound posts (post_card/update_card/attach_file)
+  // with a `<t>_result` frame, so the agent gets a real message id / error back instead
+  // of a blind "sent". Off ⇒ these stay fire-and-forget exactly as before.
+  const RECEIPTS = process.env.RECEIPTS === "1"
+  const RECEIPT_RESULT: Record<string, string> = {
+    post_card: "notify_result", update_card: "update_result", attach_file: "attach_result",
+  }
   let reqCounter = 0
   const pending = new Map<string, (notes: { title: string; body: string }[]) => void>()
   const pendingAsk = new Map<string, (answer: string) => void>()
   const pendingPeerAsk = new Map<string, (answer: string) => void>()
   const pendingPublish = new Map<string, (r: { url?: string; error?: string }) => void>()
+  const pendingReceipt = new Map<string, (r: { ok: boolean; messageId?: string; error?: string }) => void>()
   const decoder = new LineDecoder()
   const sock = await Bun.connect({
     unix: SOCKET,
     socket: {
       data(_s, data) {
         for (const obj of decoder.push(data.toString())) {
-          const m = obj as { t?: string; id?: string; notes?: { title: string; body: string }[]; answer?: string; url?: string; error?: string }
+          const m = obj as { t?: string; id?: string; notes?: { title: string; body: string }[]; answer?: string; url?: string; error?: string; ok?: boolean; messageId?: string }
           if (m.t === "recall_result" && m.id && pending.has(m.id)) {
             pending.get(m.id)!(m.notes ?? [])
             pending.delete(m.id)
@@ -99,6 +134,8 @@ async function main() {
             pendingPeerAsk.delete(m.id)
           } else if (m.t === "publish_result" && m.id && pendingPublish.has(m.id)) {
             pendingPublish.get(m.id)!({ url: m.url, error: m.error }); pendingPublish.delete(m.id)
+          } else if (m.t && m.t.endsWith("_result") && m.id && pendingReceipt.has(m.id)) {
+            pendingReceipt.get(m.id)!({ ok: !!m.ok, messageId: m.messageId, error: m.error }); pendingReceipt.delete(m.id)
           }
         }
       },
@@ -282,14 +319,31 @@ async function main() {
       const text = result.url ? `Published: ${result.url}` : `publish failed: ${result.error ?? "unknown"}`
       return { content: [{ type: "text", text }] }
     }
-    // Reject a malformed card BEFORE it reaches Discord: fail the tool call with a
-    // descriptive reason so the agent can fix + retry, never a broken embed for the user.
-    if (req.params.name === "post_card" || req.params.name === "update_card") {
-      const reason = validateCard(args.card)
-      if (reason) return { content: [{ type: "text", text: `${req.params.name} failed: ${reason}` }], isError: true }
-    }
+    // Validate the tool's args at the boundary BEFORE writing to the hub socket:
+    // fail the call with a descriptive reason so the agent can fix + retry, never a
+    // broken embed (or silently dropped action) for the user.
+    const reason = validateToolArgs(req.params.name, args)
+    if (reason) return { content: [{ type: "text", text: `${req.params.name} failed: ${reason}` }], isError: true }
     const wire = toolCallToWire(req.params.name, args)
     if (!wire) return { content: [{ type: "text", text: `unknown tool: ${req.params.name}` }], isError: true }
+    // With receipts on, the content-posters become request/response: attach an id,
+    // await the hub's confirmation, and report the Discord message id (or the error)
+    // so the agent knows the post actually landed rather than assuming a blind "sent".
+    const resultType = RECEIPT_RESULT[req.params.name]
+    if (RECEIPTS && resultType) {
+      const id = `s${++reqCounter}`
+      const outcome = await new Promise<{ ok: boolean; messageId?: string; error?: string }>((resolve) => {
+        pendingReceipt.set(id, resolve)
+        sock.write(encode({ ...wire, id }))
+        const timer = setTimeout(() => { if (pendingReceipt.delete(id)) resolve({ ok: true, error: "unconfirmed" }) }, 10000)
+        ;(timer as { unref?: () => void }).unref?.()
+      })
+      if (!outcome.ok)
+        return { content: [{ type: "text", text: `${req.params.name} failed: ${outcome.error ?? "the hub could not deliver it"}` }], isError: true }
+      if (outcome.error === "unconfirmed")
+        return { content: [{ type: "text", text: "sent (unconfirmed — the hub did not acknowledge in time)" }] }
+      return { content: [{ type: "text", text: outcome.messageId ? `posted: ${outcome.messageId}` : "posted" }] }
+    }
     sock.write(encode(wire))
     return { content: [{ type: "text", text: "sent" }] }
   })
