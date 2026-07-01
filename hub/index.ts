@@ -2,6 +2,7 @@ import { join, dirname } from "path"
 import { unlinkSync, appendFileSync, mkdirSync, readFileSync, writeFileSync, existsSync, statSync, renameSync, readdirSync, rmSync } from "fs"
 import { config as loadEnv } from "./env"
 import { loadConfigs } from "./config"
+import { escalatedRuntime, countErrors, RateCap } from "./escalation"
 import { BaseGate } from "./baseGate"
 import { Gateway, parseNotifyCustomId } from "./gateway"
 import { Dispatcher, type AgentTransport } from "./transports/index"
@@ -484,10 +485,13 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonT
     },
   })
   t.onReply((reply) => { void onAgentReply(reply, key) })
-  if (toolObs) {
-    t.onToolUse((tools) => toolUsage.recordToolUse(name, tools))
-    t.onToolResult((results) => toolUsage.recordToolResult(results))
-  }
+  t.onToolResult((results) => {
+    // Auto-escalation signal: tally this turn's tool errors (per transport key so a
+    // consult/escalation clone can't pollute the real agent's count).
+    if (escalationOn && escCfg?.auto) turnErrors.set(key, (turnErrors.get(key) ?? 0) + countErrors(results))
+    if (toolObs) toolUsage.recordToolResult(results)
+  })
+  if (toolObs) t.onToolUse((tools) => toolUsage.recordToolUse(name, tools))
   transports.set(key, t)
   return t
 }
@@ -888,6 +892,15 @@ async function onAgentReply(reply: AgentReply, key: string): Promise<void> {
     convActivity.set(reply.chatId, Date.now())
   }
   await gateway.sendReply(reply, agents[reply.agent])
+  // F3 auto-escalation: if this real persistent-agent turn logged tool errors, re-run
+  // it once at higher effort (rate-capped). `key === reply.agent` only for a live
+  // persistent agent — clones use distinct keys, so an escalation never re-triggers.
+  if (escalationOn && escCfg?.auto && reply.kind === "reply" && key === reply.agent && agents[reply.agent]) {
+    const errs = turnErrors.get(key) ?? 0
+    turnErrors.set(key, 0)
+    if (errs > 0 && !escalatingChats.has(reply.chatId) && autoRateCap.tryTake())
+      void escalateTurn(reply.chatId, "auto")
+  }
 }
 
 // Monotonic job-id counter for spawn triggers (Math.random forbidden).
@@ -979,6 +992,65 @@ const shareLinksOn = hub.shareLinks?.enabled === true
 const shareArtifactsDir = hub.shareLinks?.artifactsDir ?? join(hub.stateDir, "share-artifacts")
 const shareOutboxBase = hub.outboundAttachments?.outboxDir ?? join(hub.stateDir, "outbox")
 const base62 = (b: Buffer) => { const A = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"; let n = 0n; for (const x of b) n = n * 256n + BigInt(x); let s = ""; while (n > 0n) { s = A[Number(n % 62n)] + s; n /= 62n } return s.padStart(22, "0") }
+
+// F3 effort escalation: re-run a chat's last turn on a short-lived, higher-effort
+// ephemeral clone. Manual via `!hard`, auto when a turn's tool results carried error
+// signals (bounded by `autoRateCap`). Off unless `hub.escalation.enabled`.
+const escCfg = hub.escalation
+const escalationOn = escCfg?.enabled === true
+const lastTurns = new Map<string, { agent: string; content: string }>()   // by chatId: what to re-run
+const turnErrors = new Map<string, number>()                               // by transport key: this turn's tool errors
+const autoRateCap = new RateCap(Date.now, escCfg?.autoMaxPerHour ?? 4)
+const escalatingChats = new Set<string>()                                  // chats with an escalation in flight
+
+/** Re-run `chatId`'s last turn on a stronger ephemeral clone and post the result to
+ *  the same channel. `reason` is "manual" (!hard) or "auto" (tool-error-triggered).
+ *  The clone runs clean (fresh session, no memory/context) at the escalation model +
+ *  args; its reply is captured here rather than posted under the clone's own key. */
+async function escalateTurn(chatId: string, reason: "manual" | "auto"): Promise<void> {
+  const last = lastTurns.get(chatId)
+  if (!last) { if (reason === "manual") void gateway.sendPlain(chatId, "🥊 nothing to escalate yet — no prior turn on this channel."); return }
+  if (escalatingChats.has(chatId)) { if (reason === "manual") void gateway.sendPlain(chatId, "🥊 an escalation is already running for this channel."); return }
+  const cfg = agents[last.agent]
+  if (!cfg) return
+  escalatingChats.add(chatId)
+  const cloneKey = `escalate-${last.agent}-${Date.now()}`
+  const cloneCfg: AgentConfig = {
+    ...cfg,
+    mode: "ephemeral" as const,
+    runtime: escalatedRuntime(cfg.runtime, { model: escCfg?.model, claudeArgs: escCfg?.claudeArgs }),
+  }
+  const t = makeTransport(last.agent, cloneKey, cloneCfg)
+  void gateway.sendPlain(chatId, `🥊 escalating${escCfg?.model ? ` (${escCfg.model})` : ""} — re-running the last turn at higher effort…`)
+  if (!auditOptedOut(last.agent)) audit.record({
+    kind: "session", actor: reason === "manual" ? "user" : "hub", action: "escalate",
+    target: last.agent, chat: chatId, detail: { reason },
+  })
+  let done = false
+  const finish = async (reply: AgentReply | null) => {
+    if (done) return
+    done = true
+    void t.close()
+    transports.delete(cloneKey)
+    turnErrors.delete(cloneKey)
+    escalatingChats.delete(chatId)
+    // Post to the REAL channel; buttons on a card bind to the live persistent agent.
+    if (reply?.kind === "card" && reply.card) await cardLifecycle.onCard({ ...reply, chatId }, last.agent)
+    else if (reply?.kind === "reply") void gateway.sendPlain(chatId, reply.text ?? "(no response from escalation)")
+    else void gateway.sendPlain(chatId, "🥊 escalation produced no response.")
+  }
+  // Override makeTransport's onReply so the clone's answer is captured, not posted
+  // under the clone key. (Same pattern as spawnConsultClone.)
+  t.onReply((reply) => { if (reply.kind === "reply" || reply.kind === "card") void finish(reply) })
+  setTimeout(() => void finish(null), 180_000).unref()
+  void t.start().then(() => {
+    t.deliver(cloneKey, {
+      chatId: cloneKey, messageId: "escalate-0", userId: "system", user: "hub",
+      content: last.content, ts: new Date().toISOString(), isDM: false,
+    })
+  })
+}
+
 for (const [name, cfg] of Object.entries(agents)) {
   if (cfg.mode !== "persistent") continue
   const primary = makeTransport(name, name, cfg)
@@ -1461,6 +1533,10 @@ const orchestrator = new Orchestrator(hub, agents, {
       user: inbound.user, userId: inbound.userId,
     })
     convActivity.set(inbound.chatId, Date.now())
+    // F3: remember what to re-run for this channel, and start a fresh error tally
+    // for the turn about to begin (per agent key; persistent key === agent name).
+    lastTurns.set(inbound.chatId, { agent, content: live })
+    turnErrors.set(agent, 0)
     if (!context && !memory && live === inbound.content) return inbound
     return { ...inbound, content: enrich(live, { memory, context }) }
   },
@@ -1529,6 +1605,13 @@ gateway.handleInbound((m) => {
     const input = sp === -1 ? "" : rest.slice(sp + 1).trim()
     if (!id) { void gateway.sendPlain(m.chatId, "usage: `!run <workflow-id> [input]`"); return }
     void runWorkflow(id, input, m.chatId, `user:${m.userId}`)
+    return
+  }
+  // Manual escalation (operator-only): re-run this channel's last turn at higher effort.
+  if (/^!hard\b/i.test(trimmed)) {
+    if (!baseGate.listAllowed().includes(m.userId)) return
+    if (!escalationOn) { void gateway.sendPlain(m.chatId, "🥊 `!hard` is off (set `hub.escalation.enabled`)."); return }
+    void escalateTurn(m.chatId, "manual")
     return
   }
   if (/^!audit\b/i.test(trimmed)) {
