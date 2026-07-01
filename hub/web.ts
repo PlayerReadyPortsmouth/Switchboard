@@ -283,6 +283,7 @@ function openAgentEditor(name, template){
   lastPreviewId = null;
   $('agentEditorTitle').textContent = name ? ('Edit agent: '+name) : 'New agent';
   $('agentEditorText').value = template;
+  $('agentEditorText').style.display = 'block';
   $('agentDiff').textContent = '';
   $('agentConfirmRow').innerHTML = '';
   $('agentEditor').style.display = 'block';
