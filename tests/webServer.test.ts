@@ -25,6 +25,9 @@ function fakeDeps(overrides: Partial<WebDeps> = {}): WebDeps {
     listAgents: async () => ({}),
     previewAgentChange: async () => ({ id: "prev-1", before: null, after: null, classification: { tier: "safe", fullRestart: [] } }),
     confirmAgentChange: async () => ({ state: "not_found", restarted: [], fullRestart: [] }),
+    listHubConfig: async () => ({ routerModel: "claude-haiku-4-5" }),
+    previewHubConfigChange: async () => ({ id: "hubprev-1", before: {}, after: {}, classification: { tier: "safe", fullRestart: [] } }),
+    confirmHubConfigChange: async () => ({ state: "not_found", fullRestart: [] }),
     ...overrides,
   }
 }
@@ -195,6 +198,70 @@ test("POST /api/agents/:name/confirm → 409 on not_found or conflict", async ()
 
 test("DELETE /api/agents with valid identity header → 405 (known guarded path, wrong method)", async () => {
   const res = await handleWebRequest(del("/api/agents", { "x-switchboard-user": "a@b.com" }), fakeDeps())
+  expect(res.status).toBe(405)
+})
+
+test("GET /api/hub-config → 200 JSON config", async () => {
+  const deps = fakeDeps({ listHubConfig: async () => ({ routerModel: "claude-sonnet-4-6" }) })
+  const res = await handleWebRequest(get("/api/hub-config", { "x-switchboard-user": "a@b.com" }), deps)
+  expect(res.status).toBe(200)
+  expect(await res.json()).toEqual({ routerModel: "claude-sonnet-4-6" })
+})
+
+test("GET /api/hub-config without X-Switchboard-User → 400", async () => {
+  const res = await handleWebRequest(get("/api/hub-config"), fakeDeps())
+  expect(res.status).toBe(400)
+})
+
+test("POST /api/hub-config/preview → 200, forwards config", async () => {
+  const called: { v: unknown | null } = { v: null }
+  const deps = fakeDeps({
+    previewHubConfigChange: async (config) => {
+      called.v = config
+      return { id: "hubprev-1", before: {}, after: config, classification: { tier: "restart", fullRestart: ["defaultAgent"] } }
+    },
+  })
+  const res = await handleWebRequest(post("/api/hub-config/preview", { config: { routerModel: "claude-sonnet-4-6" } }, { "x-switchboard-user": "a@b.com" }), deps)
+  expect(res.status).toBe(200)
+  expect(called).toEqual({ v: { routerModel: "claude-sonnet-4-6" } })
+  expect(await res.json()).toEqual({ id: "hubprev-1", before: {}, after: { routerModel: "claude-sonnet-4-6" }, classification: { tier: "restart", fullRestart: ["defaultAgent"] } })
+})
+
+test("POST /api/hub-config/preview → 400 when config is missing", async () => {
+  const res = await handleWebRequest(post("/api/hub-config/preview", {}, { "x-switchboard-user": "a@b.com" }), fakeDeps())
+  expect(res.status).toBe(400)
+})
+
+test("POST /api/hub-config/preview → 400 when previewHubConfigChange returns an error shape", async () => {
+  const deps = fakeDeps({ previewHubConfigChange: async () => ({ error: "cannot edit excluded field: socketPath" }) })
+  const res = await handleWebRequest(post("/api/hub-config/preview", { config: { socketPath: "/tmp/x" } }, { "x-switchboard-user": "a@b.com" }), deps)
+  expect(res.status).toBe(400)
+  expect(await res.json()).toEqual({ error: "cannot edit excluded field: socketPath" })
+})
+
+test("POST /api/hub-config/confirm → 200 on applied, forwards id and the caller's email as actor", async () => {
+  const called: { v: unknown | null } = { v: null }
+  const deps = fakeDeps({
+    confirmHubConfigChange: async (id, actor) => { called.v = [id, actor]; return { state: "applied", fullRestart: [] } },
+  })
+  const res = await handleWebRequest(post("/api/hub-config/confirm", { id: "hubprev-1" }, { "x-switchboard-user": "a@b.com" }), deps)
+  expect(res.status).toBe(200)
+  expect(called).toEqual({ v: ["hubprev-1", "a@b.com"] })
+  expect(await res.json()).toEqual({ state: "applied", fullRestart: [] })
+})
+
+test("POST /api/hub-config/confirm → 409 on not_found or conflict", async () => {
+  const notFound = fakeDeps({ confirmHubConfigChange: async () => ({ state: "not_found", fullRestart: [] }) })
+  const res1 = await handleWebRequest(post("/api/hub-config/confirm", { id: "x" }, { "x-switchboard-user": "a@b.com" }), notFound)
+  expect(res1.status).toBe(409)
+
+  const conflict = fakeDeps({ confirmHubConfigChange: async () => ({ state: "conflict", fullRestart: [] }) })
+  const res2 = await handleWebRequest(post("/api/hub-config/confirm", { id: "x" }, { "x-switchboard-user": "a@b.com" }), conflict)
+  expect(res2.status).toBe(409)
+})
+
+test("DELETE /api/hub-config with valid identity header → 405 (known guarded path, wrong method)", async () => {
+  const res = await handleWebRequest(del("/api/hub-config", { "x-switchboard-user": "a@b.com" }), fakeDeps())
   expect(res.status).toBe(405)
 })
 
