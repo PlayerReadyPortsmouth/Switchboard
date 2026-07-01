@@ -40,6 +40,16 @@ export interface CardSpec {
   footer?: string;
 }
 
+/** The result of a hub-side outbound send (post_card / update_card / attach_file).
+ *  Threaded back to the shim as a `*_result` receipt so the agent gets a real
+ *  confirmation (Discord message id) or a legible error instead of a blind "sent".
+ *  Only produced/returned when receipts are enabled; otherwise ignored. */
+export interface SendOutcome {
+  ok: boolean;
+  messageId?: string;   // the Discord message id when the send succeeded
+  error?: string;       // a human-readable reason when it failed
+}
+
 /** Per-turn token/cost usage parsed from a stream-json `result` event. The
  *  context-fill estimate is derived from these (see hub/usage.ts). */
 export interface TurnUsage {
@@ -296,7 +306,13 @@ export interface HubConfig {
   shareLinks?: ShareLinksConfig  // publish_link: agents publish staff-only Entra-gated artifact URLs (default off)
   toolObservability?: ToolObservabilityConfig  // capture + surface per-agent tool usage (default off)
   memoryBrowse?: MemoryBrowseConfig  // operator memory browse & forget UI (default off)
+  receipts?: ReceiptsConfig      // outbound receipts for post_card/update_card/attach_file (default off)
 }
+
+/** Outbound-receipt confirmation. Absent/disabled ⇒ post_card/update_card/attach_file
+ *  behave exactly as before (fire-and-forget "sent"). Enabled ⇒ the shim turns them
+ *  into request/response and returns the Discord message id (or a legible error). */
+export interface ReceiptsConfig { enabled?: boolean }
 
 /** Discord file-upload passthrough. Absent/disabled ⇒ uploads are ignored exactly
  *  as before (only message text reaches the agent). When enabled, the hub downloads

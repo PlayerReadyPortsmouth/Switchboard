@@ -70,7 +70,7 @@ test("deliver writes a stream-json user message to stdin", async () => {
 
 test("a result event becomes a reply to the last-delivered chat", async () => {
   const { t, fp } = make(); await t.start()
-  const replies: any[] = []; t.onReply((r) => replies.push(r))
+  const replies: any[] = []; t.onReply((r) => { replies.push(r) })
   t.deliver("c9", { chatId: "c9", messageId: "m", userId: "u", user: "x", content: "hi", ts: "t", isDM: false })
   fp.emitStdout(JSON.stringify({ type: "result", subtype: "success", result: "done" }))
   expect(replies).toEqual([{ agent: "worker", kind: "reply", chatId: "c9", text: "done" }])
@@ -78,14 +78,14 @@ test("a result event becomes a reply to the last-delivered chat", async () => {
 
 test("a notify (card) from the socket becomes a card reply", async () => {
   const { t, fs } = make(); await t.start()
-  const replies: any[] = []; t.onReply((r) => replies.push(r))
+  const replies: any[] = []; t.onReply((r) => { replies.push(r) })
   fs.fireNotify({ chatId: "1511807891881853139", card: { title: "T", body: "b", buttons: [] }, correlationId: "k" })
   expect(replies[0]).toMatchObject({ agent: "worker", kind: "card", chatId: "1511807891881853139", correlationId: "k" })
 })
 
 test("card chatId falls back to the conversation channel when not a snowflake", async () => {
   const { t, fs } = make(); await t.start()
-  const replies: any[] = []; t.onReply((r) => replies.push(r))
+  const replies: any[] = []; t.onReply((r) => { replies.push(r) })
   t.deliver("1511807891881853139", { chatId: "1511807891881853139", messageId: "m", userId: "u", user: "x", content: "hi", ts: "t", isDM: false })
   fs.fireNotify({ chatId: "$TRIAGE_CHANNEL", card: { title: "T", body: "b", buttons: [] }, correlationId: "k" })
   expect(replies.find((r) => r.kind === "card").chatId).toBe("1511807891881853139")
@@ -93,7 +93,7 @@ test("card chatId falls back to the conversation channel when not a snowflake", 
 
 test("the end-of-turn result is suppressed when a card was posted that turn", async () => {
   const { t, fp, fs } = make(); await t.start()
-  const replies: any[] = []; t.onReply((r) => replies.push(r))
+  const replies: any[] = []; t.onReply((r) => { replies.push(r) })
   fs.fireNotify({ chatId: "c1", card: { title: "T", body: "b", buttons: [] }, correlationId: "k" })
   fp.emitStdout(JSON.stringify({ type: "result", subtype: "success", result: "verbose summary" }))
   // only the card reply — no redundant text reply underneath it
@@ -102,7 +102,7 @@ test("the end-of-turn result is suppressed when a card was posted that turn", as
 
 test("a later card-less turn still posts its result text", async () => {
   const { t, fp, fs } = make(); await t.start()
-  const replies: any[] = []; t.onReply((r) => replies.push(r))
+  const replies: any[] = []; t.onReply((r) => { replies.push(r) })
   // turn 1: card → result suppressed
   fs.fireNotify({ chatId: "c1", card: { title: "T", body: "b", buttons: [] }, correlationId: "k" })
   fp.emitStdout(JSON.stringify({ type: "result", result: "summary" }))
@@ -187,7 +187,7 @@ function make2(mode: "persistent" | "ephemeral") {
 
 jt("a socket update becomes an update reply", async () => {
   const { t, fs } = make2("ephemeral"); await t.start()
-  const replies: any[] = []; t.onReply((r) => replies.push(r))
+  const replies: any[] = []; t.onReply((r) => { replies.push(r) })
   fs.fireUpdate({ chatId: "1511807891881853139", correlationId: "T1", card: { title: "T", body: "b", buttons: [] } })
   je(replies[0]).toMatchObject({ kind: "update", correlationId: "T1", chatId: "1511807891881853139" })
 })
