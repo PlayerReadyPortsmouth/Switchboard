@@ -278,10 +278,10 @@ $('chatForm').addEventListener('submit', function(ev){
 var editingAgentName = null;
 var lastPreviewId = null;
 
-function openAgentEditor(name, template){
+function openAgentEditor(name, template, isNew){
   editingAgentName = name;
   lastPreviewId = null;
-  $('agentEditorTitle').textContent = name ? ('Edit agent: '+name) : 'New agent';
+  $('agentEditorTitle').textContent = isNew ? ('New agent: '+name) : ('Edit agent: '+name);
   $('agentEditorText').value = template;
   $('agentEditorText').style.display = 'block';
   $('agentDiff').textContent = '';
@@ -296,7 +296,7 @@ document.getElementById('newAgentBtn').addEventListener('click', function(){
     emoji: "🤖", description: "", mode: "ephemeral",
     access: { roles: [] }, runtime: { cwd: "~" },
   }, null, 2);
-  openAgentEditor(name, template);
+  openAgentEditor(name, template, true);
 });
 
 document.addEventListener('click', function(ev){
@@ -304,7 +304,7 @@ document.addEventListener('click', function(ev){
   if (editBtn) {
     var name = editBtn.getAttribute('data-edit-agent');
     fetch('api/agents').then(function(r){ return r.json(); }).then(function(all){
-      openAgentEditor(name, JSON.stringify(all[name], null, 2));
+      openAgentEditor(name, JSON.stringify(all[name], null, 2), false);
     });
     return;
   }

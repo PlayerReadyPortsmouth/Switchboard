@@ -56,6 +56,12 @@ test("the dashboard HTML has agent-config edit affordances and a JSON editor pan
   expect(DASHBOARD_HTML).toContain("/confirm")
 })
 
-test("openAgentEditor resets the textarea display to 'block' so it stays visible after Remove flow", () => {
-  expect(DASHBOARD_HTML).toContain("$('agentEditorText').style.display = 'block'")
+test("openAgentEditor resets the textarea to visible on every open, not just Cancel", () => {
+  var occurrences = DASHBOARD_HTML.split("style.display = 'block'").length - 1;
+  expect(occurrences).toBeGreaterThanOrEqual(2);
+})
+
+test("New Agent shows a 'New agent' title instead of 'Edit agent'", () => {
+  expect(DASHBOARD_HTML).toContain("openAgentEditor(name, template, true)")
+  expect(DASHBOARD_HTML).toContain("isNew ? ('New agent: '+name) : ('Edit agent: '+name)")
 })
