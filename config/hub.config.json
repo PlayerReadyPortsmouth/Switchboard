@@ -144,6 +144,12 @@
     "auto": false,
     "autoMaxPerHour": 4
   },
+  "reload": {
+    "enabled": false
+  },
+  "trace": {
+    "enabled": false
+  },
   "approvals": {
     "enabled": true,
     "channelId": "<channel id for Approve/Deny cards, or omit to use the effect's origin channel>",

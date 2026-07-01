@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test"
-import { toolCallToWire, validateCard } from "./server"
+import { toolCallToWire, validateCard, validateToolArgs } from "./server"
 
 test("validateCard accepts a well-formed card", () => {
   expect(validateCard({ title: "t", body: "b", buttons: [] })).toBeNull()
@@ -30,6 +30,55 @@ test("validateCard rejects a button missing customId or label, naming the index"
   expect(validateCard({ title: "t", body: "b", buttons: [{ label: "Go" }] })).toMatch(/buttons\[0\]\.customId/)
   expect(validateCard({ title: "t", body: "b", buttons: [{ customId: "a" }] })).toMatch(/buttons\[0\]\.label/)
   expect(validateCard({ title: "t", body: "b", buttons: [{ customId: "a", label: "ok" }, {}] })).toMatch(/buttons\[1\]/)
+})
+
+test("validateToolArgs delegates card tools to validateCard", () => {
+  expect(validateToolArgs("post_card", { chat_id: "C1", card: { title: "t", body: "b", buttons: [] } })).toBeNull()
+  expect(validateToolArgs("post_card", { chat_id: "C1", card: { body: "b", buttons: [] } })).toMatch(/card\.title/)
+  expect(validateToolArgs("update_card", { chat_id: "C1", correlation_id: "T1", card: { title: "t", body: "b", buttons: [] } })).toBeNull()
+  expect(validateToolArgs("update_card", { chat_id: "C1", correlation_id: "T1", card: "nope" })).toMatch(/card is required/)
+})
+
+test("validateToolArgs requires chat_id on card tools", () => {
+  expect(validateToolArgs("post_card", { card: { title: "t", body: "b", buttons: [] } })).toMatch(/chat_id/)
+  expect(validateToolArgs("post_card", { chat_id: "", card: { title: "t", body: "b", buttons: [] } })).toMatch(/chat_id/)
+})
+
+test("validateToolArgs validates react required string fields", () => {
+  expect(validateToolArgs("react", { chat_id: "C1", message_id: "m", emoji: "✅" })).toBeNull()
+  expect(validateToolArgs("react", { chat_id: "C1", message_id: "m" })).toMatch(/emoji/)
+  expect(validateToolArgs("react", { chat_id: "C1", emoji: "✅" })).toMatch(/message_id/)
+  expect(validateToolArgs("react", { message_id: "m", emoji: "✅" })).toMatch(/chat_id/)
+})
+
+test("validateToolArgs validates edit_message required string fields", () => {
+  expect(validateToolArgs("edit_message", { chat_id: "C1", message_id: "m", text: "x" })).toBeNull()
+  expect(validateToolArgs("edit_message", { chat_id: "C1", message_id: "m", text: "" })).toMatch(/text/)
+})
+
+test("validateToolArgs validates attach_file required string fields", () => {
+  expect(validateToolArgs("attach_file", { chat_id: "C1", path: "r.pdf" })).toBeNull()
+  expect(validateToolArgs("attach_file", { chat_id: "C1" })).toMatch(/path/)
+})
+
+test("validateToolArgs validates post_webhook, remember, notify_peer", () => {
+  expect(validateToolArgs("post_webhook", { target: "deploy-done" })).toBeNull()
+  expect(validateToolArgs("post_webhook", {})).toMatch(/target/)
+  expect(validateToolArgs("remember", { title: "T", body: "B" })).toBeNull()
+  expect(validateToolArgs("remember", { title: "T" })).toMatch(/body/)
+  expect(validateToolArgs("notify_peer", { target: "p:a", text: "hi" })).toBeNull()
+  expect(validateToolArgs("notify_peer", { target: "p:a" })).toMatch(/text/)
+})
+
+test("validateToolArgs returns null for tools without required fields", () => {
+  expect(validateToolArgs("finish", {})).toBeNull()
+  expect(validateToolArgs("something_unknown", {})).toBeNull()
+})
+
+test("validateToolArgs does not validate request/response tools handled separately", () => {
+  // publish_link / recall / ask_* run in their own handler branches before the
+  // generic validate+write path, so they are intentionally not covered here.
+  expect(validateToolArgs("publish_link", {})).toBeNull()
 })
 
 test("post_card maps to a notify wire message", () => {
