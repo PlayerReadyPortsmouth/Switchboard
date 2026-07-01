@@ -49,6 +49,8 @@ import { matchOutbound, renderBody } from "./outbound"
 import { AuditLog } from "./auditLog"
 import { parseJsonlTail, shouldRotate, rotationsToPrune } from "./audit"
 import { parseAuditCommand, renderAuditLines, renderAuditSummary } from "./auditCommand"
+import { TurnTrace, parseTraceTail, renderTrace, type TraceFilter } from "./turnTrace"
+import { runDoctor, renderDoctor, type DoctorFacts } from "./doctor"
 import { buildReplay, renderReplay, chunkLines } from "./replay"
 import { ApprovalRegistry, renderApprovalCard, parseApprovalCustomId, type ApprovalRequest, type ApprovalDecision, type ApprovalFire } from "./approval"
 import { startMetricsServer } from "./metricsServer"
@@ -57,7 +59,7 @@ import { startWebServer } from "./webServer"
 import { type WebInput } from "./web"
 import { ConsultRegistry, mayConsult, consultAnswerFromReply } from "./consult"
 import { MissionRegistry, findWorkflow, renderStepPrompt, renderMissionCard, type MissionRun } from "./workflow"
-import type { AgentConfig, AgentReply, InboundMessage, SpawnTrigger, SpawnCardUpdate, CardSpec, DirectCommand, OutboundRoute, HubConfig, AgentRegistry } from "./types"
+import type { AgentConfig, AgentReply, InboundMessage, SpawnTrigger, SpawnCardUpdate, CardSpec, DirectCommand, OutboundRoute, HubConfig, AgentRegistry, SendOutcome } from "./types"
 import { resolveOutboxFile } from "./outboxAttach"
 import { makeAttachHandler } from "./attachHandler"
 import { publishArtifact } from "./publishLink"
@@ -467,6 +469,7 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonT
     attachEnabled: !!hub.outboundAttachments?.enabled,
     publishEnabled: shareLinksOn,
     peeringEnabled: peeringOn,
+    receiptsEnabled: !!hub.receipts?.enabled,
     onOverflow: (inbound) => {
       // Consults in the retry loop own their own retry/settle lifecycle — don't
       // short-circuit them here, just drop the overflow silently.
@@ -484,11 +487,15 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonT
       void gateway.sendPlain(inbound.chatId, `${cfg.emoji} ${name} is busy — please resend in a moment.`)
     },
   })
-  t.onReply((reply) => { void onAgentReply(reply, key) })
-  if (toolObs) {
-    t.onToolUse((tools) => toolUsage.recordToolUse(name, tools))
-    t.onToolResult((results) => toolUsage.recordToolResult(results))
-  }
+  t.onReply((reply) => onAgentReply(reply, key))
+  t.onToolUse((tools) => {
+    trace.record({ agent: name, chat: lastChatByAgent.get(name) ?? "", kind: "tool_use", tools })
+    if (toolObs) toolUsage.recordToolUse(name, tools)
+  })
+  t.onToolResult((results) => {
+    trace.record({ agent: name, chat: lastChatByAgent.get(name) ?? "", kind: "tool_result", results })
+    if (toolObs) toolUsage.recordToolResult(results)
+  })
   transports.set(key, t)
   return t
 }
@@ -559,6 +566,19 @@ const audit = new AuditLog({
  *  from agent-attributed events even when the hub master switch is on. */
 const auditOptedOut = (agent?: string): boolean =>
   !!agent && agents[agent]?.runtime.audit === false
+
+// Full-fidelity per-turn trace (message bodies), separate from the metadata-only
+// AuditLog. Default off; when on, appends JSONL to <stateDir>/trace.jsonl. A no-op
+// (never throws, nothing written) when disabled. Records the last chat per agent so
+// tool_use/tool_result hooks — which lack a chat id — can be attributed to a channel.
+const traceFile = hub.trace?.file ?? join(hub.stateDir, "trace.jsonl")
+const trace = new TurnTrace({
+  append: (l) => { try { appendFileSync(traceFile, l) } catch {} },
+  readTail: (n) => { try { return parseTraceTail(readFileSync(traceFile, "utf8"), n) } catch { return [] } },
+  now: () => Date.now(),
+  enabled: hub.trace?.enabled === true,
+})
+const lastChatByAgent = new Map<string, string>()
 
 // Approval gate: a requireApproval effect parks here, posts an Approve/Deny card,
 // and fires only on a configured approver's grant (fail-closed on deny / expiry /
@@ -816,9 +836,14 @@ function emitHubEvent(event: string, data: Record<string, unknown>): void {
   }
 }
 
+/** Flatten a card to its trace body: title + body joined for full-fidelity capture. */
+function cardTraceText(card: CardSpec): string {
+  return [card.title, card.body].filter(Boolean).join("\n")
+}
+
 /** Handle one reply from a transport: cards → Discord card (+ register buttons);
  *  text → spawn-trigger match or a plain reply; react/edit → passthrough. */
-async function onAgentReply(reply: AgentReply, key: string): Promise<void> {
+async function onAgentReply(reply: AgentReply, key: string): Promise<void | SendOutcome> {
   if (toolObs) toolUsage.endTurn(reply.agent)
   // Inter-agent consult: a reply on a virtual consult channel is the answer to a
   // pending ask_agent — settle it (return the answer to the caller) and never post
@@ -855,14 +880,15 @@ async function onAgentReply(reply: AgentReply, key: string): Promise<void> {
     return
   }
   if (reply.kind === "card" && reply.card) {
-    await cardLifecycle.onCard(reply, key)
-    return
+    trace.record({ agent: reply.agent, chat: reply.chatId, kind: "card", text: cardTraceText(reply.card) })
+    return await cardLifecycle.onCard(reply, key)
   }
   if (reply.kind === "update" && reply.card && reply.correlationId) {
-    await cardLifecycle.onUpdate(reply.correlationId, reply.chatId, reply.card, key)
-    return
+    trace.record({ agent: reply.agent, chat: reply.chatId, kind: "update", text: cardTraceText(reply.card) })
+    return await cardLifecycle.onUpdate(reply.correlationId, reply.chatId, reply.card, key)
   }
   if (reply.kind === "reply" && reply.text) {
+    trace.record({ agent: reply.agent, chat: reply.chatId, kind: "reply", text: reply.text })
     for (const trig of spawnTriggers) {
       const m = trig.re.exec(reply.text)
       if (m) { await runSpawnTrigger(trig, m as unknown as string[], reply.chatId, reply.agent); return }
@@ -942,7 +968,7 @@ async function runSpawnTrigger(trig: SpawnTrigger, groups: string[], chatId: str
   const paintSpawnCard = (card: CardSpec): Promise<void> => {
     if (!trig.onSpawnCard) return Promise.resolve()
     const corr = interpolate(trig.onSpawnCard.correlationId, groups, jobId)
-    return cardLifecycle.onUpdate(corr, chatId, card, jobId)
+    return cardLifecycle.onUpdate(corr, chatId, card, jobId).then(() => {})
   }
   if (trig.onSpawnCard) await paintSpawnCard(buildSpawnCard(trig.onSpawnCard, groups, jobId))
   if (trig.setupCommand) {
@@ -1007,7 +1033,7 @@ if (pools.size) {
 // so route that aggregator back to onAgentReply. For persistent agents the routing
 // key is the agent name (== reply.agent). (Ephemeral spawn transports are not in the
 // Dispatcher and keep the onReply set in makeTransport, keyed by jobId.)
-dispatcher.onReply((reply) => { void onAgentReply(reply, reply.agent) })
+dispatcher.onReply((reply) => onAgentReply(reply, reply.agent))
 
 /** Clear a persistent agent's context: drop its session file + respawn fresh.
  *  `reason` distinguishes a manual reset from a governor auto-compaction. */
@@ -1433,6 +1459,10 @@ const orchestrator = new Orchestrator(hub, agents, {
   sendPlain: (chatId, text) => gateway.sendPlain(chatId, text),
   prepareDispatch: async ({ agent, inbound, isSwitch }) => {
     const rt = agents[agent]?.runtime
+    // Record inbound in the trace + remember this agent's live chat so its
+    // tool_use/tool_result records (which carry no chat id) can be attributed.
+    lastChatByAgent.set(agent, inbound.chatId)
+    trace.record({ agent, chat: inbound.chatId, kind: "inbound", text: inbound.content })
     // A genuine user-initiated turn (re)sets the overseer goal for this agent.
     if (rt?.overseer?.enabled) overseer.begin(agent, inbound.chatId, inbound.content)
     // Record the routing decision for the status board (the Haiku resolver's pick).
@@ -1599,6 +1629,45 @@ gateway.handleInbound((m) => {
       if (plan.fullRestart.length) lines.push(`⚠️ needs a full hub restart (not applied): ${plan.fullRestart.join(", ")}`)
       void gateway.sendPlain(m.chatId, lines.join("\n"))
     })()
+    return
+  }
+  // Turn trace query (operator-only): full-fidelity per-turn records (message
+  // bodies). Off unless hub.trace.enabled. Filters: agent= chat= kind= limit=.
+  if (/^!trace\b/i.test(trimmed)) {
+    if (!baseGate.listAllowed().includes(m.userId)) return
+    if (hub.trace?.enabled !== true) { void gateway.sendPlain(m.chatId, "🔎 turn trace is off (set `hub.trace.enabled`)."); return }
+    const filter: TraceFilter = {}
+    for (const tok of trimmed.replace(/^!trace\b/i, "").trim().split(/\s+/).filter(Boolean)) {
+      const eq = tok.indexOf("=")
+      if (eq === -1) continue
+      const k = tok.slice(0, eq); const v = tok.slice(eq + 1)
+      if (k === "agent") filter.agent = v
+      else if (k === "chat") filter.chat = v
+      else if (k === "kind" && ["inbound", "tool_use", "tool_result", "reply", "card", "update"].includes(v)) filter.kind = v as TraceFilter["kind"]
+      else if (k === "limit") { const n = parseInt(v, 10); if (Number.isFinite(n)) filter.limit = Math.max(1, Math.min(200, n)) }
+    }
+    const out = renderTrace(trace.recent({ ...filter, limit: filter.limit ?? 25 }), (ts) => new Date(ts).toISOString().slice(11, 19))
+    for (const chunk of chunkLines(out, 1_900)) void gateway.sendPlain(m.chatId, chunk)
+    return
+  }
+  // Hub self-check (operator-only): agent liveness, state-dir writability, router
+  // config, pending approvals, and the logging switches → a pass/warn/fail report.
+  if (/^!doctor\b/i.test(trimmed)) {
+    if (!baseGate.listAllowed().includes(m.userId)) return
+    let stateDirWritable = true
+    try { const probe = join(hub.stateDir, `.doctor-${process.pid}`); writeFileSync(probe, ""); unlinkSync(probe) } catch { stateDirWritable = false }
+    const doctorAgents = Object.entries(agents)
+      .filter(([, cfg]) => cfg.mode === "persistent")
+      .map(([name]) => ({ name, alive: (pools.get(name) ?? transports.get(name))?.isAvailable() ?? false, registered: true }))
+    const facts: DoctorFacts = {
+      agents: doctorAgents,
+      stateDirWritable,
+      pendingApprovals: approvalRegistry.pendingCount(),
+      auditEnabled: hub.audit?.enabled === true,
+      traceEnabled: hub.trace?.enabled === true,
+      routerModel: hub.routerModel,
+    }
+    void gateway.sendPlain(m.chatId, renderDoctor(runDoctor(facts)))
     return
   }
   // Replay (operator-only): reconstruct a conversation's (or one corr action's)
