@@ -18,7 +18,7 @@ const input = (over: Partial<WebInput> = {}): WebInput => ({
   now: 61_000, startedAt: 0,
   status: { now: 61_000, agents: [agent()], overseers: [], routes: [], routeRate10m: 4,
     ephemerals: [{ jobId: "j1", agent: "worker", task: "build", startedAt: 0 }] },
-  audit: summary(), recent, pendingApprovals: 1, ...over,
+  audit: summary(), recent, pendingApprovals: 1, pendingApprovalList: [], ...over,
 })
 
 // ---- renderDashboardJson ----

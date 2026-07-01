@@ -6,7 +6,7 @@ const input = (): WebInput => ({
   now: 1000, startedAt: 0,
   status: { now: 1000, agents: [], overseers: [], routes: [], routeRate10m: 0, ephemerals: [] },
   audit: { total: 0, byKind: {}, byOutcome: {}, costUsd: 0, actors: 0 },
-  recent: [], pendingApprovals: 0,
+  recent: [], pendingApprovals: 0, pendingApprovalList: [],
 })
 const get = (path: string) => new Request(`http://hub${path}`, { method: "GET" })
 

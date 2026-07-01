@@ -1,7 +1,31 @@
 import { test, expect } from "bun:test"
-import { DASHBOARD_HTML } from "./web"
+import { DASHBOARD_HTML, renderDashboardJson } from "./web"
+import type { PendingApproval } from "./approval"
 
 test("the dashboard polls a RELATIVE api/status (works under a subpath mount)", () => {
   expect(DASHBOARD_HTML).toContain("fetch('api/status')")
   expect(DASHBOARD_HTML).not.toContain("fetch('/api/status')")
+})
+
+test("renderDashboardJson projects pendingApprovalList via webActions", () => {
+  const e: PendingApproval = {
+    id: "appr-1", kind: "outbound", target: "route-a", actor: "hub",
+    summary: "POST → route-a", createdAt: 100, expiresAt: 200, state: "pending", fire: () => {},
+  }
+  const json = renderDashboardJson({
+    now: 1000, startedAt: 0,
+    status: { now: 1000, agents: [], overseers: [], routes: [], routeRate10m: 0, ephemerals: [] },
+    audit: { total: 0, byKind: {}, byOutcome: {}, costUsd: 0, actors: 0 },
+    recent: [], pendingApprovals: 1, pendingApprovalList: [e],
+  })
+  expect(json.pendingApprovalList).toEqual([{
+    id: "appr-1", kind: "outbound", target: "route-a", actor: "hub", chat: undefined,
+    summary: "POST → route-a", createdAt: 100, expiresAt: 200,
+  }])
+})
+
+test("the dashboard HTML has an approvals panel and a channel chat pane", () => {
+  expect(DASHBOARD_HTML).toContain('id="approvals"')
+  expect(DASHBOARD_HTML).toContain('id="chat"')
+  expect(DASHBOARD_HTML).toContain("api/channels")
 })
