@@ -285,6 +285,7 @@ export interface HubConfig {
   webPort?: number               // port for the read-only web dashboard (absent ⇒ off)
   webHost?: string               // bind host for the web dashboard (default 127.0.0.1; set 0.0.0.0 to expose)
   audit?: AuditConfig            // append-only ledger of every governed effect (default off)
+  reload?: ReloadConfig          // operator !reload command: hot-swap safe config / hard-restart agents (default off)
   approvals?: ApprovalConfig     // human-in-the-loop approval gate for requireApproval effects (default off)
   consult?: ConsultConfig        // inter-agent ask_agent tool (default off; per-agent access via consultableBy)
   peering?: PeeringConfig        // cross-VPS hub liaison (default off; per-agent access via peerableBy)
@@ -470,6 +471,13 @@ export interface AuditConfig {
   redactEnv?: string[]          // extra secret env names whose values are masked in detail
   maxBytes?: number             // optional size-based rotation threshold
   keepFiles?: number            // optional rotated-file retention count
+}
+
+/** Operator `!reload` command: re-read the config file and either hot-swap the
+ *  safe subset (`!reload`) or additionally respawn changed agents (`!reload hard`).
+ *  Default off — the command is inert unless enabled. */
+export interface ReloadConfig {
+  enabled?: boolean              // default false
 }
 
 /** Access-weighted recall + the periodic vault-tending pass. Absent ⇒ recall
