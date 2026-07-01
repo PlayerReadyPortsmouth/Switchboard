@@ -2,6 +2,8 @@ import { join, dirname } from "path"
 import { unlinkSync, appendFileSync, mkdirSync, readFileSync, writeFileSync, existsSync, statSync, renameSync, readdirSync, rmSync } from "fs"
 import { config as loadEnv } from "./env"
 import { loadConfigs } from "./config"
+import { escalatedRuntime, countErrors, RateCap } from "./escalation"
+import { planReload } from "./configReload"
 import { BaseGate } from "./baseGate"
 import { Gateway, parseNotifyCustomId } from "./gateway"
 import { Dispatcher, type AgentTransport } from "./transports/index"
@@ -47,6 +49,8 @@ import { OutboundDelivery } from "./outboundDelivery"
 import { matchOutbound, renderBody } from "./outbound"
 import { AuditLog } from "./auditLog"
 import { parseJsonlTail, shouldRotate, rotationsToPrune } from "./audit"
+import { TurnTrace, parseTraceTail, renderTrace, type TraceFilter } from "./turnTrace"
+import { runDoctor, renderDoctor, type DoctorFacts } from "./doctor"
 import { buildReplay, renderReplay, chunkLines } from "./replay"
 import { ApprovalRegistry, renderApprovalCard, parseApprovalCustomId, type ApprovalRequest, type ApprovalDecision, type ApprovalFire } from "./approval"
 import { startMetricsServer } from "./metricsServer"
@@ -59,7 +63,7 @@ import { buildAuditText, buildToolsText } from "./commandActions"
 import type { WebDeps, ChannelInfo, ChannelMessageJson } from "./webServer"
 import { ConsultRegistry, mayConsult, consultAnswerFromReply } from "./consult"
 import { MissionRegistry, findWorkflow, renderStepPrompt, renderMissionCard, type MissionRun } from "./workflow"
-import type { AgentConfig, AgentReply, InboundMessage, SpawnTrigger, SpawnCardUpdate, CardSpec, DirectCommand, OutboundRoute } from "./types"
+import type { AgentConfig, AgentReply, InboundMessage, SpawnTrigger, SpawnCardUpdate, CardSpec, DirectCommand, OutboundRoute, HubConfig, AgentRegistry, SendOutcome } from "./types"
 import { resolveOutboxFile } from "./outboxAttach"
 import { makeAttachHandler } from "./attachHandler"
 import { publishArtifact } from "./publishLink"
@@ -469,6 +473,7 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonT
     attachEnabled: !!hub.outboundAttachments?.enabled,
     publishEnabled: shareLinksOn,
     peeringEnabled: peeringOn,
+    receiptsEnabled: !!hub.receipts?.enabled,
     onOverflow: (inbound) => {
       // Consults in the retry loop own their own retry/settle lifecycle — don't
       // short-circuit them here, just drop the overflow silently.
@@ -486,11 +491,18 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonT
       void gateway.sendPlain(inbound.chatId, `${cfg.emoji} ${name} is busy — please resend in a moment.`)
     },
   })
-  t.onReply((reply) => { void onAgentReply(reply, key) })
-  if (toolObs) {
-    t.onToolUse((tools) => toolUsage.recordToolUse(name, tools))
-    t.onToolResult((results) => toolUsage.recordToolResult(results))
-  }
+  t.onReply((reply) => onAgentReply(reply, key))
+  t.onToolUse((tools) => {
+    trace.record({ agent: name, chat: lastChatByAgent.get(name) ?? "", kind: "tool_use", tools })
+    if (toolObs) toolUsage.recordToolUse(name, tools)
+  })
+  t.onToolResult((results) => {
+    trace.record({ agent: name, chat: lastChatByAgent.get(name) ?? "", kind: "tool_result", results })
+    // Auto-escalation signal: tally this turn's tool errors (per transport key so a
+    // consult/escalation clone can't pollute the real agent's count).
+    if (escalationOn && escCfg?.auto) turnErrors.set(key, (turnErrors.get(key) ?? 0) + countErrors(results))
+    if (toolObs) toolUsage.recordToolResult(results)
+  })
   transports.set(key, t)
   return t
 }
@@ -561,6 +573,19 @@ const audit = new AuditLog({
  *  from agent-attributed events even when the hub master switch is on. */
 const auditOptedOut = (agent?: string): boolean =>
   !!agent && agents[agent]?.runtime.audit === false
+
+// Full-fidelity per-turn trace (message bodies), separate from the metadata-only
+// AuditLog. Default off; when on, appends JSONL to <stateDir>/trace.jsonl. A no-op
+// (never throws, nothing written) when disabled. Records the last chat per agent so
+// tool_use/tool_result hooks — which lack a chat id — can be attributed to a channel.
+const traceFile = hub.trace?.file ?? join(hub.stateDir, "trace.jsonl")
+const trace = new TurnTrace({
+  append: (l) => { try { appendFileSync(traceFile, l) } catch {} },
+  readTail: (n) => { try { return parseTraceTail(readFileSync(traceFile, "utf8"), n) } catch { return [] } },
+  now: () => Date.now(),
+  enabled: hub.trace?.enabled === true,
+})
+const lastChatByAgent = new Map<string, string>()
 
 // Approval gate: a requireApproval effect parks here, posts an Approve/Deny card,
 // and fires only on a configured approver's grant (fail-closed on deny / expiry /
@@ -820,9 +845,14 @@ function emitHubEvent(event: string, data: Record<string, unknown>): void {
   }
 }
 
+/** Flatten a card to its trace body: title + body joined for full-fidelity capture. */
+function cardTraceText(card: CardSpec): string {
+  return [card.title, card.body].filter(Boolean).join("\n")
+}
+
 /** Handle one reply from a transport: cards → Discord card (+ register buttons);
  *  text → spawn-trigger match or a plain reply; react/edit → passthrough. */
-async function onAgentReply(reply: AgentReply, key: string): Promise<void> {
+async function onAgentReply(reply: AgentReply, key: string): Promise<void | SendOutcome> {
   if (toolObs) toolUsage.endTurn(reply.agent)
   // Inter-agent consult: a reply on a virtual consult channel is the answer to a
   // pending ask_agent — settle it (return the answer to the caller) and never post
@@ -859,14 +889,15 @@ async function onAgentReply(reply: AgentReply, key: string): Promise<void> {
     return
   }
   if (reply.kind === "card" && reply.card) {
-    await cardLifecycle.onCard(reply, key)
-    return
+    trace.record({ agent: reply.agent, chat: reply.chatId, kind: "card", text: cardTraceText(reply.card) })
+    return await cardLifecycle.onCard(reply, key)
   }
   if (reply.kind === "update" && reply.card && reply.correlationId) {
-    await cardLifecycle.onUpdate(reply.correlationId, reply.chatId, reply.card, key)
-    return
+    trace.record({ agent: reply.agent, chat: reply.chatId, kind: "update", text: cardTraceText(reply.card) })
+    return await cardLifecycle.onUpdate(reply.correlationId, reply.chatId, reply.card, key)
   }
   if (reply.kind === "reply" && reply.text) {
+    trace.record({ agent: reply.agent, chat: reply.chatId, kind: "reply", text: reply.text })
     for (const trig of spawnTriggers) {
       const m = trig.re.exec(reply.text)
       if (m) { await runSpawnTrigger(trig, m as unknown as string[], reply.chatId, reply.agent); return }
@@ -895,6 +926,15 @@ async function onAgentReply(reply: AgentReply, key: string): Promise<void> {
     channelStream.publish(reply.chatId, { ts: Date.now(), author: reply.agent, content: reply.text, origin: "agent" })
   }
   await gateway.sendReply(reply, agents[reply.agent])
+  // F3 auto-escalation: if this real persistent-agent turn logged tool errors, re-run
+  // it once at higher effort (rate-capped). `key === reply.agent` only for a live
+  // persistent agent — clones use distinct keys, so an escalation never re-triggers.
+  if (escalationOn && escCfg?.auto && reply.kind === "reply" && key === reply.agent && agents[reply.agent]) {
+    const errs = turnErrors.get(key) ?? 0
+    turnErrors.set(key, 0)
+    if (errs > 0 && !escalatingChats.has(reply.chatId) && autoRateCap.tryTake())
+      void escalateTurn(reply.chatId, "auto")
+  }
 }
 
 // Monotonic job-id counter for spawn triggers (Math.random forbidden).
@@ -949,7 +989,7 @@ async function runSpawnTrigger(trig: SpawnTrigger, groups: string[], chatId: str
   const paintSpawnCard = (card: CardSpec): Promise<void> => {
     if (!trig.onSpawnCard) return Promise.resolve()
     const corr = interpolate(trig.onSpawnCard.correlationId, groups, jobId)
-    return cardLifecycle.onUpdate(corr, chatId, card, jobId)
+    return cardLifecycle.onUpdate(corr, chatId, card, jobId).then(() => {})
   }
   if (trig.onSpawnCard) await paintSpawnCard(buildSpawnCard(trig.onSpawnCard, groups, jobId))
   if (trig.setupCommand) {
@@ -987,6 +1027,65 @@ const shareLinksOn = hub.shareLinks?.enabled === true
 const shareArtifactsDir = hub.shareLinks?.artifactsDir ?? join(hub.stateDir, "share-artifacts")
 const shareOutboxBase = hub.outboundAttachments?.outboxDir ?? join(hub.stateDir, "outbox")
 const base62 = (b: Buffer) => { const A = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"; let n = 0n; for (const x of b) n = n * 256n + BigInt(x); let s = ""; while (n > 0n) { s = A[Number(n % 62n)] + s; n /= 62n } return s.padStart(22, "0") }
+
+// F3 effort escalation: re-run a chat's last turn on a short-lived, higher-effort
+// ephemeral clone. Manual via `!hard`, auto when a turn's tool results carried error
+// signals (bounded by `autoRateCap`). Off unless `hub.escalation.enabled`.
+const escCfg = hub.escalation
+const escalationOn = escCfg?.enabled === true
+const lastTurns = new Map<string, { agent: string; content: string }>()   // by chatId: what to re-run
+const turnErrors = new Map<string, number>()                               // by transport key: this turn's tool errors
+const autoRateCap = new RateCap(Date.now, escCfg?.autoMaxPerHour ?? 4)
+const escalatingChats = new Set<string>()                                  // chats with an escalation in flight
+
+/** Re-run `chatId`'s last turn on a stronger ephemeral clone and post the result to
+ *  the same channel. `reason` is "manual" (!hard) or "auto" (tool-error-triggered).
+ *  The clone runs clean (fresh session, no memory/context) at the escalation model +
+ *  args; its reply is captured here rather than posted under the clone's own key. */
+async function escalateTurn(chatId: string, reason: "manual" | "auto"): Promise<void> {
+  const last = lastTurns.get(chatId)
+  if (!last) { if (reason === "manual") void gateway.sendPlain(chatId, "🥊 nothing to escalate yet — no prior turn on this channel."); return }
+  if (escalatingChats.has(chatId)) { if (reason === "manual") void gateway.sendPlain(chatId, "🥊 an escalation is already running for this channel."); return }
+  const cfg = agents[last.agent]
+  if (!cfg) return
+  escalatingChats.add(chatId)
+  const cloneKey = `escalate-${last.agent}-${Date.now()}`
+  const cloneCfg: AgentConfig = {
+    ...cfg,
+    mode: "ephemeral" as const,
+    runtime: escalatedRuntime(cfg.runtime, { model: escCfg?.model, claudeArgs: escCfg?.claudeArgs }),
+  }
+  const t = makeTransport(last.agent, cloneKey, cloneCfg)
+  void gateway.sendPlain(chatId, `🥊 escalating${escCfg?.model ? ` (${escCfg.model})` : ""} — re-running the last turn at higher effort…`)
+  if (!auditOptedOut(last.agent)) audit.record({
+    kind: "session", actor: reason === "manual" ? "user" : "hub", action: "escalate",
+    target: last.agent, chat: chatId, detail: { reason },
+  })
+  let done = false
+  const finish = async (reply: AgentReply | null) => {
+    if (done) return
+    done = true
+    void t.close()
+    transports.delete(cloneKey)
+    turnErrors.delete(cloneKey)
+    escalatingChats.delete(chatId)
+    // Post to the REAL channel; buttons on a card bind to the live persistent agent.
+    if (reply?.kind === "card" && reply.card) await cardLifecycle.onCard({ ...reply, chatId }, last.agent)
+    else if (reply?.kind === "reply") void gateway.sendPlain(chatId, reply.text ?? "(no response from escalation)")
+    else void gateway.sendPlain(chatId, "🥊 escalation produced no response.")
+  }
+  // Override makeTransport's onReply so the clone's answer is captured, not posted
+  // under the clone key. (Same pattern as spawnConsultClone.)
+  t.onReply((reply) => { if (reply.kind === "reply" || reply.kind === "card") void finish(reply) })
+  setTimeout(() => void finish(null), 180_000).unref()
+  void t.start().then(() => {
+    t.deliver(cloneKey, {
+      chatId: cloneKey, messageId: "escalate-0", userId: "system", user: "hub",
+      content: last.content, ts: new Date().toISOString(), isDM: false,
+    })
+  })
+}
+
 for (const [name, cfg] of Object.entries(agents)) {
   if (cfg.mode !== "persistent") continue
   const primary = makeTransport(name, name, cfg)
@@ -1014,7 +1113,7 @@ if (pools.size) {
 // so route that aggregator back to onAgentReply. For persistent agents the routing
 // key is the agent name (== reply.agent). (Ephemeral spawn transports are not in the
 // Dispatcher and keep the onReply set in makeTransport, keyed by jobId.)
-dispatcher.onReply((reply) => { void onAgentReply(reply, reply.agent) })
+dispatcher.onReply((reply) => onAgentReply(reply, reply.agent))
 
 /** Clear a persistent agent's context: drop its session file + respawn fresh.
  *  `reason` distinguishes a manual reset from a governor auto-compaction. */
@@ -1031,6 +1130,24 @@ async function resetAgentSession(name: string, channelId: string, reason = "manu
     kind: "session", actor: "hub", action: "reset", target: name, chat: channelId, detail: { reason },
   })
   void gateway.sendPlain(channelId, "🧹 context cleared — fresh session.")
+}
+
+/** Respawn a persistent agent's process from its CURRENT registry config so a
+ *  hard `!reload` picks up new spawn args (model / claudeArgs / cwd). Unlike
+ *  resetAgentSession this KEEPS the session file, so a resumable agent resumes
+ *  its context under the new process. Pooled agents are skipped (they run behind
+ *  an AgentPool the reload path can't hot-swap). */
+async function respawnAgent(name: string): Promise<void> {
+  const cfg = agents[name]
+  if (!cfg || cfg.mode !== "persistent" || cfg.runtime?.pool) return
+  const old = transports.get(name)
+  if (old) { await old.close(); transports.delete(name) }
+  const fresh = makeTransport(name, name, cfg)
+  await fresh.start()
+  dispatcher.replace(name, fresh)
+  if (!auditOptedOut(name)) audit.record({
+    kind: "session", actor: "hub", action: "respawn", target: name, detail: { reason: "reload" },
+  })
 }
 
 /** Deliver a synthesised system inbound to an agent scoped to a channel. */
@@ -1422,6 +1539,10 @@ const orchestrator = new Orchestrator(hub, agents, {
   sendPlain: (chatId, text) => gateway.sendPlain(chatId, text),
   prepareDispatch: async ({ agent, inbound, isSwitch }) => {
     const rt = agents[agent]?.runtime
+    // Record inbound in the trace + remember this agent's live chat so its
+    // tool_use/tool_result records (which carry no chat id) can be attributed.
+    lastChatByAgent.set(agent, inbound.chatId)
+    trace.record({ agent, chat: inbound.chatId, kind: "inbound", text: inbound.content })
     // A genuine user-initiated turn (re)sets the overseer goal for this agent.
     if (rt?.overseer?.enabled) overseer.begin(agent, inbound.chatId, inbound.content)
     // Record the routing decision for the status board (the Haiku resolver's pick).
@@ -1469,6 +1590,10 @@ const orchestrator = new Orchestrator(hub, agents, {
       user: inbound.user, userId: inbound.userId,
     })
     convActivity.set(inbound.chatId, Date.now())
+    // F3: remember what to re-run for this channel, and start a fresh error tally
+    // for the turn about to begin (per agent key; persistent key === agent name).
+    lastTurns.set(inbound.chatId, { agent, content: live })
+    turnErrors.set(agent, 0)
     if (!context && !memory && live === inbound.content) return inbound
     return { ...inbound, content: enrich(live, { memory, context }) }
   },
@@ -1512,8 +1637,9 @@ async function runDirectCommand(cmd: DirectCommand, args: string, chatId: string
 
 // Commands: an inbound whose trimmed content equals `match` delivers `message`
 // to agent@channel (gated by the base-gate allowlist if allowlistOnly).
-const commands = hub.commands ?? []
-const directCommands = hub.directCommands ?? []
+// Mutable so a safe `!reload` can hot-swap them without dropping agent procs.
+let commands = hub.commands ?? []
+let directCommands = hub.directCommands ?? []
 gateway.handleInbound((m) => {
   channelStream.publish(m.chatId, { ts: Date.now(), author: m.user, content: m.content, origin: "discord" })
   const trimmed = m.content.trim()
@@ -1540,10 +1666,95 @@ gateway.handleInbound((m) => {
     void runWorkflow(id, input, m.chatId, `user:${m.userId}`)
     return
   }
+  // Manual escalation (operator-only): re-run this channel's last turn at higher effort.
+  if (/^!hard\b/i.test(trimmed)) {
+    if (!baseGate.listAllowed().includes(m.userId)) return
+    if (!escalationOn) { void gateway.sendPlain(m.chatId, "🥊 `!hard` is off (set `hub.escalation.enabled`)."); return }
+    void escalateTurn(m.chatId, "manual")
+    return
+  }
   if (/^!audit\b/i.test(trimmed)) {
     if (!baseGate.listAllowed().includes(m.userId)) return
     if (!hub.audit?.enabled) { void gateway.sendPlain(m.chatId, "📜 audit logging is off (set `hub.audit.enabled`)."); return }
     void gateway.sendPlain(m.chatId, buildAuditText(trimmed.replace(/^!audit\b/i, ""), audit, (ts) => new Date(ts).toISOString().slice(11, 19)))
+    return
+  }
+  // Two-tier config reload (operator-only). `!reload` re-reads the config file and
+  // hot-swaps the SAFE subset (router/fallback models, contextWindows, commands,
+  // directCommands, per-agent access) with NO agent-process churn. `!reload hard`
+  // additionally respawns persistent agents whose spawn config (model/args/cwd)
+  // changed. Some changes need a full hub restart — those are reported, never applied.
+  if (/^!reload\b/i.test(trimmed)) {
+    if (!baseGate.listAllowed().includes(m.userId)) return
+    if (hub.reload?.enabled !== true) { void gateway.sendPlain(m.chatId, "🔧 `!reload` is off (set `hub.reload.enabled`)."); return }
+    const hard = /^!reload\s+hard\b/i.test(trimmed)
+    let next: { hub: HubConfig; agents: AgentRegistry }
+    try { next = loadConfigs(CONFIG_DIR) }
+    catch (e) { void gateway.sendPlain(m.chatId, `❌ reload aborted — config did not load: ${e instanceof Error ? e.message : e}`); return }
+    const plan = planReload({ hub, agents }, next)
+    // Apply the safe subset in place so call-time readers pick it up without a restart.
+    hub.routerModel = next.hub.routerModel
+    hub.librarianModel = next.hub.librarianModel
+    hub.distillerModel = next.hub.distillerModel
+    hub.overseerModel = next.hub.overseerModel
+    hub.contextWindows = next.hub.contextWindows
+    hub.commands = next.hub.commands
+    hub.directCommands = next.hub.directCommands
+    commands = next.hub.commands ?? []
+    directCommands = next.hub.directCommands ?? []
+    for (const [name, cfg] of Object.entries(next.agents)) if (agents[name]) agents[name]!.access = cfg.access
+    audit.record({ kind: "event", actor: `user:${m.userId}`, action: hard ? "reload_hard" : "reload_safe", chat: m.chatId, outcome: "ok", detail: { restartAgents: plan.restartAgents, fullRestart: plan.fullRestart } })
+    const lines = [`🔧 **reload (${hard ? "hard" : "safe"})** — config re-read, safe subset hot-swapped.`]
+    void (async () => {
+      if (hard && plan.restartAgents.length) {
+        for (const name of plan.restartAgents) { if (next.agents[name]) agents[name] = next.agents[name]! }
+        for (const name of plan.restartAgents) { try { await respawnAgent(name) } catch (e) { lines.push(`❌ respawn ${name} failed: ${e instanceof Error ? e.message : e}`) } }
+        lines.push(`♻️ restarted ${plan.restartAgents.length} agent(s): ${plan.restartAgents.join(", ")}`)
+      } else if (plan.restartAgents.length) {
+        lines.push(`ℹ️ ${plan.restartAgents.length} agent(s) changed spawn config (model/args/cwd) — run \`!reload hard\` to apply: ${plan.restartAgents.join(", ")}`)
+      }
+      if (plan.fullRestart.length) lines.push(`⚠️ needs a full hub restart (not applied): ${plan.fullRestart.join(", ")}`)
+      void gateway.sendPlain(m.chatId, lines.join("\n"))
+    })()
+    return
+  }
+  // Turn trace query (operator-only): full-fidelity per-turn records (message
+  // bodies). Off unless hub.trace.enabled. Filters: agent= chat= kind= limit=.
+  if (/^!trace\b/i.test(trimmed)) {
+    if (!baseGate.listAllowed().includes(m.userId)) return
+    if (hub.trace?.enabled !== true) { void gateway.sendPlain(m.chatId, "🔎 turn trace is off (set `hub.trace.enabled`)."); return }
+    const filter: TraceFilter = {}
+    for (const tok of trimmed.replace(/^!trace\b/i, "").trim().split(/\s+/).filter(Boolean)) {
+      const eq = tok.indexOf("=")
+      if (eq === -1) continue
+      const k = tok.slice(0, eq); const v = tok.slice(eq + 1)
+      if (k === "agent") filter.agent = v
+      else if (k === "chat") filter.chat = v
+      else if (k === "kind" && ["inbound", "tool_use", "tool_result", "reply", "card", "update"].includes(v)) filter.kind = v as TraceFilter["kind"]
+      else if (k === "limit") { const n = parseInt(v, 10); if (Number.isFinite(n)) filter.limit = Math.max(1, Math.min(200, n)) }
+    }
+    const out = renderTrace(trace.recent({ ...filter, limit: filter.limit ?? 25 }), (ts) => new Date(ts).toISOString().slice(11, 19))
+    for (const chunk of chunkLines(out, 1_900)) void gateway.sendPlain(m.chatId, chunk)
+    return
+  }
+  // Hub self-check (operator-only): agent liveness, state-dir writability, router
+  // config, pending approvals, and the logging switches → a pass/warn/fail report.
+  if (/^!doctor\b/i.test(trimmed)) {
+    if (!baseGate.listAllowed().includes(m.userId)) return
+    let stateDirWritable = true
+    try { const probe = join(hub.stateDir, `.doctor-${process.pid}`); writeFileSync(probe, ""); unlinkSync(probe) } catch { stateDirWritable = false }
+    const doctorAgents = Object.entries(agents)
+      .filter(([, cfg]) => cfg.mode === "persistent")
+      .map(([name]) => ({ name, alive: (pools.get(name) ?? transports.get(name))?.isAvailable() ?? false, registered: true }))
+    const facts: DoctorFacts = {
+      agents: doctorAgents,
+      stateDirWritable,
+      pendingApprovals: approvalRegistry.pendingCount(),
+      auditEnabled: hub.audit?.enabled === true,
+      traceEnabled: hub.trace?.enabled === true,
+      routerModel: hub.routerModel,
+    }
+    void gateway.sendPlain(m.chatId, renderDoctor(runDoctor(facts)))
     return
   }
   // Replay (operator-only): reconstruct a conversation's (or one corr action's)

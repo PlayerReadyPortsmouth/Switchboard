@@ -40,6 +40,16 @@ export interface CardSpec {
   footer?: string;
 }
 
+/** The result of a hub-side outbound send (post_card / update_card / attach_file).
+ *  Threaded back to the shim as a `*_result` receipt so the agent gets a real
+ *  confirmation (Discord message id) or a legible error instead of a blind "sent".
+ *  Only produced/returned when receipts are enabled; otherwise ignored. */
+export interface SendOutcome {
+  ok: boolean;
+  messageId?: string;   // the Discord message id when the send succeeded
+  error?: string;       // a human-readable reason when it failed
+}
+
 /** Per-turn token/cost usage parsed from a stream-json `result` event. The
  *  context-fill estimate is derived from these (see hub/usage.ts). */
 export interface TurnUsage {
@@ -285,6 +295,9 @@ export interface HubConfig {
   webPort?: number               // port for the read-only web dashboard (absent ⇒ off)
   webHost?: string               // bind host for the web dashboard (default 127.0.0.1; set 0.0.0.0 to expose)
   audit?: AuditConfig            // append-only ledger of every governed effect (default off)
+  escalation?: EscalationConfig  // re-run a turn at higher effort: manual !hard + auto on tool errors (default off)
+  reload?: ReloadConfig          // operator !reload command: hot-swap safe config / hard-restart agents (default off)
+  trace?: TraceConfig            // full-fidelity per-turn trace with message bodies (default off)
   approvals?: ApprovalConfig     // human-in-the-loop approval gate for requireApproval effects (default off)
   consult?: ConsultConfig        // inter-agent ask_agent tool (default off; per-agent access via consultableBy)
   peering?: PeeringConfig        // cross-VPS hub liaison (default off; per-agent access via peerableBy)
@@ -295,7 +308,13 @@ export interface HubConfig {
   shareLinks?: ShareLinksConfig  // publish_link: agents publish staff-only Entra-gated artifact URLs (default off)
   toolObservability?: ToolObservabilityConfig  // capture + surface per-agent tool usage (default off)
   memoryBrowse?: MemoryBrowseConfig  // operator memory browse & forget UI (default off)
+  receipts?: ReceiptsConfig      // outbound receipts for post_card/update_card/attach_file (default off)
 }
+
+/** Outbound-receipt confirmation. Absent/disabled ⇒ post_card/update_card/attach_file
+ *  behave exactly as before (fire-and-forget "sent"). Enabled ⇒ the shim turns them
+ *  into request/response and returns the Discord message id (or a legible error). */
+export interface ReceiptsConfig { enabled?: boolean }
 
 /** Discord file-upload passthrough. Absent/disabled ⇒ uploads are ignored exactly
  *  as before (only message text reaches the agent). When enabled, the hub downloads
@@ -470,6 +489,31 @@ export interface AuditConfig {
   redactEnv?: string[]          // extra secret env names whose values are masked in detail
   maxBytes?: number             // optional size-based rotation threshold
   keepFiles?: number            // optional rotated-file retention count
+}
+
+/** Effort escalation: re-run a turn on a stronger, short-lived ephemeral clone.
+ *  Manual via `!hard`; auto when a turn's tool results carry error signals (bounded
+ *  by `autoMaxPerHour`). Default off. */
+export interface EscalationConfig {
+  enabled?: boolean              // master switch (default false)
+  model?: string                // stronger model for the clone (absent ⇒ keep the agent's model)
+  claudeArgs?: string[]          // extra CLI args for the clone (e.g. a reasoning-effort flag)
+  auto?: boolean                 // auto-escalate on tool errors (default false; !hard works regardless)
+  autoMaxPerHour?: number        // rate cap for auto escalations (default 4; 0 disables auto)
+}
+
+/** Operator `!reload` command: re-read the config file and either hot-swap the
+ *  safe subset (`!reload`) or additionally respawn changed agents (`!reload hard`).
+ *  Default off — the command is inert unless enabled. */
+export interface ReloadConfig {
+  enabled?: boolean              // default false
+}
+
+/** Full-fidelity per-turn trace (message bodies included), separate from the
+ *  metadata-only AuditLog. Default off; when on, writes JSONL to <stateDir>/trace.jsonl. */
+export interface TraceConfig {
+  enabled?: boolean              // default false
+  file?: string                 // default <stateDir>/trace.jsonl
 }
 
 /** Access-weighted recall + the periodic vault-tending pass. Absent ⇒ recall
