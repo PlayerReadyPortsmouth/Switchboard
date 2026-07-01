@@ -1,6 +1,8 @@
 import { DASHBOARD_HTML, renderDashboardJson, type WebInput } from "./web"
 import type { ChannelEvent } from "./channelStream"
 import type { TraceRecord } from "./turnTrace"
+import type { AgentConfig } from "./types"
+import type { AgentChangeClassification } from "./agentConfigDraft"
 
 export interface ChannelInfo { channelId: string; name?: string; agent: string }
 
@@ -14,6 +16,13 @@ export interface WebDeps {
   subscribeChannel: (channelId: string, cb: (evt: ChannelEvent) => void) => () => void
   sendChannelMessage: (channelId: string, email: string, text: string) => Promise<void>
   runCommand: (name: string, channelId: string) => Promise<string | null>
+  listAgents: () => Promise<Record<string, AgentConfig>>
+  previewAgentChange: (name: string, config: AgentConfig | null) => Promise<{
+    id: string; before: AgentConfig | null; after: AgentConfig | null; classification: AgentChangeClassification
+  }>
+  confirmAgentChange: (name: string, id: string, hard: boolean, actor: string) => Promise<{
+    state: "applied" | "not_found" | "conflict"; restarted: string[]; fullRestart: string[]
+  }>
 }
 
 const json = (body: unknown, status = 200) =>
@@ -58,8 +67,12 @@ export async function handleWebRequest(req: Request, deps: WebDeps): Promise<Res
   const channelStreamMatch = /^\/api\/channel\/([^/]+)\/stream$/.exec(path)
   const channelMessageMatch = /^\/api\/channel\/([^/]+)\/message$/.exec(path)
   const commandMatch = /^\/api\/command\/([^/]+)$/.exec(path)
+  const agentsMatch = path === "/api/agents"
+  const agentPreviewMatch = /^\/api\/agents\/([^/]+)\/preview$/.exec(path)
+  const agentConfirmMatch = /^\/api\/agents\/([^/]+)\/confirm$/.exec(path)
   const isGuardedRoute = path === "/api/channels" || approvalMatch || channelHistoryMatch ||
-    channelTimelineMatch || channelStreamMatch || channelMessageMatch || commandMatch
+    channelTimelineMatch || channelStreamMatch || channelMessageMatch || commandMatch ||
+    agentsMatch || agentPreviewMatch || agentConfirmMatch
 
   if (isGuardedRoute) {
     // Auth runs before method dispatch below, so a wrong-method request without
@@ -101,6 +114,23 @@ export async function handleWebRequest(req: Request, deps: WebDeps): Promise<Res
       if (!body?.channelId) return json({ error: "missing_channelId" }, 400)
       const text = await deps.runCommand(commandMatch[1], body.channelId)
       return text === null ? json({ error: "unknown_command" }, 404) : json({ text })
+    }
+
+    if (method === "GET" && agentsMatch) {
+      return json(await deps.listAgents())
+    }
+
+    if (method === "POST" && agentPreviewMatch) {
+      const body = (await req.json().catch(() => null)) as { config?: AgentConfig | null } | null
+      if (body?.config === undefined) return json({ error: "missing_config" }, 400)
+      return json(await deps.previewAgentChange(agentPreviewMatch[1], body.config))
+    }
+
+    if (method === "POST" && agentConfirmMatch) {
+      const body = (await req.json().catch(() => null)) as { id?: string; hard?: boolean } | null
+      if (!body?.id) return json({ error: "missing_id" }, 400)
+      const result = await deps.confirmAgentChange(agentConfirmMatch[1], body.id, body.hard === true, email)
+      return result.state === "applied" ? json(result) : json(result, 409)
     }
 
     // Known guarded path, but wrong method for it.
