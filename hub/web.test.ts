@@ -57,8 +57,9 @@ test("the dashboard HTML has agent-config edit affordances and a JSON editor pan
 })
 
 test("openAgentEditor resets the textarea to visible on every open, not just Cancel", () => {
-  var occurrences = DASHBOARD_HTML.split("style.display = 'block'").length - 1;
-  expect(occurrences).toBeGreaterThanOrEqual(2);
+  var marker = "agentEditorText').style.display = 'block'";
+  var occurrences = DASHBOARD_HTML.split(marker).length - 1;
+  expect(occurrences).toBe(2);
 })
 
 test("New Agent shows a 'New agent' title instead of 'Edit agent'", () => {
