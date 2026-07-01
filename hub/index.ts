@@ -6,6 +6,8 @@ import { escalatedRuntime, countErrors, RateCap } from "./escalation"
 import { planReload } from "./configReload"
 import { classifyAgentChange, invalidAgentConfigShape, type AgentChangeClassification } from "./agentConfigDraft"
 import { AgentConfigPreviewRegistry } from "./agentConfigPreview"
+import { classifyHubChange, invalidSafeFieldValue, type HubChangeClassification } from "./hubConfigDraft"
+import { HubConfigPreviewRegistry } from "./hubConfigPreview"
 import { BaseGate } from "./baseGate"
 import { Gateway, parseNotifyCustomId } from "./gateway"
 import { Dispatcher, type AgentTransport } from "./transports/index"
@@ -83,6 +85,7 @@ import { handlePeerRequest, type PeerRouteDeps } from "./peerRoutes"
 
 const CONFIG_DIR = process.env.SWITCHBOARD_CONFIG ?? join(import.meta.dir, "..", "config")
 const AGENTS_JSON_PATH = join(CONFIG_DIR, "agents.json")
+const HUB_CONFIG_PATH = join(CONFIG_DIR, "hub.config.json")
 const { hub, agents } = loadConfigs(CONFIG_DIR)
 
 /** Read config/agents.json fresh, in its raw on-disk shape — NOT loadConfigs
@@ -101,6 +104,45 @@ function writeAgentsJson(registry: AgentRegistry): void {
   const tmp = `${AGENTS_JSON_PATH}.tmp-${process.pid}`
   writeFileSync(tmp, JSON.stringify(registry, null, 2))
   renameSync(tmp, AGENTS_JSON_PATH)
+}
+
+/** Read config/hub.config.json fresh, in its raw on-disk shape — NOT loadConfigs
+ *  (which also expands `~` in socketPath/stateDir/outboundAttachments.outboxDir/
+ *  shareLinks.artifactsDir). This phase's classify/preview/confirm plumbing works
+ *  with the raw shape end to end, exactly like Phase 3 does for agents.json, so an
+ *  edit round-trips exactly: GET returns what's on disk, POST writes back what was
+ *  typed, no expansion mismatch ever appears in a diff. Note none of those four
+ *  expanded fields are in hubConfigDraft.ts's SAFE_KEYS, so this phase's live
+ *  hot-swap path (applySafeHubFields) never consumes a raw, unexpanded value —
+ *  the class of bug Phase 3's final review caught for agent cwd cannot recur here. */
+function readHubConfig(): HubConfig {
+  return JSON.parse(readFileSync(HUB_CONFIG_PATH, "utf8")) as HubConfig
+}
+
+/** Atomically write the full hub config back to config/hub.config.json
+ *  (temp-file-then-rename, matching writeAgentsJson). */
+function writeHubConfig(config: HubConfig): void {
+  const tmp = `${HUB_CONFIG_PATH}.tmp-${process.pid}`
+  writeFileSync(tmp, JSON.stringify(config, null, 2))
+  renameSync(tmp, HUB_CONFIG_PATH)
+}
+
+const EXCLUDED_HUB_CONFIG_KEYS = ["botTokenEnv", "socketPath", "stateDir", "guildIds"] as const
+
+/** Strip the four boot-critical fields from a hub config before it's ever shown
+ *  to the operator — used for both the GET response and every preview response,
+ *  so the editor never displays them regardless of entry point. */
+function redactHubConfig(config: HubConfig): Partial<HubConfig> {
+  const { botTokenEnv, socketPath, stateDir, guildIds, ...rest } = config
+  return rest
+}
+
+/** Returns the name of the first excluded key present in a submitted config, or
+ *  null if none are present. A submission should never contain these — GET never
+ *  shows them — so this is a defense-in-depth rejection, not a normal-path check. */
+function excludedHubConfigKeyPresent(config: object): string | null {
+  for (const key of EXCLUDED_HUB_CONFIG_KEYS) if (key in config) return key
+  return null
 }
 
 loadEnv(join(hub.stateDir, ".env"))   // load DISCORD_BOT_TOKEN + agent env if present
@@ -657,6 +699,12 @@ const agentConfigPreviews = new AgentConfigPreviewRegistry(
   () => `agentprev-${++agentPreviewCounter}`,
   5 * 60_000,   // 5 minute TTL — a stale preview must be re-generated, not silently confirmed
 )
+let hubPreviewCounter = 0
+const hubConfigPreviews = new HubConfigPreviewRegistry(
+  () => Date.now(),
+  () => `hubprev-${++hubPreviewCounter}`,
+  5 * 60_000,   // 5 minute TTL, matching agentConfigPreviews
+)
 const approvalCards = new Map<string, { chatId: string; messageId: string }>()
 const channelActivity = new Map<string, { agent: string; lastActive: number }>()
 const channelStream = new ChannelStream()
@@ -1191,6 +1239,25 @@ async function resetAgentSession(name: string, channelId: string, reason = "manu
  *  there's exactly one place this hot-swap logic lives. */
 function applySafeAgentFields(name: string, next: AgentConfig): void {
   if (agents[name]) agents[name]!.access = next.access
+}
+
+/** Hot-swap the exact 7 hub-level fields !reload's safe tier applies live —
+ *  the same fields hub/hubConfigDraft.ts's SAFE_KEYS lists. Updates both the
+ *  `hub` object's own fields AND the two bare `commands`/`directCommands` `let`
+ *  variables the router/direct-command matcher actually reads at call time —
+ *  `hub.commands`/`hub.directCommands` alone are NOT enough, matching exactly
+ *  what the Discord !reload branch already did inline before this extraction.
+ *  Shared by the Discord !reload branch and the web confirm endpoint. */
+function applySafeHubFields(next: HubConfig): void {
+  hub.routerModel = next.routerModel
+  hub.librarianModel = next.librarianModel
+  hub.distillerModel = next.distillerModel
+  hub.overseerModel = next.overseerModel
+  hub.contextWindows = next.contextWindows
+  hub.commands = next.commands
+  hub.directCommands = next.directCommands
+  commands = next.commands ?? []
+  directCommands = next.directCommands ?? []
 }
 
 /** Respawn a persistent agent's process from its CURRENT registry config so a
@@ -1772,15 +1839,7 @@ gateway.handleInbound((m) => {
     catch (e) { void gateway.sendPlain(m.chatId, `❌ reload aborted — config did not load: ${e instanceof Error ? e.message : e}`); return }
     const plan = planReload({ hub, agents }, next)
     // Apply the safe subset in place so call-time readers pick it up without a restart.
-    hub.routerModel = next.hub.routerModel
-    hub.librarianModel = next.hub.librarianModel
-    hub.distillerModel = next.hub.distillerModel
-    hub.overseerModel = next.hub.overseerModel
-    hub.contextWindows = next.hub.contextWindows
-    hub.commands = next.hub.commands
-    hub.directCommands = next.hub.directCommands
-    commands = next.hub.commands ?? []
-    directCommands = next.hub.directCommands ?? []
+    applySafeHubFields(next.hub)
     for (const [name, cfg] of Object.entries(next.agents)) applySafeAgentFields(name, cfg)
     audit.record({ kind: "event", actor: `user:${m.userId}`, action: hard ? "reload_hard" : "reload_safe", chat: m.chatId, outcome: "ok", detail: { restartAgents: plan.restartAgents, fullRestart: plan.fullRestart } })
     const lines = [`🔧 **reload (${hard ? "hard" : "safe"})** — config re-read, safe subset hot-swapped.`]
@@ -2080,6 +2139,62 @@ const webDeps: WebDeps = {
 
     return { state: "applied", restarted, fullRestart }
   },
+
+  listHubConfig: async (): Promise<Partial<HubConfig>> => {
+    return redactHubConfig(readHubConfig())
+  },
+
+  previewHubConfigChange: async (config) => {
+    const excluded = excludedHubConfigKeyPresent(config)
+    if (excluded) return { error: `cannot edit excluded field: ${excluded}` }
+    if (typeof config.defaultAgent !== "string" || !agents[config.defaultAgent]) {
+      return { error: "defaultAgent must name an existing agent" }
+    }
+    const current = readHubConfig()
+    // Re-attach the excluded keys' real current values onto the proposed config —
+    // GET never showed them to the operator, so their submission genuinely can't
+    // include them, but the write (and the drift check at confirm time) must still
+    // persist their real values rather than losing them.
+    const after: HubConfig = {
+      ...config,
+      botTokenEnv: current.botTokenEnv, socketPath: current.socketPath,
+      stateDir: current.stateDir, guildIds: current.guildIds,
+    }
+    const invalidSafeField = invalidSafeFieldValue(current, after)
+    if (invalidSafeField) return { error: invalidSafeField }
+    const classification = classifyHubChange(current, after)
+    const preview = hubConfigPreviews.create(current, after, classification)
+    return {
+      id: preview.id, before: redactHubConfig(preview.before), after: redactHubConfig(preview.after),
+      classification: preview.classification,
+    }
+  },
+
+  confirmHubConfigChange: async (id, actor) => {
+    const preview = hubConfigPreviews.consume(id)
+    if (!preview) return { state: "not_found", fullRestart: [] }
+
+    // Drift check: re-read disk fresh and compare against what the preview
+    // captured as `before` — if the hub config changed since the preview was
+    // generated (another operator, or !reload), refuse rather than silently
+    // clobber it.
+    const current = readHubConfig()
+    if (JSON.stringify(current) !== JSON.stringify(preview.before)) {
+      return { state: "conflict", fullRestart: [] }
+    }
+
+    writeHubConfig(preview.after)
+    // Safe fields are always applied on a confirmed edit, regardless of tier —
+    // mirrors applySafeAgentFields always running for agent edits.
+    applySafeHubFields(preview.after)
+
+    audit.record({
+      kind: "event", actor: `web:${actor}`, action: "hub_config_change", outcome: "ok",
+      detail: { before: redactHubConfig(preview.before), after: redactHubConfig(preview.after), classification: preview.classification },
+    })
+
+    return { state: "applied", fullRestart: preview.classification.fullRestart }
+  },
 }
 const webServer = startWebServer(hub.webPort ?? 0, webDeps, hub.webHost)
 if (webServer) console.error(`switchboard hub: web dashboard on ${hub.webHost ?? "127.0.0.1"}:${hub.webPort}`)
@@ -2099,6 +2214,9 @@ if (approvalsEnabled) {
 // Sweep expired agent-config previews (5min TTL) so a stale preview id can
 // never be silently confirmed after the operator's edit window has lapsed.
 setInterval(() => { agentConfigPreviews.sweepExpired() }, 60_000).unref()
+
+// Sweep expired hub-config previews (5min TTL), same rationale as the agent one above.
+setInterval(() => { hubConfigPreviews.sweepExpired() }, 60_000).unref()
 
 // Time out consults whose target never answered: resolve the caller's tool call
 // with a note and audit the lapse.

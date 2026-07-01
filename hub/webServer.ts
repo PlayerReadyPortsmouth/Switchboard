@@ -1,8 +1,9 @@
 import { DASHBOARD_HTML, renderDashboardJson, type WebInput } from "./web"
 import type { ChannelEvent } from "./channelStream"
 import type { TraceRecord } from "./turnTrace"
-import type { AgentConfig } from "./types"
+import type { AgentConfig, HubConfig } from "./types"
 import type { AgentChangeClassification } from "./agentConfigDraft"
+import type { HubChangeClassification } from "./hubConfigDraft"
 
 export interface ChannelInfo { channelId: string; name?: string; agent: string }
 
@@ -22,6 +23,13 @@ export interface WebDeps {
   } | { error: string }>
   confirmAgentChange: (name: string, id: string, hard: boolean, actor: string) => Promise<{
     state: "applied" | "not_found" | "conflict"; restarted: string[]; fullRestart: string[]
+  }>
+  listHubConfig: () => Promise<Partial<HubConfig>>
+  previewHubConfigChange: (config: HubConfig) => Promise<{
+    id: string; before: Partial<HubConfig>; after: Partial<HubConfig>; classification: HubChangeClassification
+  } | { error: string }>
+  confirmHubConfigChange: (id: string, actor: string) => Promise<{
+    state: "applied" | "not_found" | "conflict"; fullRestart: string[]
   }>
 }
 
@@ -70,9 +78,13 @@ export async function handleWebRequest(req: Request, deps: WebDeps): Promise<Res
   const agentsMatch = path === "/api/agents"
   const agentPreviewMatch = /^\/api\/agents\/([^/]+)\/preview$/.exec(path)
   const agentConfirmMatch = /^\/api\/agents\/([^/]+)\/confirm$/.exec(path)
+  const hubConfigMatch = path === "/api/hub-config"
+  const hubConfigPreviewMatch = path === "/api/hub-config/preview"
+  const hubConfigConfirmMatch = path === "/api/hub-config/confirm"
   const isGuardedRoute = path === "/api/channels" || approvalMatch || channelHistoryMatch ||
     channelTimelineMatch || channelStreamMatch || channelMessageMatch || commandMatch ||
-    agentsMatch || agentPreviewMatch || agentConfirmMatch
+    agentsMatch || agentPreviewMatch || agentConfirmMatch ||
+    hubConfigMatch || hubConfigPreviewMatch || hubConfigConfirmMatch
 
   if (isGuardedRoute) {
     // Auth runs before method dispatch below, so a wrong-method request without
@@ -131,6 +143,24 @@ export async function handleWebRequest(req: Request, deps: WebDeps): Promise<Res
       const body = (await req.json().catch(() => null)) as { id?: string; hard?: boolean } | null
       if (!body?.id) return json({ error: "missing_id" }, 400)
       const result = await deps.confirmAgentChange(agentConfirmMatch[1], body.id, body.hard === true, email)
+      return result.state === "applied" ? json(result) : json(result, 409)
+    }
+
+    if (method === "GET" && hubConfigMatch) {
+      return json(await deps.listHubConfig())
+    }
+
+    if (method === "POST" && hubConfigPreviewMatch) {
+      const body = (await req.json().catch(() => null)) as { config?: HubConfig } | null
+      if (!body?.config) return json({ error: "missing_config" }, 400)
+      const preview = await deps.previewHubConfigChange(body.config)
+      return "error" in preview ? json(preview, 400) : json(preview)
+    }
+
+    if (method === "POST" && hubConfigConfirmMatch) {
+      const body = (await req.json().catch(() => null)) as { id?: string } | null
+      if (!body?.id) return json({ error: "missing_id" }, 400)
+      const result = await deps.confirmHubConfigChange(body.id, email)
       return result.state === "applied" ? json(result) : json(result, 409)
     }
 
