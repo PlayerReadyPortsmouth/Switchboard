@@ -13,7 +13,7 @@ test("receives register, notify, react, edit from a connected shim", async () =>
   let registered = false
   const cards: any[] = []; const reacts: any[] = []; const edits: any[] = []
   srv.onRegister(() => { registered = true })
-  srv.onNotify((n) => cards.push(n))
+  srv.onNotify((n) => { cards.push(n) })
   srv.onReact((r) => reacts.push(r))
   srv.onEdit((e) => edits.push(e))
   await srv.listen()
@@ -75,6 +75,72 @@ st("remember reaches the callback; recall replies with notes keyed by id", async
 
   se(remembered).toEqual({ scope: "global", title: "T", tags: undefined, body: "B" })
   se(results[0]).toEqual({ t: "recall_result", id: "q1", notes: [{ title: "for:alpha", body: "B" }] })
+  sock.end(); await srv.close()
+})
+
+st("notify with an id writes a notify_result receipt from the cb outcome", async () => {
+  const path = join(tmpdir(), `sbtest-rcpt-${process.pid}-${globalThis.performance.now()}.sock`)
+  const srv = new SSS(path)
+  srv.onNotify(() => ({ ok: true, messageId: "MSG99" }))
+  await srv.listen()
+  const results: any[] = []
+  const dec = new (await import("../hub/framing")).LineDecoder()
+  const sock = await Bun.connect({ unix: path, socket: {
+    data(_s, d) { for (const o of dec.push(d.toString())) results.push(o) },
+  } })
+  sock.write(enc({ t: "notify", id: "n1", chatId: "c", card: { title: "T", body: "b", buttons: [] }, correlationId: "x" }))
+  await Bun.sleep(80)
+  se(results[0]).toEqual({ t: "notify_result", id: "n1", ok: true, messageId: "MSG99", error: undefined })
+  sock.end(); await srv.close()
+})
+
+st("notify without an id writes no receipt (inert when receipts off)", async () => {
+  const path = join(tmpdir(), `sbtest-noircpt-${process.pid}-${globalThis.performance.now()}.sock`)
+  const srv = new SSS(path)
+  let seen = false
+  srv.onNotify(() => { seen = true; return { ok: true, messageId: "M" } })
+  await srv.listen()
+  const results: any[] = []
+  const dec = new (await import("../hub/framing")).LineDecoder()
+  const sock = await Bun.connect({ unix: path, socket: {
+    data(_s, d) { for (const o of dec.push(d.toString())) results.push(o) },
+  } })
+  sock.write(enc({ t: "notify", chatId: "c", card: { title: "T", body: "b", buttons: [] }, correlationId: "x" }))
+  await Bun.sleep(80)
+  se(seen).toBe(true)
+  se(results.length).toBe(0)
+  sock.end(); await srv.close()
+})
+
+st("update with an id writes an update_result receipt", async () => {
+  const path = join(tmpdir(), `sbtest-urcpt-${process.pid}-${globalThis.performance.now()}.sock`)
+  const srv = new SSS(path)
+  srv.onUpdate(async () => ({ ok: false, error: "unknown correlation" }))
+  await srv.listen()
+  const results: any[] = []
+  const dec = new (await import("../hub/framing")).LineDecoder()
+  const sock = await Bun.connect({ unix: path, socket: {
+    data(_s, d) { for (const o of dec.push(d.toString())) results.push(o) },
+  } })
+  sock.write(enc({ t: "update", id: "u1", chatId: "c", correlationId: "T1", card: { title: "x" } }))
+  await Bun.sleep(80)
+  se(results[0]).toEqual({ t: "update_result", id: "u1", ok: false, messageId: undefined, error: "unknown correlation" })
+  sock.end(); await srv.close()
+})
+
+st("attach with an id writes an attach_result receipt", async () => {
+  const path = join(tmpdir(), `sbtest-arcpt-${process.pid}-${globalThis.performance.now()}.sock`)
+  const srv = new SSS(path)
+  srv.onAttach(async () => ({ ok: true }))
+  await srv.listen()
+  const results: any[] = []
+  const dec = new (await import("../hub/framing")).LineDecoder()
+  const sock = await Bun.connect({ unix: path, socket: {
+    data(_s, d) { for (const o of dec.push(d.toString())) results.push(o) },
+  } })
+  sock.write(enc({ t: "attach", id: "at1", chatId: "c", path: "r.pdf" }))
+  await Bun.sleep(80)
+  se(results[0]).toEqual({ t: "attach_result", id: "at1", ok: true, messageId: undefined, error: undefined })
   sock.end(); await srv.close()
 })
 

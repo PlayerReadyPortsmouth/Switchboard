@@ -1,5 +1,5 @@
 import { writeFileSync, unlinkSync, readFileSync } from "fs"
-import type { AgentConfig, AgentReply, InboundMessage, CardSpec, TurnUsage } from "../types"
+import type { AgentConfig, AgentReply, InboundMessage, CardSpec, TurnUsage, SendOutcome } from "../types"
 import { contextTokens, fillPct, blendUsage } from "../usage"
 import { TurnGate } from "../turnGate"
 import type { AgentTransport } from "./index"
@@ -22,10 +22,10 @@ export type ProcessSpawner = (
 export interface ShimSocketLike {
   listen(): Promise<void>
   onRegister(cb: () => void): void
-  onNotify(cb: (n: { chatId: string; card: CardSpec; correlationId: string }) => void): void
+  onNotify(cb: (n: { chatId: string; card: CardSpec; correlationId: string }) => void | Promise<void | SendOutcome>): void
   onReact(cb: (r: { chatId: string; messageId: string; emoji: string }) => void): void
   onEdit(cb: (e: { chatId: string; messageId: string; text: string }) => void): void
-  onUpdate(cb: (u: { chatId: string; card: CardSpec; correlationId: string }) => void): void
+  onUpdate(cb: (u: { chatId: string; card: CardSpec; correlationId: string }) => void | Promise<void | SendOutcome>): void
   onFinish(cb: () => void): void
   close(): Promise<void>
 }
@@ -64,6 +64,8 @@ export interface StreamJsonOpts {
   publishEnabled?: boolean
   /** Expose the notify_peer + ask_peer cross-hub tools to this agent (PEERING=1). */
   peeringEnabled?: boolean
+  /** Have the shim request outbound receipts for post_card/update_card/attach_file (RECEIPTS=1). */
+  receiptsEnabled?: boolean
   /** Persist+resume the CLI session across restarts (persistent agents). */
   resumable?: boolean
   /** Path to read/write the captured session id. */
@@ -89,7 +91,7 @@ export class StreamJsonTransport implements AgentTransport {
   // Used for context fill instead of the cumulative `result` usage (which sums
   // every tool-call and sub-agent and would over-count). Reset at each turn end.
   private lastAssistantUsage: TurnUsage | null = null
-  private cb: (r: AgentReply) => void = () => {}
+  private cb: (r: AgentReply) => void | Promise<void | SendOutcome> = () => {}
   private toolUseCb: (tools: { id: string; name: string }[]) => void = () => {}
   private toolResultCb: (results: { id: string; isError: boolean }[]) => void = () => {}
   private gate: TurnGate
@@ -113,7 +115,7 @@ export class StreamJsonTransport implements AgentTransport {
     })
   }
 
-  onReply(cb: (r: AgentReply) => void): void { this.cb = cb }
+  onReply(cb: (r: AgentReply) => void | Promise<void | SendOutcome>): void { this.cb = cb }
   onToolUse(cb: typeof this.toolUseCb): void { this.toolUseCb = cb }
   onToolResult(cb: typeof this.toolResultCb): void { this.toolResultCb = cb }
   isAvailable(): boolean { return this.alive }
@@ -125,7 +127,9 @@ export class StreamJsonTransport implements AgentTransport {
     const chan = (id: string) => (SNOWFLAKE.test(id) ? id : this.lastChatId)
     socket.onNotify(({ chatId, card, correlationId }) => {
       this.cardThisTurn = true
-      this.cb({ agent: this.name, kind: "card", chatId: chan(chatId), card: normalizeCard(card), correlationId })
+      // Return the reply handler's promise so the send outcome (Discord message id
+      // / error) flows back to the shim as a receipt when receipts are enabled.
+      return this.cb({ agent: this.name, kind: "card", chatId: chan(chatId), card: normalizeCard(card), correlationId })
     })
     socket.onReact(({ chatId, messageId, emoji }) =>
       this.cb({ agent: this.name, kind: "react", chatId: chan(chatId), messageId, emoji }))
@@ -133,7 +137,7 @@ export class StreamJsonTransport implements AgentTransport {
       this.cb({ agent: this.name, kind: "edit", chatId: chan(chatId), messageId, text }))
     socket.onUpdate(({ chatId, card, correlationId }) => {
       this.cardThisTurn = true
-      this.cb({ agent: this.name, kind: "update", chatId: chan(chatId), card: normalizeCard(card), correlationId })
+      return this.cb({ agent: this.name, kind: "update", chatId: chan(chatId), card: normalizeCard(card), correlationId })
     })
     socket.onFinish(() => {
       // Only ephemeral/spawned agents self-terminate; a persistent agent serves
@@ -143,7 +147,7 @@ export class StreamJsonTransport implements AgentTransport {
     await socket.listen()
 
     const write = this.opts.writeMcpConfig ?? ((p, c) => writeFileSync(p, c))
-    write(mcpConfigPath, JSON.stringify(buildShimMcpConfig(shimPath, socketPath, this.name, this.opts.consultEnabled, this.opts.attachEnabled, this.opts.publishEnabled, this.opts.peeringEnabled)))
+    write(mcpConfigPath, JSON.stringify(buildShimMcpConfig(shimPath, socketPath, this.name, this.opts.consultEnabled, this.opts.attachEnabled, this.opts.publishEnabled, this.opts.peeringEnabled, this.opts.receiptsEnabled)))
 
     const initialSessionId = this.opts.resumable
       ? (this.opts.readSession?.() ?? (this.opts.sessionPath ? readSessionFile(this.opts.sessionPath) : undefined))

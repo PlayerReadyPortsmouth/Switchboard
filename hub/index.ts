@@ -56,7 +56,7 @@ import { startWebServer } from "./webServer"
 import { type WebInput } from "./web"
 import { ConsultRegistry, mayConsult, consultAnswerFromReply } from "./consult"
 import { MissionRegistry, findWorkflow, renderStepPrompt, renderMissionCard, type MissionRun } from "./workflow"
-import type { AgentConfig, AgentReply, InboundMessage, SpawnTrigger, SpawnCardUpdate, CardSpec, DirectCommand, OutboundRoute } from "./types"
+import type { AgentConfig, AgentReply, InboundMessage, SpawnTrigger, SpawnCardUpdate, CardSpec, DirectCommand, OutboundRoute, SendOutcome } from "./types"
 import { resolveOutboxFile } from "./outboxAttach"
 import { makeAttachHandler } from "./attachHandler"
 import { publishArtifact } from "./publishLink"
@@ -466,6 +466,7 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonT
     attachEnabled: !!hub.outboundAttachments?.enabled,
     publishEnabled: shareLinksOn,
     peeringEnabled: peeringOn,
+    receiptsEnabled: !!hub.receipts?.enabled,
     onOverflow: (inbound) => {
       // Consults in the retry loop own their own retry/settle lifecycle — don't
       // short-circuit them here, just drop the overflow silently.
@@ -483,7 +484,7 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonT
       void gateway.sendPlain(inbound.chatId, `${cfg.emoji} ${name} is busy — please resend in a moment.`)
     },
   })
-  t.onReply((reply) => { void onAgentReply(reply, key) })
+  t.onReply((reply) => onAgentReply(reply, key))
   if (toolObs) {
     t.onToolUse((tools) => toolUsage.recordToolUse(name, tools))
     t.onToolResult((results) => toolUsage.recordToolResult(results))
@@ -817,7 +818,7 @@ function emitHubEvent(event: string, data: Record<string, unknown>): void {
 
 /** Handle one reply from a transport: cards → Discord card (+ register buttons);
  *  text → spawn-trigger match or a plain reply; react/edit → passthrough. */
-async function onAgentReply(reply: AgentReply, key: string): Promise<void> {
+async function onAgentReply(reply: AgentReply, key: string): Promise<void | SendOutcome> {
   if (toolObs) toolUsage.endTurn(reply.agent)
   // Inter-agent consult: a reply on a virtual consult channel is the answer to a
   // pending ask_agent — settle it (return the answer to the caller) and never post
@@ -854,12 +855,10 @@ async function onAgentReply(reply: AgentReply, key: string): Promise<void> {
     return
   }
   if (reply.kind === "card" && reply.card) {
-    await cardLifecycle.onCard(reply, key)
-    return
+    return await cardLifecycle.onCard(reply, key)
   }
   if (reply.kind === "update" && reply.card && reply.correlationId) {
-    await cardLifecycle.onUpdate(reply.correlationId, reply.chatId, reply.card, key)
-    return
+    return await cardLifecycle.onUpdate(reply.correlationId, reply.chatId, reply.card, key)
   }
   if (reply.kind === "reply" && reply.text) {
     for (const trig of spawnTriggers) {
@@ -941,7 +940,7 @@ async function runSpawnTrigger(trig: SpawnTrigger, groups: string[], chatId: str
   const paintSpawnCard = (card: CardSpec): Promise<void> => {
     if (!trig.onSpawnCard) return Promise.resolve()
     const corr = interpolate(trig.onSpawnCard.correlationId, groups, jobId)
-    return cardLifecycle.onUpdate(corr, chatId, card, jobId)
+    return cardLifecycle.onUpdate(corr, chatId, card, jobId).then(() => {})
   }
   if (trig.onSpawnCard) await paintSpawnCard(buildSpawnCard(trig.onSpawnCard, groups, jobId))
   if (trig.setupCommand) {
@@ -1006,7 +1005,7 @@ if (pools.size) {
 // so route that aggregator back to onAgentReply. For persistent agents the routing
 // key is the agent name (== reply.agent). (Ephemeral spawn transports are not in the
 // Dispatcher and keep the onReply set in makeTransport, keyed by jobId.)
-dispatcher.onReply((reply) => { void onAgentReply(reply, reply.agent) })
+dispatcher.onReply((reply) => onAgentReply(reply, reply.agent))
 
 /** Clear a persistent agent's context: drop its session file + respawn fresh.
  *  `reason` distinguishes a manual reset from a governor auto-compaction. */
