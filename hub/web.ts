@@ -88,7 +88,17 @@ export const DASHBOARD_HTML = `<!doctype html>
   <span class="muted" id="updated" style="margin-left:auto"></span>
 </header>
 <main>
-  <section><h2>Agents</h2><table><thead><tr><th></th><th>agent</th><th>state</th><th>context</th><th>queue</th><th>cost</th><th>replicas</th></tr></thead><tbody id="agents"></tbody></table></section>
+  <section><h2>Agents <button id="newAgentBtn" type="button">+ New Agent</button></h2><table><thead><tr><th></th><th>agent</th><th>state</th><th>context</th><th>queue</th><th>cost</th><th>replicas</th><th></th></tr></thead><tbody id="agents"></tbody></table></section>
+  <section id="agentEditor" style="display:none">
+    <h2 id="agentEditorTitle">Edit agent</h2>
+    <textarea id="agentEditorText" rows="16" style="width:100%;background:#1a1d24;border:1px solid #232733;color:#e6e6e6;padding:8px;font-family:ui-monospace,monospace;font-size:12px"></textarea>
+    <div style="margin-top:8px">
+      <button id="agentPreviewBtn" type="button">Preview</button>
+      <button id="agentEditorCancel" type="button">Cancel</button>
+    </div>
+    <div id="agentDiff" class="muted" style="margin-top:8px;white-space:pre-wrap;font-family:ui-monospace,monospace;font-size:12px"></div>
+    <div id="agentConfirmRow" style="margin-top:8px"></div>
+  </section>
   <section><h2>Ledger</h2><div id="summary" class="muted"></div></section>
   <section><h2>Recent activity</h2><div id="feed" class="feed"></div></section>
   <section><h2>Approvals</h2><div id="approvals" class="muted">no pending approvals</div></section>
@@ -123,8 +133,9 @@ function render(d){
     return '<tr><td><span class="dot '+(a.alive?'alive':'dead')+'"></span></td>'+
       '<td>'+esc(a.name)+'</td><td class="muted">'+(a.busy?'busy':'idle')+'</td>'+
       '<td><div class="bar"><i style="width:'+pct+'%"></i></div> '+pct+'%</td>'+
-      '<td>'+a.queueDepth+'</td><td>$'+a.costUsd.toFixed(4)+'</td><td>'+a.replicas+'</td></tr>';
-  }).join('') || '<tr><td colspan="7" class="muted">no agents</td></tr>';
+      '<td>'+a.queueDepth+'</td><td>$'+a.costUsd.toFixed(4)+'</td><td>'+a.replicas+'</td>'+
+      '<td><button data-edit-agent="'+esc(a.name)+'">Edit</button> <button data-remove-agent="'+esc(a.name)+'">Remove</button></td></tr>';
+  }).join('') || '<tr><td colspan="8" class="muted">no agents</td></tr>';
   var s=d.audit;
   $('summary').textContent='events '+s.total+'  cost $'+s.costUsd.toFixed(4)+'  actors '+s.actors+'  '+
     Object.keys(s.byKind).map(function(k){ return k+':'+s.byKind[k]; }).join('  ');
@@ -264,6 +275,119 @@ $('chatForm').addEventListener('submit', function(ev){
     body: JSON.stringify({text: text}),
   });
 });
+var editingAgentName = null;
+var lastPreviewId = null;
+
+function openAgentEditor(name, template){
+  editingAgentName = name;
+  lastPreviewId = null;
+  $('agentEditorTitle').textContent = name ? ('Edit agent: '+name) : 'New agent';
+  $('agentEditorText').value = template;
+  $('agentDiff').textContent = '';
+  $('agentConfirmRow').innerHTML = '';
+  $('agentEditor').style.display = 'block';
+}
+
+document.getElementById('newAgentBtn').addEventListener('click', function(){
+  var name = prompt('New agent name:');
+  if (!name) return;
+  var template = JSON.stringify({
+    emoji: "🤖", description: "", mode: "ephemeral",
+    access: { roles: [] }, runtime: { cwd: "~" },
+  }, null, 2);
+  openAgentEditor(name, template);
+});
+
+document.addEventListener('click', function(ev){
+  var editBtn = ev.target.closest('[data-edit-agent]');
+  if (editBtn) {
+    var name = editBtn.getAttribute('data-edit-agent');
+    fetch('api/agents').then(function(r){ return r.json(); }).then(function(all){
+      openAgentEditor(name, JSON.stringify(all[name], null, 2));
+    });
+    return;
+  }
+  var removeBtn = ev.target.closest('[data-remove-agent]');
+  if (removeBtn) {
+    var rname = removeBtn.getAttribute('data-remove-agent');
+    editingAgentName = rname;
+    lastPreviewId = null;
+    $('agentEditorTitle').textContent = 'Remove agent: '+rname;
+    $('agentEditorText').value = '';
+    $('agentEditorText').style.display = 'none';
+    $('agentDiff').textContent = '';
+    $('agentConfirmRow').innerHTML = '';
+    $('agentEditor').style.display = 'block';
+    fetch('api/agents/'+rname+'/preview', {
+      method: 'POST', headers: {'content-type':'application/json'},
+      body: JSON.stringify({config: null}),
+    }).then(function(r){ return r.json(); }).then(renderAgentPreview);
+    return;
+  }
+});
+
+document.getElementById('agentEditorCancel').addEventListener('click', function(){
+  $('agentEditor').style.display = 'none';
+  $('agentEditorText').style.display = 'block';
+});
+
+document.getElementById('agentPreviewBtn').addEventListener('click', function(){
+  var parsed;
+  try { parsed = JSON.parse($('agentEditorText').value); }
+  catch (e) { $('agentDiff').textContent = 'invalid JSON: '+e.message; return; }
+  fetch('api/agents/'+editingAgentName+'/preview', {
+    method: 'POST', headers: {'content-type':'application/json'},
+    body: JSON.stringify({config: parsed}),
+  }).then(function(r){ return r.json(); }).then(renderAgentPreview);
+});
+
+function renderAgentPreview(p){
+  lastPreviewId = p.id;
+  var beforeStr = p.before ? JSON.stringify(p.before, null, 2) : '(new agent)';
+  var afterStr = p.after ? JSON.stringify(p.after, null, 2) : '(removed)';
+  $('agentDiff').textContent = 'BEFORE:\n'+beforeStr+'\n\nAFTER:\n'+afterStr+'\n\nCLASSIFICATION: '+p.classification.tier+
+    (p.classification.fullRestart.length ? ' ('+p.classification.fullRestart.join(', ')+')' : '');
+  var row = $('agentConfirmRow');
+  row.innerHTML = '';
+  if (p.classification.tier === 'restart') {
+    var saveBtn = document.createElement('button');
+    saveBtn.textContent = 'Save to disk (needs a full restart to take effect)';
+    saveBtn.setAttribute('data-confirm-hard', 'false');
+    row.appendChild(saveBtn);
+  } else {
+    var applyBtn = document.createElement('button');
+    applyBtn.textContent = 'Apply';
+    applyBtn.setAttribute('data-confirm-hard', 'false');
+    row.appendChild(applyBtn);
+    if (p.classification.tier === 'hard') {
+      var hardBtn = document.createElement('button');
+      hardBtn.textContent = 'Apply + restart this agent';
+      hardBtn.setAttribute('data-confirm-hard', 'true');
+      row.appendChild(hardBtn);
+    }
+  }
+}
+
+document.addEventListener('click', function(ev){
+  var btn = ev.target.closest('#agentConfirmRow [data-confirm-hard]');
+  if (!btn || !lastPreviewId) return;
+  var hard = btn.getAttribute('data-confirm-hard') === 'true';
+  fetch('api/agents/'+editingAgentName+'/confirm', {
+    method: 'POST', headers: {'content-type':'application/json'},
+    body: JSON.stringify({id: lastPreviewId, hard: hard}),
+  }).then(function(r){ return r.json(); }).then(function(result){
+    $('agentDiff').textContent += '\n\nRESULT: '+JSON.stringify(result);
+    $('agentConfirmRow').innerHTML = '';
+    lastPreviewId = null;
+    loadAgentsAfterConfirm();
+  });
+});
+
+function loadAgentsAfterConfirm(){
+  // The next poll() cycle (every 3s) refreshes the Agents table from
+  // /api/status automatically — nothing more to do here.
+}
+
 function loadChannels(){
   fetch('api/channels').then(function(r){ return r.json(); }).then(function(rows){
     var sel = $('channelPicker');

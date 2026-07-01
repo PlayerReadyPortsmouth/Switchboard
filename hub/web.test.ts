@@ -46,3 +46,12 @@ test("the dashboard HTML has a Doctor command button and a Chat/Timeline mode to
 test("the Timeline view shows an explicit empty state instead of a silent blank pane", () => {
   expect(DASHBOARD_HTML).toContain('no trace records')
 })
+
+test("the dashboard HTML has agent-config edit affordances and a JSON editor panel", () => {
+  expect(DASHBOARD_HTML).toContain('id="newAgentBtn"')
+  expect(DASHBOARD_HTML).toContain('id="agentEditor"')
+  expect(DASHBOARD_HTML).toContain('id="agentEditorText"')
+  expect(DASHBOARD_HTML).toContain("api/agents")
+  expect(DASHBOARD_HTML).toContain("/preview")
+  expect(DASHBOARD_HTML).toContain("/confirm")
+})
