@@ -138,6 +138,12 @@
     "maxBytes": 10485760,
     "keepFiles": 5
   },
+  "escalation": {
+    "enabled": false,
+    "model": "<stronger model id for the !hard / auto-escalation clone, or omit to keep the agent's model>",
+    "auto": false,
+    "autoMaxPerHour": 4
+  },
   "reload": {
     "enabled": false
   },

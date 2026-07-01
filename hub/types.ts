@@ -295,6 +295,7 @@ export interface HubConfig {
   webPort?: number               // port for the read-only web dashboard (absent ⇒ off)
   webHost?: string               // bind host for the web dashboard (default 127.0.0.1; set 0.0.0.0 to expose)
   audit?: AuditConfig            // append-only ledger of every governed effect (default off)
+  escalation?: EscalationConfig  // re-run a turn at higher effort: manual !hard + auto on tool errors (default off)
   reload?: ReloadConfig          // operator !reload command: hot-swap safe config / hard-restart agents (default off)
   trace?: TraceConfig            // full-fidelity per-turn trace with message bodies (default off)
   approvals?: ApprovalConfig     // human-in-the-loop approval gate for requireApproval effects (default off)
@@ -488,6 +489,17 @@ export interface AuditConfig {
   redactEnv?: string[]          // extra secret env names whose values are masked in detail
   maxBytes?: number             // optional size-based rotation threshold
   keepFiles?: number            // optional rotated-file retention count
+}
+
+/** Effort escalation: re-run a turn on a stronger, short-lived ephemeral clone.
+ *  Manual via `!hard`; auto when a turn's tool results carry error signals (bounded
+ *  by `autoMaxPerHour`). Default off. */
+export interface EscalationConfig {
+  enabled?: boolean              // master switch (default false)
+  model?: string                // stronger model for the clone (absent ⇒ keep the agent's model)
+  claudeArgs?: string[]          // extra CLI args for the clone (e.g. a reasoning-effort flag)
+  auto?: boolean                 // auto-escalate on tool errors (default false; !hard works regardless)
+  autoMaxPerHour?: number        // rate cap for auto escalations (default 4; 0 disables auto)
 }
 
 /** Operator `!reload` command: re-read the config file and either hot-swap the
