@@ -163,6 +163,15 @@ test("POST /api/agents/:name/preview → 200, forwards name and config", async (
   expect(await res.json()).toEqual({ id: "prev-1", before: null, after: { emoji: "🤖" }, classification: { tier: "restart", fullRestart: ["+agent:qa"] } })
 })
 
+test("POST /api/agents/:name/preview → 400 when previewAgentChange reports a shape error", async () => {
+  const deps = fakeDeps({
+    previewAgentChange: async () => ({ error: "runtime.cwd must be a string" }),
+  })
+  const res = await handleWebRequest(post("/api/agents/qa/preview", { config: { emoji: "🤖" } }, { "x-switchboard-user": "a@b.com" }), deps)
+  expect(res.status).toBe(400)
+  expect(await res.json()).toEqual({ error: "runtime.cwd must be a string" })
+})
+
 test("POST /api/agents/:name/confirm → 200 on applied, forwards id, hard, and the caller's email as actor", async () => {
   const called: { v: [string, string, boolean, string] | null } = { v: null }
   const deps = fakeDeps({

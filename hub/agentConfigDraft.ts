@@ -12,6 +12,22 @@ export interface AgentChangeClassification {
 
 const j = (v: unknown): string => JSON.stringify(v ?? null)
 
+/** Minimal shape check a proposed config must pass before a preview can proceed
+ *  toward a disk write. loadConfigs (config.ts) runs `a.runtime.cwd =
+ *  expandHome(a.runtime.cwd)` and a mode check across the WHOLE registry at boot
+ *  — a single malformed entry (missing `runtime`, non-string `cwd`, bad `mode`)
+ *  throws and crashes the hub's boot, not just that one agent. Deliberately
+ *  narrow: just the two fields loadConfigs dereferences unconditionally, not
+ *  full schema validation (out of scope for this phase). Returns an error
+ *  message, or null when the shape is acceptable. */
+export function invalidAgentConfigShape(config: AgentConfig): string | null {
+  if (config.mode !== "persistent" && config.mode !== "ephemeral")
+    return `invalid mode "${config.mode as unknown as string}" — must be "persistent" or "ephemeral"`
+  if (typeof config.runtime?.cwd !== "string")
+    return "runtime.cwd must be a string"
+  return null
+}
+
 /** Fields !reload's existing apply logic never hot-swaps, and planReload never
  *  flags as needing a restart either — a change to any of these via a hand-edited
  *  file + !reload silently does nothing today. Surfaced here so this module's

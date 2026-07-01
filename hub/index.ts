@@ -4,7 +4,7 @@ import { config as loadEnv } from "./env"
 import { loadConfigs } from "./config"
 import { escalatedRuntime, countErrors, RateCap } from "./escalation"
 import { planReload } from "./configReload"
-import { classifyAgentChange, type AgentChangeClassification } from "./agentConfigDraft"
+import { classifyAgentChange, invalidAgentConfigShape, type AgentChangeClassification } from "./agentConfigDraft"
 import { AgentConfigPreviewRegistry } from "./agentConfigPreview"
 import { BaseGate } from "./baseGate"
 import { Gateway, parseNotifyCustomId } from "./gateway"
@@ -2016,6 +2016,10 @@ const webDeps: WebDeps = {
   },
 
   previewAgentChange: async (name, config) => {
+    if (config) {
+      const shapeError = invalidAgentConfigShape(config)
+      if (shapeError) return { error: shapeError }
+    }
     const current = readAgentsJson()
     const before = current[name] ?? null
     const classification = classifyAgentChange(name, before, config, hub)
@@ -2043,13 +2047,29 @@ const webDeps: WebDeps = {
     writeAgentsJson(next)
 
     const restarted: string[] = []
+    const fullRestart = [...preview.classification.fullRestart]
     if (preview.after) {
       // access is always safe to hot-swap regardless of this edit's overall tier.
       applySafeAgentFields(name, preview.after)
       if (hard && preview.classification.tier === "hard") {
-        agents[name] = preview.after
-        try { await respawnAgent(name) ; restarted.push(name) }
-        catch (e) { process.stderr.write(`agent config confirm: respawn ${name} failed: ${e}\n`) }
+        try {
+          // The live `agents` registry always holds EXPANDED cwds (loadConfigs
+          // expands `~` for every agent at boot) — but `preview.after` came from
+          // readAgentsJson's raw on-disk shape (cwd still literally "~" when
+          // that's what's on disk), by design, so the web editor's diff never
+          // sees an expansion mismatch. Expand here, for the in-memory object
+          // only, before it's used to respawn a live process — Bun.spawn does
+          // NOT expand `~`, so passing the raw value through would spawn with a
+          // nonexistent cwd (ENOENT) after the old process is already closed,
+          // leaving the agent dead. Disk (already written above via
+          // writeAgentsJson) correctly keeps the raw `~` form.
+          agents[name] = { ...preview.after, runtime: { ...preview.after.runtime, cwd: expandHome(preview.after.runtime.cwd) } }
+          await respawnAgent(name)
+          restarted.push(name)
+        } catch (e) {
+          process.stderr.write(`agent config confirm: respawn ${name} failed: ${e}\n`)
+          fullRestart.push(`respawn-failed:${name}`)
+        }
       }
     }
 
@@ -2058,7 +2078,7 @@ const webDeps: WebDeps = {
       detail: { before: preview.before, after: preview.after, classification: preview.classification },
     })
 
-    return { state: "applied", restarted, fullRestart: preview.classification.fullRestart }
+    return { state: "applied", restarted, fullRestart }
   },
 }
 const webServer = startWebServer(hub.webPort ?? 0, webDeps, hub.webHost)
