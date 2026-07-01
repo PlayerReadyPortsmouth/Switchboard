@@ -1,15 +1,17 @@
 import { DASHBOARD_HTML, renderDashboardJson, type WebInput } from "./web"
+import type { ChannelEvent } from "./channelStream"
+import type { TraceRecord } from "./turnTrace"
 
 export interface ChannelInfo { channelId: string; name?: string; agent: string }
-export interface ChannelMessageJson { ts: number; author: string; content: string; origin: "discord" | "web" | "agent" }
 
 export interface WebDeps {
   collect: () => WebInput
   requireUser: (req: Request) => string | null
   resolveApproval: (id: string, decision: "grant" | "deny", actor: string) => Promise<"granted" | "denied" | "not_found">
   listChannels: () => ChannelInfo[]
-  fetchChannelHistory: (channelId: string) => Promise<ChannelMessageJson[]>
-  subscribeChannel: (channelId: string, cb: (evt: ChannelMessageJson) => void) => () => void
+  fetchChannelHistory: (channelId: string) => Promise<ChannelEvent[]>
+  fetchChannelTimeline: (channelId: string) => Promise<TraceRecord[]>
+  subscribeChannel: (channelId: string, cb: (evt: ChannelEvent) => void) => () => void
   sendChannelMessage: (channelId: string, email: string, text: string) => Promise<void>
   runCommand: (name: string, channelId: string) => Promise<string | null>
 }
@@ -17,7 +19,7 @@ export interface WebDeps {
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } })
 
-function sseResponse(subscribe: (cb: (evt: ChannelMessageJson) => void) => () => void): Response {
+function sseResponse(subscribe: (cb: (evt: ChannelEvent) => void) => () => void): Response {
   let unsubscribe: () => void = () => {}
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
@@ -52,11 +54,12 @@ export async function handleWebRequest(req: Request, deps: WebDeps): Promise<Res
   // Every route below requires the identity header the ReadyApp proxy sets.
   const approvalMatch = /^\/api\/approvals\/([^/]+)$/.exec(path)
   const channelHistoryMatch = /^\/api\/channel\/([^/]+)\/history$/.exec(path)
+  const channelTimelineMatch = /^\/api\/channel\/([^/]+)\/timeline$/.exec(path)
   const channelStreamMatch = /^\/api\/channel\/([^/]+)\/stream$/.exec(path)
   const channelMessageMatch = /^\/api\/channel\/([^/]+)\/message$/.exec(path)
   const commandMatch = /^\/api\/command\/([^/]+)$/.exec(path)
   const isGuardedRoute = path === "/api/channels" || approvalMatch || channelHistoryMatch ||
-    channelStreamMatch || channelMessageMatch || commandMatch
+    channelTimelineMatch || channelStreamMatch || channelMessageMatch || commandMatch
 
   if (isGuardedRoute) {
     // Auth runs before method dispatch below, so a wrong-method request without
@@ -76,6 +79,10 @@ export async function handleWebRequest(req: Request, deps: WebDeps): Promise<Res
 
     if (method === "GET" && channelHistoryMatch) {
       return json(await deps.fetchChannelHistory(channelHistoryMatch[1]))
+    }
+
+    if (method === "GET" && channelTimelineMatch) {
+      return json(await deps.fetchChannelTimeline(channelTimelineMatch[1]))
     }
 
     if (method === "GET" && channelStreamMatch) {

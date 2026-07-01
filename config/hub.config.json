@@ -147,7 +147,9 @@
     "enabled": true
   },
   "trace": {
-    "enabled": false
+    "enabled": true,
+    "retentionDays": 14,
+    "sweepIntervalMs": 21600000
   },
   "receipts": {
     "enabled": true

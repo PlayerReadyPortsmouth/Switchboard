@@ -17,6 +17,7 @@ function fakeDeps(overrides: Partial<WebDeps> = {}): WebDeps {
     resolveApproval: async () => "not_found",
     listChannels: () => [],
     fetchChannelHistory: async () => [],
+    fetchChannelTimeline: async () => [],
     subscribeChannel: () => () => {},
     sendChannelMessage: async () => {},
     runCommand: async () => null,
@@ -87,10 +88,29 @@ test("GET /api/channels → 200 JSON list", async () => {
 })
 
 test("GET /api/channel/:id/history → 200 JSON list", async () => {
-  const deps = fakeDeps({ fetchChannelHistory: async (id) => { expect(id).toBe("c1"); return [{ ts: 1, author: "x", content: "hi", origin: "discord" }] } })
+  const deps = fakeDeps({ fetchChannelHistory: async (id) => { expect(id).toBe("c1"); return [{ kind: "chat", ts: 1, author: "x", content: "hi", origin: "discord" }] } })
   const res = await handleWebRequest(get("/api/channel/c1/history", { "x-switchboard-user": "a@b.com" }), deps)
   expect(res.status).toBe(200)
-  expect(await res.json()).toEqual([{ ts: 1, author: "x", content: "hi", origin: "discord" }])
+  expect(await res.json()).toEqual([{ kind: "chat", ts: 1, author: "x", content: "hi", origin: "discord" }])
+})
+
+test("GET /api/channel/:id/timeline → 200 JSON list of TraceRecords", async () => {
+  const deps = fakeDeps({
+    fetchChannelTimeline: async (id) => { expect(id).toBe("c1"); return [{ v: 1, ts: "2026-07-01T00:00:00.000Z", agent: "qa", chat: "c1", kind: "tool_use", tools: [{ id: "t1", name: "Read" }], bytes: 0 }] },
+  })
+  const res = await handleWebRequest(get("/api/channel/c1/timeline", { "x-switchboard-user": "a@b.com" }), deps)
+  expect(res.status).toBe(200)
+  expect(await res.json()).toEqual([{ v: 1, ts: "2026-07-01T00:00:00.000Z", agent: "qa", chat: "c1", kind: "tool_use", tools: [{ id: "t1", name: "Read" }], bytes: 0 }])
+})
+
+test("GET /api/channel/:id/timeline without X-Switchboard-User → 400", async () => {
+  const res = await handleWebRequest(get("/api/channel/c1/timeline"), fakeDeps())
+  expect(res.status).toBe(400)
+})
+
+test("DELETE /api/channel/:id/timeline with valid identity header → 405 (known guarded path, wrong method)", async () => {
+  const res = await handleWebRequest(del("/api/channel/c1/timeline", { "x-switchboard-user": "a@b.com" }), fakeDeps())
+  expect(res.status).toBe(405)
 })
 
 test("POST /api/channel/:id/message → 200, calls sendChannelMessage", async () => {
@@ -115,7 +135,7 @@ test("GET /api/channel/:id/stream → SSE headers, subscribes and unsubscribes o
   const deps = fakeDeps({
     subscribeChannel: (id, cb) => {
       expect(id).toBe("c1")
-      cb({ ts: 1, author: "x", content: "hi", origin: "web" })
+      cb({ kind: "chat", ts: 1, author: "x", content: "hi", origin: "web" })
       return () => { unsubscribed = true }
     },
   })

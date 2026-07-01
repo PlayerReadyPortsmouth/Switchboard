@@ -49,7 +49,8 @@ import { OutboundDelivery } from "./outboundDelivery"
 import { matchOutbound, renderBody } from "./outbound"
 import { AuditLog } from "./auditLog"
 import { parseJsonlTail, shouldRotate, rotationsToPrune } from "./audit"
-import { TurnTrace, parseTraceTail, renderTrace, type TraceFilter } from "./turnTrace"
+import { TurnTrace, parseTraceTail, renderTrace, type TraceFilter, type TraceRecord } from "./turnTrace"
+import { sweepTrace } from "./traceSweep"
 import { runDoctor, renderDoctor, type DoctorFacts } from "./doctor"
 import { buildReplay, renderReplay, chunkLines } from "./replay"
 import { ApprovalRegistry, renderApprovalCard, parseApprovalCustomId, type ApprovalRequest, type ApprovalDecision, type ApprovalFire } from "./approval"
@@ -60,7 +61,7 @@ import { type WebInput } from "./web"
 import { ChannelStream, type ChannelEvent } from "./channelStream"
 import { pendingApprovalsToJson, buildWebInboundMessage, formatMirrorLine } from "./webActions"
 import { buildAuditText, buildToolsText } from "./commandActions"
-import type { WebDeps, ChannelInfo, ChannelMessageJson } from "./webServer"
+import type { WebDeps, ChannelInfo } from "./webServer"
 import { ConsultRegistry, mayConsult, consultAnswerFromReply } from "./consult"
 import { MissionRegistry, findWorkflow, renderStepPrompt, renderMissionCard, type MissionRun } from "./workflow"
 import type { AgentConfig, AgentReply, InboundMessage, SpawnTrigger, SpawnCardUpdate, CardSpec, DirectCommand, OutboundRoute, HubConfig, AgentRegistry, SendOutcome } from "./types"
@@ -493,11 +494,15 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonT
   })
   t.onReply((reply) => onAgentReply(reply, key))
   t.onToolUse((tools) => {
-    trace.record({ agent: name, chat: lastChatByAgent.get(name) ?? "", kind: "tool_use", tools })
+    const chat = lastChatByAgent.get(name) ?? ""
+    trace.record({ agent: name, chat, kind: "tool_use", tools })
+    if (chat) channelStream.publish(chat, { kind: "tool_use", ts: Date.now(), agent: name, tools })
     if (toolObs) toolUsage.recordToolUse(name, tools)
   })
   t.onToolResult((results) => {
-    trace.record({ agent: name, chat: lastChatByAgent.get(name) ?? "", kind: "tool_result", results })
+    const chat = lastChatByAgent.get(name) ?? ""
+    trace.record({ agent: name, chat, kind: "tool_result", results })
+    if (chat) channelStream.publish(chat, { kind: "tool_result", ts: Date.now(), agent: name, results })
     // Auto-escalation signal: tally this turn's tool errors (per transport key so a
     // consult/escalation clone can't pollute the real agent's count).
     if (escalationOn && escCfg?.auto) turnErrors.set(key, (turnErrors.get(key) ?? 0) + countErrors(results))
@@ -586,6 +591,27 @@ const trace = new TurnTrace({
   enabled: hub.trace?.enabled === true,
 })
 const lastChatByAgent = new Map<string, string>()
+
+// Periodic trace sweep: drop records older than retentionDays, keeping trace.jsonl
+// bounded (readTail/full-read reads the whole file, so an unbounded file gets
+// slower forever). Mirrors the gardener's enabled+intervalMs+setInterval shape.
+if (hub.trace?.enabled) {
+  const retentionMs = (hub.trace.retentionDays ?? 14) * 24 * 60 * 60_000
+  const runTraceSweep = () => {
+    try {
+      // parseTraceTail's `n` is a slice(-n) count; Infinity clamps to slice(0) — the
+      // whole file — since a sweep must inspect every record, not just a tail window.
+      const all = parseTraceTail(readFileSync(traceFile, "utf8"), Infinity)
+      const kept = sweepTrace(all, Date.now(), retentionMs)
+      if (kept.length === all.length) return
+      const tmp = `${traceFile}.tmp-${process.pid}`
+      writeFileSync(tmp, kept.map((r) => JSON.stringify(r) + "\n").join(""))
+      renameSync(tmp, traceFile)
+    } catch (err) { process.stderr.write(`trace sweep failed: ${err}\n`) }
+  }
+  runTraceSweep()
+  setInterval(runTraceSweep, hub.trace.sweepIntervalMs ?? 6 * 60 * 60_000).unref()
+}
 
 // Approval gate: a requireApproval effect parks here, posts an Approve/Deny card,
 // and fires only on a configured approver's grant (fail-closed on deny / expiry /
@@ -923,7 +949,7 @@ async function onAgentReply(reply: AgentReply, key: string): Promise<void | Send
     })
     convActivity.set(reply.chatId, Date.now())
     channelActivity.set(reply.chatId, { agent: reply.agent, lastActive: Date.now() })
-    channelStream.publish(reply.chatId, { ts: Date.now(), author: reply.agent, content: reply.text, origin: "agent" })
+    channelStream.publish(reply.chatId, { kind: "chat", ts: Date.now(), author: reply.agent, content: reply.text, origin: "agent" })
   }
   await gateway.sendReply(reply, agents[reply.agent])
   // F3 auto-escalation: if this real persistent-agent turn logged tool errors, re-run
@@ -1640,8 +1666,26 @@ async function runDirectCommand(cmd: DirectCommand, args: string, chatId: string
 // Mutable so a safe `!reload` can hot-swap them without dropping agent procs.
 let commands = hub.commands ?? []
 let directCommands = hub.directCommands ?? []
+
+/** Gather the facts `!doctor` and the web panel's Doctor button both render via
+ *  runDoctor/renderDoctor — extracted so both call sites stay byte-identical. */
+function gatherDoctorFacts(): DoctorFacts {
+  let stateDirWritable = true
+  try { const probe = join(hub.stateDir, `.doctor-${process.pid}`); writeFileSync(probe, ""); unlinkSync(probe) } catch { stateDirWritable = false }
+  const doctorAgents = Object.entries(agents)
+    .filter(([, cfg]) => cfg.mode === "persistent")
+    .map(([name]) => ({ name, alive: (pools.get(name) ?? transports.get(name))?.isAvailable() ?? false, registered: true }))
+  return {
+    agents: doctorAgents,
+    stateDirWritable,
+    pendingApprovals: approvalRegistry.pendingCount(),
+    auditEnabled: hub.audit?.enabled === true,
+    traceEnabled: hub.trace?.enabled === true,
+    routerModel: hub.routerModel,
+  }
+}
 gateway.handleInbound((m) => {
-  channelStream.publish(m.chatId, { ts: Date.now(), author: m.user, content: m.content, origin: "discord" })
+  channelStream.publish(m.chatId, { kind: "chat", ts: Date.now(), author: m.user, content: m.content, origin: "discord" })
   const trimmed = m.content.trim()
   // Audit ledger query (operator-only): list recent governed effects or a rollup.
   // Workflows: list configured missions (operator-only).
@@ -1741,20 +1785,7 @@ gateway.handleInbound((m) => {
   // config, pending approvals, and the logging switches → a pass/warn/fail report.
   if (/^!doctor\b/i.test(trimmed)) {
     if (!baseGate.listAllowed().includes(m.userId)) return
-    let stateDirWritable = true
-    try { const probe = join(hub.stateDir, `.doctor-${process.pid}`); writeFileSync(probe, ""); unlinkSync(probe) } catch { stateDirWritable = false }
-    const doctorAgents = Object.entries(agents)
-      .filter(([, cfg]) => cfg.mode === "persistent")
-      .map(([name]) => ({ name, alive: (pools.get(name) ?? transports.get(name))?.isAvailable() ?? false, registered: true }))
-    const facts: DoctorFacts = {
-      agents: doctorAgents,
-      stateDirWritable,
-      pendingApprovals: approvalRegistry.pendingCount(),
-      auditEnabled: hub.audit?.enabled === true,
-      traceEnabled: hub.trace?.enabled === true,
-      routerModel: hub.routerModel,
-    }
-    void gateway.sendPlain(m.chatId, renderDoctor(runDoctor(facts)))
+    void gateway.sendPlain(m.chatId, renderDoctor(runDoctor(gatherDoctorFacts())))
     return
   }
   // Replay (operator-only): reconstruct a conversation's (or one corr action's)
@@ -1900,12 +1931,13 @@ const webDeps: WebDeps = {
       .map(([channelId, v]) => ({ channelId, agent: v.agent }))
   },
 
-  fetchChannelHistory: async (channelId): Promise<ChannelMessageJson[]> => {
+  fetchChannelHistory: async (channelId): Promise<ChannelEvent[]> => {
     try {
       const ch = await gateway.client.channels.fetch(channelId)
       if (!ch || !("messages" in ch)) return []
       const msgs = await (ch as any).messages.fetch({ limit: 50 })
       return [...msgs.values()].reverse().map((msg: any) => ({
+        kind: "chat",
         ts: msg.createdTimestamp,
         author: msg.author.username,
         content: msg.content,
@@ -1914,11 +1946,16 @@ const webDeps: WebDeps = {
     } catch { return [] }
   },
 
-  subscribeChannel: (channelId, cb) => channelStream.subscribe(channelId, cb as (e: ChannelEvent) => void),
+  fetchChannelTimeline: async (channelId): Promise<TraceRecord[]> => {
+    if (!hub.trace?.enabled) return []
+    return trace.recent({ chat: channelId, limit: 50 })
+  },
+
+  subscribeChannel: (channelId, cb) => channelStream.subscribe(channelId, cb),
 
   sendChannelMessage: async (channelId, email, text) => {
     await gateway.sendPlain(channelId, formatMirrorLine(email, text))
-    channelStream.publish(channelId, { ts: Date.now(), author: email, content: text, origin: "web" })
+    channelStream.publish(channelId, { kind: "chat", ts: Date.now(), author: email, content: text, origin: "web" })
     const inbound = buildWebInboundMessage(channelId, email, text, Date.now(), () => `web-${++webMsgCounter}`)
     void orchestrator.handleMessage(inbound)
   },
@@ -1932,6 +1969,9 @@ const webDeps: WebDeps = {
     }
     if (name === "tools" && toolObs) {
       return buildToolsText("", toolUsage)
+    }
+    if (name === "doctor") {
+      return renderDoctor(runDoctor(gatherDoctorFacts()))
     }
     return null
   },
