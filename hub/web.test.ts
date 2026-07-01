@@ -66,3 +66,10 @@ test("New Agent shows a 'New agent' title instead of 'Edit agent'", () => {
   expect(DASHBOARD_HTML).toContain("openAgentEditor(name, template, true)")
   expect(DASHBOARD_HTML).toContain("isNew ? ('New agent: '+name) : ('Edit agent: '+name)")
 })
+
+test("the dashboard HTML has hub-config edit affordances and a JSON editor panel", () => {
+  expect(DASHBOARD_HTML).toContain('id="editHubConfigBtn"')
+  expect(DASHBOARD_HTML).toContain('id="hubConfigEditor"')
+  expect(DASHBOARD_HTML).toContain('id="hubConfigEditorText"')
+  expect(DASHBOARD_HTML).toContain("api/hub-config")
+})

@@ -89,6 +89,19 @@ export const DASHBOARD_HTML = `<!doctype html>
 </header>
 <main>
   <section><h2>Agents <button id="newAgentBtn" type="button">+ New Agent</button></h2><table><thead><tr><th></th><th>agent</th><th>state</th><th>context</th><th>queue</th><th>cost</th><th>replicas</th><th></th></tr></thead><tbody id="agents"></tbody></table></section>
+  <section>
+    <h2>Hub Config <button id="editHubConfigBtn" type="button">Edit</button></h2>
+  </section>
+  <section id="hubConfigEditor" style="display:none">
+    <h2>Edit hub config</h2>
+    <textarea id="hubConfigEditorText" rows="16" style="width:100%;background:#1a1d24;border:1px solid #232733;color:#e6e6e6;padding:8px;font-family:ui-monospace,monospace;font-size:12px"></textarea>
+    <div style="margin-top:8px">
+      <button id="hubConfigPreviewBtn" type="button">Preview</button>
+      <button id="hubConfigEditorCancel" type="button">Cancel</button>
+    </div>
+    <div id="hubConfigDiff" class="muted" style="margin-top:8px;white-space:pre-wrap;font-family:ui-monospace,monospace;font-size:12px"></div>
+    <div id="hubConfigConfirmRow" style="margin-top:8px"></div>
+  </section>
   <section id="agentEditor" style="display:none">
     <h2 id="agentEditorTitle">Edit agent</h2>
     <textarea id="agentEditorText" rows="16" style="width:100%;background:#1a1d24;border:1px solid #232733;color:#e6e6e6;padding:8px;font-family:ui-monospace,monospace;font-size:12px"></textarea>
@@ -388,6 +401,59 @@ function loadAgentsAfterConfirm(){
   // The next poll() cycle (every 3s) refreshes the Agents table from
   // /api/status automatically — nothing more to do here.
 }
+
+var lastHubConfigPreviewId = null;
+
+document.getElementById('editHubConfigBtn').addEventListener('click', function(){
+  fetch('api/hub-config').then(function(r){ return r.json(); }).then(function(config){
+    lastHubConfigPreviewId = null;
+    $('hubConfigEditorText').value = JSON.stringify(config, null, 2);
+    $('hubConfigDiff').textContent = '';
+    $('hubConfigConfirmRow').innerHTML = '';
+    $('hubConfigEditor').style.display = 'block';
+  });
+});
+
+document.getElementById('hubConfigEditorCancel').addEventListener('click', function(){
+  $('hubConfigEditor').style.display = 'none';
+});
+
+document.getElementById('hubConfigPreviewBtn').addEventListener('click', function(){
+  var parsed;
+  try { parsed = JSON.parse($('hubConfigEditorText').value); }
+  catch (e) { $('hubConfigDiff').textContent = 'invalid JSON: '+e.message; return; }
+  fetch('api/hub-config/preview', {
+    method: 'POST', headers: {'content-type':'application/json'},
+    body: JSON.stringify({config: parsed}),
+  }).then(function(r){ return r.json(); }).then(renderHubConfigPreview);
+});
+
+function renderHubConfigPreview(p){
+  if (p.error) { $('hubConfigDiff').textContent = 'error: '+p.error; $('hubConfigConfirmRow').innerHTML = ''; return; }
+  lastHubConfigPreviewId = p.id;
+  var beforeStr = JSON.stringify(p.before, null, 2);
+  var afterStr = JSON.stringify(p.after, null, 2);
+  $('hubConfigDiff').textContent = 'BEFORE:\n'+beforeStr+'\n\nAFTER:\n'+afterStr+'\n\nCLASSIFICATION: '+p.classification.tier+
+    (p.classification.fullRestart.length ? ' ('+p.classification.fullRestart.join(', ')+')' : '');
+  var row = $('hubConfigConfirmRow');
+  row.innerHTML = '';
+  var btn = document.createElement('button');
+  btn.textContent = p.classification.tier === 'restart' ? 'Save to disk (needs a full restart)' : 'Apply';
+  row.appendChild(btn);
+}
+
+document.addEventListener('click', function(ev){
+  var btn = ev.target.closest('#hubConfigConfirmRow button');
+  if (!btn || !lastHubConfigPreviewId) return;
+  fetch('api/hub-config/confirm', {
+    method: 'POST', headers: {'content-type':'application/json'},
+    body: JSON.stringify({id: lastHubConfigPreviewId}),
+  }).then(function(r){ return r.json(); }).then(function(result){
+    $('hubConfigDiff').textContent += '\n\nRESULT: '+JSON.stringify(result);
+    $('hubConfigConfirmRow').innerHTML = '';
+    lastHubConfigPreviewId = null;
+  });
+});
 
 function loadChannels(){
   fetch('api/channels').then(function(r){ return r.json(); }).then(function(rows){
