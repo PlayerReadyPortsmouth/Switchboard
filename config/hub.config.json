@@ -138,6 +138,9 @@
     "maxBytes": 10485760,
     "keepFiles": 5
   },
+  "reload": {
+    "enabled": false
+  },
   "trace": {
     "enabled": false
   },

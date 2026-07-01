@@ -2,6 +2,7 @@ import { join, dirname } from "path"
 import { unlinkSync, appendFileSync, mkdirSync, readFileSync, writeFileSync, existsSync, statSync, renameSync, readdirSync, rmSync } from "fs"
 import { config as loadEnv } from "./env"
 import { loadConfigs } from "./config"
+import { planReload } from "./configReload"
 import { BaseGate } from "./baseGate"
 import { Gateway, parseNotifyCustomId } from "./gateway"
 import { Dispatcher, type AgentTransport } from "./transports/index"
@@ -58,7 +59,7 @@ import { startWebServer } from "./webServer"
 import { type WebInput } from "./web"
 import { ConsultRegistry, mayConsult, consultAnswerFromReply } from "./consult"
 import { MissionRegistry, findWorkflow, renderStepPrompt, renderMissionCard, type MissionRun } from "./workflow"
-import type { AgentConfig, AgentReply, InboundMessage, SpawnTrigger, SpawnCardUpdate, CardSpec, DirectCommand, OutboundRoute, SendOutcome } from "./types"
+import type { AgentConfig, AgentReply, InboundMessage, SpawnTrigger, SpawnCardUpdate, CardSpec, DirectCommand, OutboundRoute, HubConfig, AgentRegistry, SendOutcome } from "./types"
 import { resolveOutboxFile } from "./outboxAttach"
 import { makeAttachHandler } from "./attachHandler"
 import { publishArtifact } from "./publishLink"
@@ -1051,6 +1052,24 @@ async function resetAgentSession(name: string, channelId: string, reason = "manu
   void gateway.sendPlain(channelId, "🧹 context cleared — fresh session.")
 }
 
+/** Respawn a persistent agent's process from its CURRENT registry config so a
+ *  hard `!reload` picks up new spawn args (model / claudeArgs / cwd). Unlike
+ *  resetAgentSession this KEEPS the session file, so a resumable agent resumes
+ *  its context under the new process. Pooled agents are skipped (they run behind
+ *  an AgentPool the reload path can't hot-swap). */
+async function respawnAgent(name: string): Promise<void> {
+  const cfg = agents[name]
+  if (!cfg || cfg.mode !== "persistent" || cfg.runtime?.pool) return
+  const old = transports.get(name)
+  if (old) { await old.close(); transports.delete(name) }
+  const fresh = makeTransport(name, name, cfg)
+  await fresh.start()
+  dispatcher.replace(name, fresh)
+  if (!auditOptedOut(name)) audit.record({
+    kind: "session", actor: "hub", action: "respawn", target: name, detail: { reason: "reload" },
+  })
+}
+
 /** Deliver a synthesised system inbound to an agent scoped to a channel. */
 function deliverToAgent(agentName: string, channelId: string, idTag: string, content: string): void {
   const ok = dispatcher.dispatch(agentName, channelId, {
@@ -1534,8 +1553,9 @@ async function runDirectCommand(cmd: DirectCommand, args: string, chatId: string
 
 // Commands: an inbound whose trimmed content equals `match` delivers `message`
 // to agent@channel (gated by the base-gate allowlist if allowlistOnly).
-const commands = hub.commands ?? []
-const directCommands = hub.directCommands ?? []
+// Mutable so a safe `!reload` can hot-swap them without dropping agent procs.
+let commands = hub.commands ?? []
+let directCommands = hub.directCommands ?? []
 gateway.handleInbound((m) => {
   const trimmed = m.content.trim()
   // Audit ledger query (operator-only): list recent governed effects or a rollup.
@@ -1570,6 +1590,45 @@ gateway.handleInbound((m) => {
       audit.recent({ ...q.filter, limit: q.filter.limit ?? 25 }),
       (ts) => new Date(ts).toISOString().slice(11, 19),
     ))
+    return
+  }
+  // Two-tier config reload (operator-only). `!reload` re-reads the config file and
+  // hot-swaps the SAFE subset (router/fallback models, contextWindows, commands,
+  // directCommands, per-agent access) with NO agent-process churn. `!reload hard`
+  // additionally respawns persistent agents whose spawn config (model/args/cwd)
+  // changed. Some changes need a full hub restart — those are reported, never applied.
+  if (/^!reload\b/i.test(trimmed)) {
+    if (!baseGate.listAllowed().includes(m.userId)) return
+    if (hub.reload?.enabled !== true) { void gateway.sendPlain(m.chatId, "🔧 `!reload` is off (set `hub.reload.enabled`)."); return }
+    const hard = /^!reload\s+hard\b/i.test(trimmed)
+    let next: { hub: HubConfig; agents: AgentRegistry }
+    try { next = loadConfigs(CONFIG_DIR) }
+    catch (e) { void gateway.sendPlain(m.chatId, `❌ reload aborted — config did not load: ${e instanceof Error ? e.message : e}`); return }
+    const plan = planReload({ hub, agents }, next)
+    // Apply the safe subset in place so call-time readers pick it up without a restart.
+    hub.routerModel = next.hub.routerModel
+    hub.librarianModel = next.hub.librarianModel
+    hub.distillerModel = next.hub.distillerModel
+    hub.overseerModel = next.hub.overseerModel
+    hub.contextWindows = next.hub.contextWindows
+    hub.commands = next.hub.commands
+    hub.directCommands = next.hub.directCommands
+    commands = next.hub.commands ?? []
+    directCommands = next.hub.directCommands ?? []
+    for (const [name, cfg] of Object.entries(next.agents)) if (agents[name]) agents[name]!.access = cfg.access
+    audit.record({ kind: "event", actor: `user:${m.userId}`, action: hard ? "reload_hard" : "reload_safe", chat: m.chatId, outcome: "ok", detail: { restartAgents: plan.restartAgents, fullRestart: plan.fullRestart } })
+    const lines = [`🔧 **reload (${hard ? "hard" : "safe"})** — config re-read, safe subset hot-swapped.`]
+    void (async () => {
+      if (hard && plan.restartAgents.length) {
+        for (const name of plan.restartAgents) { if (next.agents[name]) agents[name] = next.agents[name]! }
+        for (const name of plan.restartAgents) { try { await respawnAgent(name) } catch (e) { lines.push(`❌ respawn ${name} failed: ${e instanceof Error ? e.message : e}`) } }
+        lines.push(`♻️ restarted ${plan.restartAgents.length} agent(s): ${plan.restartAgents.join(", ")}`)
+      } else if (plan.restartAgents.length) {
+        lines.push(`ℹ️ ${plan.restartAgents.length} agent(s) changed spawn config (model/args/cwd) — run \`!reload hard\` to apply: ${plan.restartAgents.join(", ")}`)
+      }
+      if (plan.fullRestart.length) lines.push(`⚠️ needs a full hub restart (not applied): ${plan.fullRestart.join(", ")}`)
+      void gateway.sendPlain(m.chatId, lines.join("\n"))
+    })()
     return
   }
   // Turn trace query (operator-only): full-fidelity per-turn records (message
