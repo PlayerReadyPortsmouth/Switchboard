@@ -28,6 +28,8 @@ const get = (path: string, headers: Record<string, string> = {}) =>
   new Request(`http://hub${path}`, { method: "GET", headers })
 const post = (path: string, body: unknown, headers: Record<string, string> = {}) =>
   new Request(`http://hub${path}`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) })
+const del = (path: string, headers: Record<string, string> = {}) =>
+  new Request(`http://hub${path}`, { method: "DELETE", headers })
 
 test("GET / → 200 HTML dashboard (no auth required)", async () => {
   const res = await handleWebRequest(get("/"), fakeDeps())
@@ -70,6 +72,11 @@ test("POST /api/approvals/:id already resolved → 409", async () => {
   const deps = fakeDeps({ resolveApproval: async () => "not_found" })
   const res = await handleWebRequest(post("/api/approvals/appr-1", { decision: "deny" }, { "x-switchboard-user": "a@b.com" }), deps)
   expect(res.status).toBe(409)
+})
+
+test("DELETE /api/channels with valid identity header → 405 (known guarded path, wrong method)", async () => {
+  const res = await handleWebRequest(del("/api/channels", { "x-switchboard-user": "a@b.com" }), fakeDeps())
+  expect(res.status).toBe(405)
 })
 
 test("GET /api/channels → 200 JSON list", async () => {

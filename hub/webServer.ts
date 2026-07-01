@@ -59,6 +59,9 @@ export async function handleWebRequest(req: Request, deps: WebDeps): Promise<Res
     channelStreamMatch || channelMessageMatch || commandMatch
 
   if (isGuardedRoute) {
+    // Auth runs before method dispatch below, so a wrong-method request without
+    // the identity header returns 400 (missing_identity) rather than 405 — intentional,
+    // so an unauthenticated caller can't probe which methods/routes exist.
     const email = deps.requireUser(req)
     if (!email) return json({ error: "missing_identity" }, 400)
 
