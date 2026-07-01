@@ -104,7 +104,7 @@ export const DASHBOARD_HTML = `<!doctype html>
   </section>
   <section id="agentEditor" style="display:none">
     <h2 id="agentEditorTitle">Edit agent</h2>
-    <textarea id="agentEditorText" rows="16" style="width:100%;background:#1a1d24;border:1px solid #232733;color:#e6e6e6;padding:8px;font-family:ui-monospace,monospace;font-size:12px"></textarea>
+    <div id="agentEditorTree" style="font-family:ui-monospace,monospace;font-size:12px"></div>
     <div style="margin-top:8px">
       <button id="agentPreviewBtn" type="button">Preview</button>
       <button id="agentEditorCancel" type="button">Cancel</button>
@@ -288,15 +288,163 @@ $('chatForm').addEventListener('submit', function(ev){
     body: JSON.stringify({text: text}),
   });
 });
+function jsonTreeIsLongString(s){ return s.indexOf('\\n') !== -1 || s.length > 100; }
+
+function jsonTreeRenderChildren(container, obj, isArray){
+  container.innerHTML = '';
+  var keys = isArray ? obj.map(function(_, i){ return i; }) : Object.keys(obj);
+  keys.forEach(function(key){
+    var row = document.createElement('div');
+    row.style.margin = '2px 0 2px 16px';
+    var delBtn = document.createElement('button');
+    delBtn.type = 'button';
+    delBtn.textContent = '×';
+    delBtn.addEventListener('click', function(){
+      if (isArray) { obj.splice(key, 1); } else { delete obj[key]; }
+      jsonTreeRenderChildren(container, obj, isArray);
+    });
+    var label = document.createElement('span');
+    label.className = 'muted';
+    label.textContent = (isArray ? '['+key+']' : key) + ': ';
+    row.appendChild(delBtn);
+    row.appendChild(label);
+    var valueSlot = document.createElement('span');
+    row.appendChild(valueSlot);
+    jsonTreeRenderValue(valueSlot, obj, key);
+    container.appendChild(row);
+  });
+  var addRow = document.createElement('div');
+  addRow.style.margin = '2px 0 2px 16px';
+  var addBtn = document.createElement('button');
+  addBtn.type = 'button';
+  addBtn.textContent = isArray ? '+ item' : '+ field';
+  addBtn.addEventListener('click', function(){
+    if (isArray) {
+      obj.push('');
+    } else {
+      var newKey = prompt('New field name:');
+      if (!newKey) return;
+      obj[newKey] = '';
+    }
+    jsonTreeRenderChildren(container, obj, isArray);
+  });
+  addRow.appendChild(addBtn);
+  container.appendChild(addRow);
+}
+
+function jsonTreeRenderValue(slot, obj, key){
+  slot.innerHTML = '';
+  var value = obj[key];
+  if (Array.isArray(value) || (value !== null && typeof value === 'object')) {
+    jsonTreeRenderContainer(slot, obj, key, Array.isArray(value));
+  } else if (value === null) {
+    var nullBtn = document.createElement('button');
+    nullBtn.type = 'button';
+    nullBtn.textContent = '(null) set value';
+    nullBtn.addEventListener('click', function(){ obj[key] = ''; jsonTreeRenderValue(slot, obj, key); });
+    slot.appendChild(nullBtn);
+  } else if (typeof value === 'boolean') {
+    var sel = document.createElement('select');
+    ['true', 'false'].forEach(function(opt){
+      var o = document.createElement('option');
+      o.value = opt; o.textContent = opt;
+      if ((opt === 'true') === value) o.selected = true;
+      sel.appendChild(o);
+    });
+    sel.addEventListener('change', function(){ obj[key] = sel.value === 'true'; });
+    slot.appendChild(sel);
+  } else if (typeof value === 'number') {
+    var numInput = document.createElement('input');
+    numInput.type = 'number';
+    numInput.value = value;
+    numInput.addEventListener('change', function(){ obj[key] = Number(numInput.value); });
+    slot.appendChild(numInput);
+  } else {
+    var str = String(value);
+    if (jsonTreeIsLongString(str)) {
+      jsonTreeRenderLongString(slot, obj, key);
+    } else {
+      var txtInput = document.createElement('input');
+      txtInput.type = 'text';
+      txtInput.value = str;
+      txtInput.style.width = '240px';
+      txtInput.addEventListener('change', function(){ obj[key] = txtInput.value; });
+      slot.appendChild(txtInput);
+    }
+  }
+}
+
+function jsonTreeRenderLongString(slot, obj, key){
+  slot.innerHTML = '';
+  var str = String(obj[key]);
+  var preview = document.createElement('span');
+  preview.className = 'muted';
+  preview.textContent = '"'+str.slice(0, 60)+(str.length > 60 ? '…' : '')+'" ('+str.length+' chars) ';
+  var editBtn = document.createElement('button');
+  editBtn.type = 'button';
+  editBtn.textContent = 'Edit';
+  editBtn.addEventListener('click', function(){
+    slot.innerHTML = '';
+    var ta = document.createElement('textarea');
+    ta.rows = 10;
+    ta.style.width = '100%';
+    ta.style.background = '#1a1d24';
+    ta.style.border = '1px solid #232733';
+    ta.style.color = '#e6e6e6';
+    ta.style.padding = '8px';
+    ta.style.fontFamily = 'ui-monospace,monospace';
+    ta.style.fontSize = '12px';
+    ta.value = str;
+    ta.addEventListener('change', function(){ obj[key] = ta.value; });
+    var collapseBtn = document.createElement('button');
+    collapseBtn.type = 'button';
+    collapseBtn.textContent = 'Collapse';
+    collapseBtn.addEventListener('click', function(){ jsonTreeRenderLongString(slot, obj, key); });
+    slot.appendChild(ta);
+    slot.appendChild(document.createElement('br'));
+    slot.appendChild(collapseBtn);
+  });
+  slot.appendChild(preview);
+  slot.appendChild(editBtn);
+}
+
+function jsonTreeRenderContainer(slot, parentObj, key, isArray){
+  slot.innerHTML = '';
+  var obj = parentObj[key];
+  var toggle = document.createElement('button');
+  toggle.type = 'button';
+  var childrenDiv = document.createElement('div');
+  var expanded = true;
+  toggle.textContent = '▼';
+  toggle.addEventListener('click', function(){
+    expanded = !expanded;
+    toggle.textContent = expanded ? '▼' : '▶';
+    childrenDiv.style.display = expanded ? 'block' : 'none';
+  });
+  slot.appendChild(toggle);
+  slot.appendChild(document.createTextNode(isArray ? '[' : '{'));
+  slot.appendChild(childrenDiv);
+  jsonTreeRenderChildren(childrenDiv, obj, isArray);
+  slot.appendChild(document.createTextNode(isArray ? ']' : '}'));
+}
+
+function jsonTreeRenderRoot(container, data){
+  container.innerHTML = '';
+  jsonTreeRenderChildren(container, data, false);
+}
+
 var editingAgentName = null;
 var lastPreviewId = null;
 
-function openAgentEditor(name, template, isNew){
+var agentTreeData = null;
+
+function openAgentEditor(name, data, isNew){
   editingAgentName = name;
   lastPreviewId = null;
+  agentTreeData = data;
   $('agentEditorTitle').textContent = isNew ? ('New agent: '+name) : ('Edit agent: '+name);
-  $('agentEditorText').value = template;
-  $('agentEditorText').style.display = 'block';
+  $('agentEditorTree').style.display = 'block';
+  jsonTreeRenderRoot($('agentEditorTree'), agentTreeData);
   $('agentDiff').textContent = '';
   $('agentConfirmRow').innerHTML = '';
   $('agentEditor').style.display = 'block';
@@ -305,10 +453,10 @@ function openAgentEditor(name, template, isNew){
 document.getElementById('newAgentBtn').addEventListener('click', function(){
   var name = prompt('New agent name:');
   if (!name) return;
-  var template = JSON.stringify({
+  var template = {
     emoji: "🤖", description: "", mode: "ephemeral",
     access: { roles: [] }, runtime: { cwd: "~" },
-  }, null, 2);
+  };
   openAgentEditor(name, template, true);
 });
 
@@ -317,7 +465,7 @@ document.addEventListener('click', function(ev){
   if (editBtn) {
     var name = editBtn.getAttribute('data-edit-agent');
     fetch('api/agents').then(function(r){ return r.json(); }).then(function(all){
-      openAgentEditor(name, JSON.stringify(all[name], null, 2), false);
+      openAgentEditor(name, all[name], false);
     });
     return;
   }
@@ -327,8 +475,8 @@ document.addEventListener('click', function(ev){
     editingAgentName = rname;
     lastPreviewId = null;
     $('agentEditorTitle').textContent = 'Remove agent: '+rname;
-    $('agentEditorText').value = '';
-    $('agentEditorText').style.display = 'none';
+    $('agentEditorTree').innerHTML = '';
+    $('agentEditorTree').style.display = 'none';
     $('agentDiff').textContent = '';
     $('agentConfirmRow').innerHTML = '';
     $('agentEditor').style.display = 'block';
@@ -342,16 +490,12 @@ document.addEventListener('click', function(ev){
 
 document.getElementById('agentEditorCancel').addEventListener('click', function(){
   $('agentEditor').style.display = 'none';
-  $('agentEditorText').style.display = 'block';
 });
 
 document.getElementById('agentPreviewBtn').addEventListener('click', function(){
-  var parsed;
-  try { parsed = JSON.parse($('agentEditorText').value); }
-  catch (e) { $('agentDiff').textContent = 'invalid JSON: '+e.message; return; }
   fetch('api/agents/'+editingAgentName+'/preview', {
     method: 'POST', headers: {'content-type':'application/json'},
-    body: JSON.stringify({config: parsed}),
+    body: JSON.stringify({config: agentTreeData}),
   }).then(function(r){ return r.json(); }).then(renderAgentPreview);
 });
 
