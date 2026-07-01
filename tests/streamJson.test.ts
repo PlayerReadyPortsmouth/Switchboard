@@ -142,7 +142,10 @@ test("splitLines yields complete lines and buffers a partial remainder", () => {
 
 test("normalizeCard fills missing buttons/title/body so the card pipeline can't crash", () => {
   expect(normalizeCard({ title: "T" })).toEqual({ title: "T", body: "", buttons: [] })
-  expect(normalizeCard(undefined)).toEqual({ title: "(untitled)", body: "", buttons: [] })
+  // An empty card gets an EMPTY title (not a bare "(untitled)"), so the card
+  // pipeline's own `if(!title && !body) → "(no details)"` fallback renders
+  // something legible instead of a blank untitled header.
+  expect(normalizeCard(undefined)).toEqual({ title: "", body: "", buttons: [] })
   const full = { title: "x", body: "y", buttons: [{ customId: "a:b:c", label: "L" }], footer: "f" }
   expect(normalizeCard(full)).toEqual(full)
 })

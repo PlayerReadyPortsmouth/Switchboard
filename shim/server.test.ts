@@ -1,5 +1,36 @@
 import { test, expect } from "bun:test"
-import { toolCallToWire } from "./server"
+import { toolCallToWire, validateCard } from "./server"
+
+test("validateCard accepts a well-formed card", () => {
+  expect(validateCard({ title: "t", body: "b", buttons: [] })).toBeNull()
+  expect(validateCard({ title: "t", body: "", buttons: [{ customId: "a:b:c", label: "Go" }] })).toBeNull()
+})
+
+test("validateCard rejects a missing or non-object card with a clear reason", () => {
+  expect(validateCard(undefined)).toMatch(/card is required/)
+  expect(validateCard(null)).toMatch(/card is required/)
+  expect(validateCard("nope")).toMatch(/card is required/)
+  expect(validateCard([])).toMatch(/card is required/)
+})
+
+test("validateCard rejects an empty/missing title", () => {
+  expect(validateCard({ body: "b", buttons: [] })).toMatch(/card\.title/)
+  expect(validateCard({ title: "", body: "b", buttons: [] })).toMatch(/card\.title/)
+  expect(validateCard({ title: "   ", body: "b", buttons: [] })).toMatch(/card\.title/)
+  expect(validateCard({ title: 42, body: "b", buttons: [] })).toMatch(/card\.title/)
+})
+
+test("validateCard rejects a non-string body and non-array buttons", () => {
+  expect(validateCard({ title: "t", body: 1, buttons: [] })).toMatch(/card\.body/)
+  expect(validateCard({ title: "t", body: "b", buttons: "x" })).toMatch(/card\.buttons/)
+  expect(validateCard({ title: "t", body: "b" })).toMatch(/card\.buttons/)
+})
+
+test("validateCard rejects a button missing customId or label, naming the index", () => {
+  expect(validateCard({ title: "t", body: "b", buttons: [{ label: "Go" }] })).toMatch(/buttons\[0\]\.customId/)
+  expect(validateCard({ title: "t", body: "b", buttons: [{ customId: "a" }] })).toMatch(/buttons\[0\]\.label/)
+  expect(validateCard({ title: "t", body: "b", buttons: [{ customId: "a", label: "ok" }, {}] })).toMatch(/buttons\[1\]/)
+})
 
 test("post_card maps to a notify wire message", () => {
   const wire = toolCallToWire("post_card", {
