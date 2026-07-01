@@ -67,16 +67,21 @@ test("the Timeline view shows an explicit empty state instead of a silent blank 
 test("the dashboard HTML has agent-config edit affordances and a JSON editor panel", () => {
   expect(DASHBOARD_HTML).toContain('id="newAgentBtn"')
   expect(DASHBOARD_HTML).toContain('id="agentEditor"')
-  expect(DASHBOARD_HTML).toContain('id="agentEditorText"')
+  expect(DASHBOARD_HTML).toContain('id="agentEditorTree"')
   expect(DASHBOARD_HTML).toContain("api/agents")
   expect(DASHBOARD_HTML).toContain("/preview")
   expect(DASHBOARD_HTML).toContain("/confirm")
 })
 
-test("openAgentEditor resets the textarea to visible on every open, not just Cancel", () => {
-  var marker = "agentEditorText').style.display = 'block'";
+test("openAgentEditor resets the tree container to visible on every open, not just Cancel", () => {
+  // Superseded by the JSON tree editor (Task 1): the textarea-visibility bug this
+  // test used to guard against textarea now applies to #agentEditorTree instead.
+  // openAgentEditor (Step 5) is now the SOLE chokepoint that sets display='block' —
+  // Cancel (Step 9) no longer duplicates the reset — so the marker should appear
+  // exactly once in the whole script, not twice.
+  var marker = "agentEditorTree').style.display = 'block'";
   var occurrences = DASHBOARD_HTML.split(marker).length - 1;
-  expect(occurrences).toBe(2);
+  expect(occurrences).toBe(1);
 })
 
 test("New Agent shows a 'New agent' title instead of 'Edit agent'", () => {
@@ -87,6 +92,35 @@ test("New Agent shows a 'New agent' title instead of 'Edit agent'", () => {
 test("the dashboard HTML has hub-config edit affordances and a JSON editor panel", () => {
   expect(DASHBOARD_HTML).toContain('id="editHubConfigBtn"')
   expect(DASHBOARD_HTML).toContain('id="hubConfigEditor"')
-  expect(DASHBOARD_HTML).toContain('id="hubConfigEditorText"')
+  expect(DASHBOARD_HTML).toContain('id="hubConfigEditorTree"')
   expect(DASHBOARD_HTML).toContain("api/hub-config")
+})
+
+test("the dashboard has a tree-editor container for agents, not the old raw-JSON textarea", () => {
+  expect(DASHBOARD_HTML).toContain('id="agentEditorTree"')
+  expect(DASHBOARD_HTML).not.toContain('id="agentEditorText"')
+})
+
+test("the dashboard defines the shared jsonTree renderer functions", () => {
+  expect(DASHBOARD_HTML).toContain("function jsonTreeIsLongString(")
+  expect(DASHBOARD_HTML).toContain("function jsonTreeRenderChildren(")
+  expect(DASHBOARD_HTML).toContain("function jsonTreeRenderValue(")
+  expect(DASHBOARD_HTML).toContain("function jsonTreeRenderContainer(")
+  expect(DASHBOARD_HTML).toContain("function jsonTreeRenderLongString(")
+  expect(DASHBOARD_HTML).toContain("function jsonTreeRenderRoot(")
+})
+
+test("openAgentEditor no longer JSON.stringifies a template into a textarea", () => {
+  expect(DASHBOARD_HTML).not.toContain("JSON.stringify(all[name], null, 2)")
+  expect(DASHBOARD_HTML).toContain("openAgentEditor(name, all[name], false)")
+})
+
+test("the dashboard has a tree-editor container for hub config, not the old raw-JSON textarea", () => {
+  expect(DASHBOARD_HTML).toContain('id="hubConfigEditorTree"')
+  expect(DASHBOARD_HTML).not.toContain('id="hubConfigEditorText"')
+})
+
+test("the hub config preview handler sends the live tree data, not a parsed textarea value", () => {
+  expect(DASHBOARD_HTML).toContain("body: JSON.stringify({config: hubConfigTreeData})")
+  expect(DASHBOARD_HTML).not.toContain("JSON.parse($('hubConfigEditorText').value)")
 })
