@@ -1,6 +1,7 @@
 import { test, expect } from "bun:test"
 import { buildCardComponents, parseNotifyCustomId, extractForwards } from "./gateway"
 import { isDeployAuthorized } from "./deployGate"
+import { ChannelType } from "discord.js"
 
 test("extractForwards reads forwarded snapshots (content + attachments), no author", () => {
   const att = new Map([["a1", { id: "a1", name: "shot.png", contentType: "image/png", size: 2048, url: "http://x/shot.png" }]])
@@ -136,4 +137,31 @@ test("buildAttachmentFiles wraps buffers in named AttachmentBuilders and clamps 
   expect(one[0].name).toBe("report.pdf")
   const many = buildAttachmentFiles(Array.from({ length: 15 }, (_, i) => ({ data: Buffer.from(String(i)), name: `${i}.txt` })))
   expect(many.length).toBe(10)
+})
+
+import { buildInboundFromMessage } from "./gateway"
+
+test("buildInboundFromMessage sets threadParentId for a thread message", () => {
+  const msg = {
+    channelId: "thread123", id: "m1",
+    author: { id: "u1", username: "alice", bot: false },
+    content: "hi", createdAt: new Date("2026-07-02T00:00:00Z"),
+    channel: { type: ChannelType.PublicThread, isThread: () => true, parentId: "chan456" },
+    attachments: new Map(), reference: null,
+  } as any
+  const inbound = buildInboundFromMessage(msg, [])
+  expect(inbound.chatId).toBe("thread123")
+  expect(inbound.threadParentId).toBe("chan456")
+})
+
+test("buildInboundFromMessage omits threadParentId for a non-thread message", () => {
+  const msg = {
+    channelId: "chan456", id: "m2",
+    author: { id: "u1", username: "alice", bot: false },
+    content: "hi", createdAt: new Date("2026-07-02T00:00:00Z"),
+    channel: { type: ChannelType.GuildText, isThread: () => false },
+    attachments: new Map(), reference: null,
+  } as any
+  const inbound = buildInboundFromMessage(msg, [])
+  expect(inbound.threadParentId).toBeUndefined()
 })

@@ -148,6 +148,28 @@ export function buildAttachmentFiles(attachments: { data: Buffer; name: string }
   return attachments.slice(0, 10).map((a) => new AttachmentBuilder(a.data, { name: a.name }))
 }
 
+/** Build the normalised InboundMessage from a raw discord.js Message, given its
+ *  already-resolved quote/forwards. Exported for unit testing (see gateway.test.ts). */
+export function buildInboundFromMessage(
+  msg: Message,
+  forwards: { content: string; attachments: { name: string; type: string; size: number; url?: string }[] }[],
+  quote?: { user: string; content: string },
+): InboundMessage {
+  return {
+    chatId: msg.channelId, messageId: msg.id, userId: msg.author.id,
+    user: msg.author.username, content: msg.content,
+    ts: msg.createdAt.toISOString(), isDM: msg.channel.type === ChannelType.DM,
+    threadParentId: "isThread" in msg.channel && msg.channel.isThread() ? (msg.channel.parentId ?? undefined) : undefined,
+    attachments: [
+      ...[...msg.attachments.values()].map(a => ({
+        name: a.name ?? a.id, type: a.contentType ?? "unknown", size: a.size, url: a.url })),
+      ...forwards.flatMap(f => f.attachments),
+    ],
+    quote,
+    forwards: forwards.length ? forwards.map(f => ({ content: f.content })) : undefined,
+  }
+}
+
 /** Thin discord.js wrapper. Caller supplies handlers; this owns the client + I/O. */
 export class Gateway {
   readonly client: Client
@@ -239,18 +261,7 @@ export class Gateway {
         // no author. Forwarded files are merged into the attachment list so they
         // flow through the existing download/Read pipeline.
         const forwards = extractForwards(msg)
-        this.onMessage({
-          chatId: msg.channelId, messageId: msg.id, userId: msg.author.id,
-          user: msg.author.username, content: msg.content,
-          ts: msg.createdAt.toISOString(), isDM: msg.channel.type === ChannelType.DM,
-          attachments: [
-            ...[...msg.attachments.values()].map(a => ({
-              name: a.name ?? a.id, type: a.contentType ?? "unknown", size: a.size, url: a.url })),
-            ...forwards.flatMap(f => f.attachments),
-          ],
-          quote,
-          forwards: forwards.length ? forwards.map(f => ({ content: f.content })) : undefined,
-        })
+        this.onMessage(buildInboundFromMessage(msg, forwards, quote))
       })()
     })
     this.client.on("interactionCreate", async (interaction: Interaction) => {

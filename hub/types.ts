@@ -7,6 +7,7 @@ export interface InboundMessage {
   content: string
   ts: string            // ISO timestamp
   isDM: boolean
+  threadParentId?: string  // set when chatId is a Discord thread: the parent channel's id
   attachments?: { name: string; type: string; size: number; url?: string }[]
   quote?: { user: string; content: string }   // the message this one quote-replies to
   forwards?: { content: string }[]             // forwarded message snapshot text (Discord forward feature; no author)
@@ -217,6 +218,8 @@ export interface ChannelAgent {
   channelId: string;
   agent: string;
   clearReaction?: string;
+  threaded?: boolean; // threads under this channel get their own agent instance (requires hub.threadAgents.enabled)
+  threadWorktreeRepo?: string; // when the agent's runtime.cwd holds multiple repo checkouts (not a repo itself), name the subdirectory each thread's isolated worktree branches from. Absent ⇒ runtime.cwd itself is the base repo.
 }
 
 /** A keyword chat command that runs dedicated code (shell or HTTP) and formats
@@ -277,6 +280,7 @@ export interface HubConfig {
   deployApproverUserId?: string  // Discord user id allowed to press deploy:* buttons
   gatedActions?: GatedAction[]   // hub-side button handlers that run shell commands
   channelAgents?: ChannelAgent[]  // channels pinned to a specific agent
+  threadAgents?: ThreadAgentsConfig; // per-thread dedicated agent instances (default off)
   // Memory & context (all optional; sensible defaults applied in index.ts).
   memoryDir?: string             // Obsidian-style note vault root (default <stateDir>/memory)
   contextCacheSize?: number      // recent-message ring-buffer cap per conversation (default 20)
@@ -315,6 +319,16 @@ export interface HubConfig {
  *  behave exactly as before (fire-and-forget "sent"). Enabled ⇒ the shim turns them
  *  into request/response and returns the Discord message id (or a legible error). */
 export interface ReceiptsConfig { enabled?: boolean }
+
+/** Per-thread dev-agent instances. Absent/disabled ⇒ threads under a pinned
+ *  channel fall through to the default agent exactly as before (byte-identical).
+ *  When enabled, a `channelAgents` entry with `threaded: true` spawns a
+ *  dedicated, worktree-isolated instance per Discord thread. */
+export interface ThreadAgentsConfig {
+  enabled: boolean;
+  idleTimeoutMinutes: number;             // default 60 — suspend (not destroy) after this much inactivity
+  maxConcurrentInstancesPerChannel: number; // default 5 — cap live processes per parent channel
+}
 
 /** Discord file-upload passthrough. Absent/disabled ⇒ uploads are ignored exactly
  *  as before (only message text reaches the agent). When enabled, the hub downloads
