@@ -1702,6 +1702,14 @@ const orchestrator = new Orchestrator(hub, agents, {
   dispatchThread: async (agentName, parentChannelId, inbound, threadWorktreeRepo) => {
     const r = await threadRegistry.ensureInstance(inbound.chatId, parentChannelId, agentName, agents[agentName]!, threadWorktreeRepo)
     if (!r.ok) return r
+    // Mirrors prepareDispatch's bookkeeping for the normal path: thread
+    // instances share the pinned agent's `name`, and makeTransport's
+    // onToolUse/onToolResult handlers resolve which Discord channel to
+    // publish tool-observability events to via this map. dispatchThread
+    // bypasses prepareDispatch entirely, so without this the thread's tool
+    // events would be attributed to whatever channel this agent name last
+    // held (likely the main channel, not the thread).
+    lastChatByAgent.set(agentName, inbound.chatId)
     r.replica.deliver(inbound.chatId, inbound)
     return { ok: true }
   },
