@@ -160,6 +160,25 @@ test("hardCleanup leaves state intact and reports dirty when the worktree has un
   expect(store.get("t1")).toBeDefined() // not deleted
 })
 
+test("hardCleanup leaves state intact and reports the error when worktree remove fails for a non-dirty reason", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "threadagents-"))
+  const store = new ThreadStateStore(join(dir, "thread-agents.json"))
+  const spawn = mock(async (threadId: string, agentName: string) => fakeReplica(`${agentName}#${threadId}`))
+  const git = mock(async (argv: string[]) =>
+    argv[0] === "worktree" && argv[1] === "remove"
+      ? { code: 128, stdout: "", stderr: "fatal: permission denied" }
+      : { code: 0, stdout: "", stderr: "" })
+  const registry = new ThreadAgentRegistry(store, {
+    spawn, git, baseCwd: () => "/repo", worktreeRoot: () => "/repo/.threads",
+    idleTimeoutMinutes: 60, maxConcurrentInstancesPerChannel: 5,
+  })
+  await registry.ensureInstance("t1", "chanA", "dev-agent", cfg)
+  const r = await registry.hardCleanup("t1")
+  expect(r.ok).toBe(false)
+  if (!r.ok) { expect(r.dirty).toBe(false); expect(r.error).toContain("permission denied") }
+  expect(store.get("t1")).toBeDefined() // not deleted
+})
+
 test("hardCleanup on an unknown thread is a no-op success", async () => {
   const { registry } = makeRegistry()
   const r = await registry.hardCleanup("nope")

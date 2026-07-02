@@ -84,16 +84,17 @@ export class ThreadAgentRegistry {
   }
 
   /** Hard cleanup for a Discord-archived/deleted thread: kill the process if
-   *  still live, remove the worktree, and drop stored state — unless the
-   *  worktree is dirty, in which case nothing is deleted (state stays so a
+   *  still live, remove the worktree, and drop stored state — unless
+   *  removeWorktree fails for ANY reason (dirty worktree, permissions, or any
+   *  other git error), in which case nothing is deleted (state stays so a
    *  future manual recovery can find it). No-op success for an unknown thread. */
-  async hardCleanup(threadId: string): Promise<{ ok: true } | { ok: false; dirty: true }> {
+  async hardCleanup(threadId: string): Promise<{ ok: true } | { ok: false; dirty: boolean; error?: string }> {
     const s = this.store.get(threadId)
     if (!s) return { ok: true }
     const replica = this.live.get(threadId)
     if (replica) { await replica.close(); this.live.delete(threadId) }
     const r = await removeWorktree(this.deps.git, s.worktreePath)
-    if (!r.ok && r.dirty) return { ok: false, dirty: true }
+    if (!r.ok) return { ok: false, dirty: !!r.dirty, error: r.error }
     this.store.delete(threadId)
     return { ok: true }
   }
