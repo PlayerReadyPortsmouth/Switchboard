@@ -101,3 +101,67 @@ test("ensureInstance reports worktree_error and never spawns when git worktree a
   expect(spawn).not.toHaveBeenCalled()
   expect(store.get("t1")).toBeUndefined() // no partial state left behind
 })
+
+test("sweepIdle suspends (closes) a replica idle past idleTimeoutMinutes, keeps its state", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "threadagents-"))
+  const store = new ThreadStateStore(join(dir, "thread-agents.json"))
+  let closed = false
+  const spawn = mock(async (threadId: string, agentName: string) => ({
+    ...fakeReplica(`${agentName}#${threadId}`),
+    lastActivityMs: () => 0, // "a long time ago" relative to now()
+    close: async () => { closed = true },
+  }))
+  const git = mock(async () => ({ code: 0, stdout: "", stderr: "" }))
+  const registry = new ThreadAgentRegistry(store, {
+    spawn, git, baseCwd: () => "/repo", worktreeRoot: () => "/repo/.threads",
+    idleTimeoutMinutes: 1, maxConcurrentInstancesPerChannel: 5, now: () => 10 * 60_000, // 10 min in
+  })
+  await registry.ensureInstance("t1", "chanA", "dev-agent", cfg)
+  await registry.sweepIdle()
+  expect(closed).toBe(true)
+  expect(store.get("t1")?.live).toBe(false)
+  expect(store.get("t1")?.worktreePath).toBe("/repo/.threads/t1") // state retained
+})
+
+test("ensureInstance after a suspend reuses the same worktree and spawns again with the same key inputs", async () => {
+  const { registry, spawn, git, store } = makeRegistry()
+  await registry.ensureInstance("t1", "chanA", "dev-agent", cfg)
+  store.set("t1", { ...store.get("t1")!, live: false }) // simulate sweepIdle having run
+  git.mockClear(); spawn.mockClear()
+  const r = await registry.ensureInstance("t1", "chanA", "dev-agent", cfg)
+  expect(r.ok).toBe(true)
+  expect(spawn).toHaveBeenCalledTimes(1)
+  expect(spawn).toHaveBeenCalledWith("t1", "dev-agent", expect.objectContaining({ runtime: expect.objectContaining({ cwd: "/repo/.threads/t1" }) }))
+  expect(git).not.toHaveBeenCalled() // no second worktree add — resume reuses the existing checkout
+})
+
+test("hardCleanup removes the worktree and deletes state when clean", async () => {
+  const { registry, store } = makeRegistry()
+  await registry.ensureInstance("t1", "chanA", "dev-agent", cfg)
+  const r = await registry.hardCleanup("t1")
+  expect(r.ok).toBe(true)
+  expect(store.get("t1")).toBeUndefined()
+})
+
+test("hardCleanup leaves state intact and reports dirty when the worktree has uncommitted changes", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "threadagents-"))
+  const store = new ThreadStateStore(join(dir, "thread-agents.json"))
+  const spawn = mock(async (threadId: string, agentName: string) => fakeReplica(`${agentName}#${threadId}`))
+  const git = mock(async (argv: string[]) =>
+    argv[0] === "status" ? { code: 0, stdout: " M dirty.ts\n", stderr: "" } : { code: 0, stdout: "", stderr: "" })
+  const registry = new ThreadAgentRegistry(store, {
+    spawn, git, baseCwd: () => "/repo", worktreeRoot: () => "/repo/.threads",
+    idleTimeoutMinutes: 60, maxConcurrentInstancesPerChannel: 5,
+  })
+  await registry.ensureInstance("t1", "chanA", "dev-agent", cfg)
+  const r = await registry.hardCleanup("t1")
+  expect(r.ok).toBe(false)
+  if (!r.ok) expect(r.dirty).toBe(true)
+  expect(store.get("t1")).toBeDefined() // not deleted
+})
+
+test("hardCleanup on an unknown thread is a no-op success", async () => {
+  const { registry } = makeRegistry()
+  const r = await registry.hardCleanup("nope")
+  expect(r.ok).toBe(true)
+})
