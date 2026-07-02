@@ -1035,7 +1035,7 @@ In `hub/index.ts`, where the gateway is constructed, pass:
 
 ```ts
 onThreadArchived: (threadId) => { void threadRegistry.hardCleanup(threadId).then((r) => {
-  if (!r.ok) process.stderr.write(`thread-agents: cleanup for ${threadId} skipped — worktree is dirty\n`)
+  if (!r.ok) process.stderr.write(`thread-agents: cleanup for ${threadId} skipped — ${r.dirty ? "worktree is dirty" : `removeWorktree failed: ${r.error}`}\n`)
 }) },
 ```
 
