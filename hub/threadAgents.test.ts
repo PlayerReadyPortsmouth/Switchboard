@@ -26,11 +26,12 @@ function makeRegistry(overrides: Partial<ThreadAgentDeps> = {}) {
   const store = new ThreadStateStore(join(dir, "thread-agents.json"))
   const spawn = mock(async (threadId: string, agentName: string) => fakeReplica(`${agentName}#${threadId}`))
   const git = mock(async () => ({ code: 0, stdout: "", stderr: "" }))
+  const despawn = mock((_threadId: string) => {})
   const deps: ThreadAgentDeps = {
-    spawn, git, baseCwd: () => "/repo", worktreeRoot: () => "/repo/.threads",
+    spawn, git, despawn, baseCwd: () => "/repo", worktreeRoot: () => "/repo/.threads",
     idleTimeoutMinutes: 60, maxConcurrentInstancesPerChannel: 2, ...overrides,
   }
-  return { registry: new ThreadAgentRegistry(store, deps), store, spawn, git }
+  return { registry: new ThreadAgentRegistry(store, deps), store, spawn, git, despawn }
 }
 
 test("ensureInstance spawns a fresh instance on first call for a thread", async () => {
@@ -61,7 +62,7 @@ test("ensureInstance branches the worktree from threadWorktreeRepo when the agen
   const git = mock(async () => ({ code: 0, stdout: "", stderr: "" }))
   const multiRepoCfg: AgentConfig = { ...cfg, runtime: { ...cfg.runtime, cwd: "/srv/dev-agent" } }
   const registry = new ThreadAgentRegistry(store, {
-    spawn, git,
+    spawn, git, despawn: () => {},
     baseCwd: (agentName, repo) => repo ? `/srv/dev-agent/${repo}` : "/srv/dev-agent",
     worktreeRoot: (agentName, repo) => `${repo ? `/srv/dev-agent/${repo}` : "/srv/dev-agent"}/.threads`,
     idleTimeoutMinutes: 60, maxConcurrentInstancesPerChannel: 5,
@@ -92,7 +93,7 @@ test("ensureInstance reports worktree_error and never spawns when git worktree a
   const spawn = mock(async (threadId: string, agentName: string) => fakeReplica(`${agentName}#${threadId}`))
   const git = mock(async () => ({ code: 128, stdout: "", stderr: "fatal: disk full" }))
   const registry = new ThreadAgentRegistry(store, {
-    spawn, git, baseCwd: () => "/repo", worktreeRoot: () => "/repo/.threads",
+    spawn, git, despawn: () => {}, baseCwd: () => "/repo", worktreeRoot: () => "/repo/.threads",
     idleTimeoutMinutes: 60, maxConcurrentInstancesPerChannel: 5,
   })
   const r = await registry.ensureInstance("t1", "chanA", "dev-agent", cfg)
@@ -112,8 +113,9 @@ test("sweepIdle suspends (closes) a replica idle past idleTimeoutMinutes, keeps 
     close: async () => { closed = true },
   }))
   const git = mock(async () => ({ code: 0, stdout: "", stderr: "" }))
+  const despawn = mock((_threadId: string) => {})
   const registry = new ThreadAgentRegistry(store, {
-    spawn, git, baseCwd: () => "/repo", worktreeRoot: () => "/repo/.threads",
+    spawn, git, despawn, baseCwd: () => "/repo", worktreeRoot: () => "/repo/.threads",
     idleTimeoutMinutes: 1, maxConcurrentInstancesPerChannel: 5, now: () => 10 * 60_000, // 10 min in
   })
   await registry.ensureInstance("t1", "chanA", "dev-agent", cfg)
@@ -121,6 +123,10 @@ test("sweepIdle suspends (closes) a replica idle past idleTimeoutMinutes, keeps 
   expect(closed).toBe(true)
   expect(store.get("t1")?.live).toBe(false)
   expect(store.get("t1")?.worktreePath).toBe("/repo/.threads/t1") // state retained
+  // Finding 1: sweepIdle must tell the caller to drop its own bookkeeping
+  // (e.g. the shared transport map) for this thread, or it leaks forever.
+  expect(despawn).toHaveBeenCalledTimes(1)
+  expect(despawn).toHaveBeenCalledWith("t1")
 })
 
 test("ensureInstance after a suspend reuses the same worktree and spawns again with the same key inputs", async () => {
@@ -135,12 +141,46 @@ test("ensureInstance after a suspend reuses the same worktree and spawns again w
   expect(git).not.toHaveBeenCalled() // no second worktree add — resume reuses the existing checkout
 })
 
+test("ensureInstance coalesces concurrent calls for the same never-seen thread into a single spawn/git", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "threadagents-"))
+  const store = new ThreadStateStore(join(dir, "thread-agents.json"))
+  let gitCalls = 0
+  // Simulates real `git worktree add` behaviour: the second concurrent call for
+  // the identical path fails with "already exists" because the first call's
+  // worktree add already landed on disk.
+  const git = mock(async (argv: string[]) => {
+    gitCalls++
+    if (argv[0] === "worktree" && argv[1] === "add" && gitCalls > 1) {
+      return { code: 128, stdout: "", stderr: "fatal: '/repo/.threads/t1' already exists" }
+    }
+    return { code: 0, stdout: "", stderr: "" }
+  })
+  const spawn = mock(async (threadId: string, agentName: string) => fakeReplica(`${agentName}#${threadId}`))
+  const registry = new ThreadAgentRegistry(store, {
+    spawn, git, baseCwd: () => "/repo", worktreeRoot: () => "/repo/.threads",
+    idleTimeoutMinutes: 60, maxConcurrentInstancesPerChannel: 5, despawn: () => {},
+  })
+  const [r1, r2] = await Promise.all([
+    registry.ensureInstance("t1", "chanA", "dev-agent", cfg),
+    registry.ensureInstance("t1", "chanA", "dev-agent", cfg),
+  ])
+  expect(spawn).toHaveBeenCalledTimes(1)
+  expect(git).toHaveBeenCalledTimes(1)
+  expect(r1.ok).toBe(true)
+  expect(r2.ok).toBe(true)
+  if (r1.ok && r2.ok) expect(r1.replica).toBe(r2.replica)
+})
+
 test("hardCleanup removes the worktree and deletes state when clean", async () => {
-  const { registry, store } = makeRegistry()
+  const { registry, store, despawn } = makeRegistry()
   await registry.ensureInstance("t1", "chanA", "dev-agent", cfg)
   const r = await registry.hardCleanup("t1")
   expect(r.ok).toBe(true)
   expect(store.get("t1")).toBeUndefined()
+  // Finding 1: hardCleanup must also drop the caller's bookkeeping for this
+  // thread (e.g. remove the shared transport map entry), or it leaks forever.
+  expect(despawn).toHaveBeenCalledTimes(1)
+  expect(despawn).toHaveBeenCalledWith("t1")
 })
 
 test("hardCleanup leaves state intact and reports dirty when the worktree has uncommitted changes", async () => {
@@ -150,7 +190,7 @@ test("hardCleanup leaves state intact and reports dirty when the worktree has un
   const git = mock(async (argv: string[]) =>
     argv[0] === "status" ? { code: 0, stdout: " M dirty.ts\n", stderr: "" } : { code: 0, stdout: "", stderr: "" })
   const registry = new ThreadAgentRegistry(store, {
-    spawn, git, baseCwd: () => "/repo", worktreeRoot: () => "/repo/.threads",
+    spawn, git, despawn: () => {}, baseCwd: () => "/repo", worktreeRoot: () => "/repo/.threads",
     idleTimeoutMinutes: 60, maxConcurrentInstancesPerChannel: 5,
   })
   await registry.ensureInstance("t1", "chanA", "dev-agent", cfg)
@@ -169,7 +209,7 @@ test("hardCleanup leaves state intact and reports the error when worktree remove
       ? { code: 128, stdout: "", stderr: "fatal: permission denied" }
       : { code: 0, stdout: "", stderr: "" })
   const registry = new ThreadAgentRegistry(store, {
-    spawn, git, baseCwd: () => "/repo", worktreeRoot: () => "/repo/.threads",
+    spawn, git, despawn: () => {}, baseCwd: () => "/repo", worktreeRoot: () => "/repo/.threads",
     idleTimeoutMinutes: 60, maxConcurrentInstancesPerChannel: 5,
   })
   await registry.ensureInstance("t1", "chanA", "dev-agent", cfg)

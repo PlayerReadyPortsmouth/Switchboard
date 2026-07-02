@@ -6,6 +6,11 @@ import { ThreadStateStore } from "./threadState"
 
 export interface ThreadAgentDeps {
   spawn: (threadId: string, agentName: string, cfg: AgentConfig) => Promise<PooledReplica>
+  // Counterpart to `spawn`: called right after a replica is closed (suspend or
+  // hard cleanup) so the caller can drop its own bookkeeping (e.g. the shared
+  // transport map) for this thread. Never skip this — an un-despawned entry
+  // leaks forever and can route a later interaction to a closed transport.
+  despawn: (threadId: string) => void
   git: GitExec
   baseCwd: (agentName: string, threadWorktreeRepo?: string) => string
   worktreeRoot: (agentName: string, threadWorktreeRepo?: string) => string
@@ -24,6 +29,13 @@ export type EnsureInstanceResult =
  *  channel, idle suspend/resume, and dirty-guarded hard cleanup. */
 export class ThreadAgentRegistry {
   private live = new Map<string, PooledReplica>()   // threadId → live replica
+  // In-flight ensureInstance() calls, keyed by threadId. Two near-simultaneous
+  // messages on a brand-new thread both see no live/prior state and would
+  // otherwise race to `addWorktree` the identical path (the second `git
+  // worktree add` fails with "already exists" and its message gets dropped).
+  // Coalescing them onto the same promise makes the second caller await the
+  // first's in-progress spawn instead of racing it.
+  private inFlight = new Map<string, Promise<EnsureInstanceResult>>()
 
   constructor(private store: ThreadStateStore, private deps: ThreadAgentDeps) {}
 
@@ -38,6 +50,17 @@ export class ThreadAgentRegistry {
   }
 
   async ensureInstance(
+    threadId: string, parentChannelId: string, agentName: string, agentCfg: AgentConfig, threadWorktreeRepo?: string,
+  ): Promise<EnsureInstanceResult> {
+    const pending = this.inFlight.get(threadId)
+    if (pending) return pending
+    const p = this.doEnsureInstance(threadId, parentChannelId, agentName, agentCfg, threadWorktreeRepo)
+      .finally(() => this.inFlight.delete(threadId))
+    this.inFlight.set(threadId, p)
+    return p
+  }
+
+  private async doEnsureInstance(
     threadId: string, parentChannelId: string, agentName: string, agentCfg: AgentConfig, threadWorktreeRepo?: string,
   ): Promise<EnsureInstanceResult> {
     const prior = this.store.get(threadId)
@@ -78,6 +101,7 @@ export class ThreadAgentRegistry {
       if (replica.lastActivityMs() > cutoff) continue
       await replica.close()
       this.live.delete(threadId)
+      this.deps.despawn(threadId)
       const s = this.store.get(threadId)
       if (s) this.store.set(threadId, { ...s, live: false, lastActive: this.now() })
     }
@@ -92,7 +116,7 @@ export class ThreadAgentRegistry {
     const s = this.store.get(threadId)
     if (!s) return { ok: true }
     const replica = this.live.get(threadId)
-    if (replica) { await replica.close(); this.live.delete(threadId) }
+    if (replica) { await replica.close(); this.live.delete(threadId); this.deps.despawn(threadId) }
     const r = await removeWorktree(this.deps.git, s.worktreePath)
     if (!r.ok) return { ok: false, dirty: !!r.dirty, error: r.error }
     this.store.delete(threadId)
