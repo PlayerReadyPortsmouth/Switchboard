@@ -1687,8 +1687,8 @@ if (garden.enabled) {
 }
 
 const orchestrator = new Orchestrator(hub, agents, {
-  baseGate: (userId, chatId, isDM) => {
-    const r = baseGate.gate(userId, chatId, isDM, Date.now())
+  baseGate: (userId, chatId, isDM, threadParentId) => {
+    const r = baseGate.gate(userId, chatId, isDM, Date.now(), threadParentId)
     if (r.action === "drop") audit.record({
       kind: "access", actor: `user:${userId}`, action: "deny", chat: chatId, outcome: "deny", detail: { isDM },
     })

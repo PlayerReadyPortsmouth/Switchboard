@@ -23,7 +23,7 @@ function fakes() {
   return {
     dispatched, plain,
     deps: {
-      baseGate: (_userId: string, _chatId: string, _isDM: boolean): GateResult => ({ action: "deliver" as const }),
+      baseGate: (_userId: string, _chatId: string, _isDM: boolean, _threadParentId?: string): GateResult => ({ action: "deliver" as const }),
       resolveRoles: async (_id: string) => ["dev"],
       route: async () => ({ agent: "research", confidence: 0.9, switch: true }),
       dispatch: (agent: string, chatKey: string) => { dispatched.push({ agent, chatKey }); return true },
@@ -85,6 +85,18 @@ test("a base-gate drop is silent (no reply, no dispatch)", async () => {
   await o.handleMessage(dm("hello", "stranger"))
   expect(f.dispatched.length).toBe(0)
   expect(f.plain.length).toBe(0)
+})
+
+test("a thread message's threadParentId is passed through to baseGate (so a gate keyed on the parent channel can allow it)", async () => {
+  const f = fakes()
+  let seenThreadParentId: string | undefined
+  f.deps.baseGate = (_userId, _chatId, _isDM, threadParentId) => {
+    seenThreadParentId = threadParentId
+    return { action: "deliver" as const }
+  }
+  const o = new Orchestrator(hub, reg, f.deps as any)
+  await o.handleMessage({ ...dm("hello"), threadParentId: "parentChan" })
+  expect(seenThreadParentId).toBe("parentChan")
 })
 
 test("a y/n <code> reply for a known permission resolves it and does not dispatch", async () => {

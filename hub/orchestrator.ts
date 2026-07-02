@@ -10,7 +10,7 @@ import { join } from "path"
 import type { GateResult } from "./baseGate"
 
 export interface OrchestratorDeps {
-  baseGate: (userId: string, chatId: string, isDM: boolean) => GateResult
+  baseGate: (userId: string, chatId: string, isDM: boolean, threadParentId?: string) => GateResult
   /** Resolve a permission reply by code; returns true if the code was a live request. */
   resolvePermission: (code: string, behavior: "allow" | "deny") => boolean
   resolveRoles: (userId: string) => Promise<string[]>
@@ -39,7 +39,7 @@ export class Orchestrator {
 
   async handleMessage(inbound: InboundMessage): Promise<void> {
     // Layer 0: base pairing/allowlist wall — before any routing.
-    const g = this.deps.baseGate(inbound.userId, inbound.chatId, inbound.isDM)
+    const g = this.deps.baseGate(inbound.userId, inbound.chatId, inbound.isDM, inbound.threadParentId)
     if (g.action === "drop") return
     if (g.action === "pair") {
       await this.deps.sendPlain(inbound.chatId,

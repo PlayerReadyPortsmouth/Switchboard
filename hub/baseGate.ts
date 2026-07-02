@@ -45,7 +45,7 @@ export class BaseGate {
     renameSync(tmp, this.path)
   }
 
-  gate(userId: string, chatId: string, isDM: boolean, nowMs: number): GateResult {
+  gate(userId: string, chatId: string, isDM: boolean, nowMs: number, threadParentId?: string): GateResult {
     const a = this.read()
     // prune expired pending
     let changed = false
@@ -57,7 +57,12 @@ export class BaseGate {
 
     if (!isDM) {
       if (changed) this.write(a)
-      return a.groups.includes(chatId) ? { action: "deliver" } : { action: "drop" }
+      // A Discord thread's own channel id is never explicitly opted into `groups` (it's a
+      // fresh snowflake the operator never configured) — but a thread under an opted-in
+      // parent channel should behave as if it's opted in too, since that's the parent's
+      // own access decision, not a new surface.
+      const opted = a.groups.includes(chatId) || (threadParentId !== undefined && a.groups.includes(threadParentId))
+      return opted ? { action: "deliver" } : { action: "drop" }
     }
 
     if (a.allowFrom.includes(userId)) { if (changed) this.write(a); return { action: "deliver" } }
