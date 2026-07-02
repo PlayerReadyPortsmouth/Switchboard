@@ -186,6 +186,10 @@ const threadRegistry = new ThreadAgentRegistry(threadStateStore, {
     await t.start()
     return t
   },
+  // Counterpart to `spawn`: makeTransport always registers into `transports`,
+  // so a suspended/cleaned-up thread must be explicitly removed here or it
+  // leaks forever and a later interaction can route to its closed transport.
+  despawn: (threadId) => { transports.delete(`thread-${threadId}`) },
 })
 setInterval(() => { void threadRegistry.sweepIdle() }, 60_000).unref()
 
