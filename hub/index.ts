@@ -10,6 +10,9 @@ import { classifyHubChange, invalidSafeFieldValue, type HubChangeClassification 
 import { HubConfigPreviewRegistry } from "./hubConfigPreview"
 import { BaseGate } from "./baseGate"
 import { Gateway, parseNotifyCustomId } from "./gateway"
+import { ThreadAgentRegistry } from "./threadAgents"
+import { ThreadStateStore } from "./threadState"
+import { bunGitExec } from "./threadGit"
 import { Dispatcher, type AgentTransport } from "./transports/index"
 import { StreamJsonTransport, makeBunProcessSpawner } from "./transports/streamJson"
 import { ReplicaPool } from "./agentPool"
@@ -162,6 +165,29 @@ gateway.setNotifyButtonGate((customId, userId) => {
 })
 const routerRunner = makeRouterRunner()
 const spawner = makeBunProcessSpawner()
+
+// Per-thread dedicated agent instances: a `channelAgents` pin with
+// `threaded: true` spawns a worktree-isolated instance per Discord thread
+// instead of reusing the channel's main agent process. Dormant unless
+// hub.threadAgents.enabled.
+const threadStateStore = new ThreadStateStore(join(hub.stateDir, "thread-agents.json"))
+const threadBaseCwd = (agentName: string, repo?: string) =>
+  repo ? join(agents[agentName]!.runtime.cwd, repo) : agents[agentName]!.runtime.cwd
+const threadRegistry = new ThreadAgentRegistry(threadStateStore, {
+  git: bunGitExec,
+  baseCwd: threadBaseCwd,
+  worktreeRoot: (agentName, repo) => join(threadBaseCwd(agentName, repo), ".threads"),
+  idleTimeoutMinutes: hub.threadAgents?.idleTimeoutMinutes ?? 60,
+  maxConcurrentInstancesPerChannel: hub.threadAgents?.maxConcurrentInstancesPerChannel ?? 5,
+  spawn: async (threadId, agentName, cfg) => {
+    const key = `thread-${threadId}`
+    const t = makeTransport(agentName, key, cfg)
+    t.onReply((reply) => onAgentReply(reply, key))
+    await t.start()
+    return t
+  },
+})
+setInterval(() => { void threadRegistry.sweepIdle() }, 60_000).unref()
 
 const SHIM_PATH = join(import.meta.dir, "..", "shim", "server.ts")
 const notifyRouter = new NotifyRouter()
@@ -1510,6 +1536,12 @@ gateway.onReaction((emojiName, userId, channelId /* , messageId */) => {
   if (agentName) void resetAgentSession(agentName, channelId)
 })
 
+// A Discord thread archived or deleted → hard-clean up its dedicated agent
+// instance (kill process, remove worktree, drop state) if one was ever spawned.
+gateway.onThreadArchived((threadId) => { void threadRegistry.hardCleanup(threadId).then((r) => {
+  if (!r.ok) process.stderr.write(`thread-agents: cleanup for ${threadId} skipped — ${r.dirty ? "worktree is dirty" : `removeWorktree failed: ${r.error}`}\n`)
+}) })
+
 // Webhooks: one HTTP listener; each route HMAC-verifies and delivers "{prefix} {body}".
 const webhookHandlers: WebhookHandler[] = (hub.webhooks ?? []).map((w) => ({
   path: w.path,
@@ -1663,6 +1695,12 @@ const orchestrator = new Orchestrator(hub, agents, {
   route: (msg, permitted, current) =>
     routeFn({ message: msg, permitted, current }, routerRunner, hub.routerModel),
   dispatch: (agent, key, inbound) => dispatcher.dispatch(agent, key, inbound),
+  dispatchThread: async (agentName, parentChannelId, inbound, threadWorktreeRepo) => {
+    const r = await threadRegistry.ensureInstance(inbound.chatId, parentChannelId, agentName, agents[agentName]!, threadWorktreeRepo)
+    if (!r.ok) return r
+    r.replica.deliver(inbound.chatId, inbound)
+    return { ok: true }
+  },
   isAvailable: (agent) => dispatcher.isAvailable(agent),
   sendPlain: (chatId, text) => gateway.sendPlain(chatId, text),
   prepareDispatch: async ({ agent, inbound, isSwitch }) => {

@@ -4,7 +4,7 @@ import { permittedAgents } from "./access"
 import { chatKey, decideAgent, BindingStore } from "./bindings"
 import { parseControlCommand, renderAgentList } from "./gateway"
 import { parsePermissionReply } from "./permissions"
-import { resolvePinnedAgent } from "./channelPin"
+import { resolvePinnedAgent, resolveThreadAgent } from "./channelPin"
 import { join } from "path"
 
 import type { GateResult } from "./baseGate"
@@ -17,6 +17,11 @@ export interface OrchestratorDeps {
   route: (msg: string, permitted: { name: string; description: string }[], current: string | null)
     => Promise<RouteDecision | null>
   dispatch: (agent: string, chatKey: string, inbound: InboundMessage) => boolean
+  /** Route to a per-thread dedicated instance instead of the normal dispatcher.
+   *  `ok: true` means delivered (instance existed or was freshly spawned);
+   *  `ok: false` carries a reason the caller turns into a user-facing notice. */
+  dispatchThread: (agent: string, parentChannelId: string, inbound: InboundMessage, threadWorktreeRepo: string | undefined) =>
+    Promise<{ ok: true } | { ok: false; reason: "cap" } | { ok: false; reason: "worktree_error"; error: string }>
   isAvailable: (agent: string) => boolean
   sendPlain: (chatId: string, text: string) => Promise<void>
   /** Optional: enrich the inbound (recent-message context + memory) right before
@@ -55,6 +60,21 @@ export class Orchestrator {
 
     const control = parseControlCommand(inbound.content)
     if (control) { await this.handleControl(control, inbound, key, permitted, bound); return }
+
+    // Per-thread instance: a message inside a Discord thread whose parent is
+    // pinned with `threaded: true` gets its own dedicated agent instance,
+    // bypassing both the normal channel pin and the router entirely.
+    const threadRoute = resolveThreadAgent(inbound.threadParentId, this.hub.channelAgents ?? [], this.hub.threadAgents)
+    if (threadRoute && this.reg[threadRoute.agent] && permitted.includes(threadRoute.agent)) {
+      const r = await this.deps.dispatchThread(threadRoute.agent, inbound.threadParentId!, inbound, threadRoute.threadWorktreeRepo)
+      if (!r.ok) {
+        const msg = r.reason === "cap"
+          ? `Too many active ${threadRoute.agent} threads on this channel right now — close one first.`
+          : `Couldn't start a ${threadRoute.agent} instance for this thread: ${r.error}`
+        await this.deps.sendPlain(inbound.chatId, `${this.reg[threadRoute.agent].emoji} ${msg}`)
+      }
+      return
+    }
 
     // Channel pin: a pinned channel goes straight to its agent, bypassing the router.
     const pinned = resolvePinnedAgent(inbound.chatId, this.hub.channelAgents ?? [])

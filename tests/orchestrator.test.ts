@@ -30,6 +30,9 @@ function fakes() {
       isAvailable: () => true,
       sendPlain: async (chatId: string, text: string) => { plain.push({ chatId, text }) },
       resolvePermission: (_code: string, _behavior: string) => false,
+      dispatchThread: async (_agent: string, _parentChannelId: string, _inbound: InboundMessage, _repo?: string):
+        Promise<{ ok: true } | { ok: false; reason: "cap" } | { ok: false; reason: "worktree_error"; error: string }> =>
+        ({ ok: true as const }),
     },
   }
 }
@@ -131,4 +134,90 @@ test("pinned channel bypasses router and dispatches straight to pinned agent", a
   expect(f.dispatched.length).toBe(1)
   expect(f.dispatched[0].agent).toBe("dev-agent")
   expect(routeCalled).toBe(false)
+})
+
+const devAgentReg: AgentRegistry = {
+  ...reg,
+  "dev-agent": {
+    emoji: "🛠️", description: "dev work", mode: "persistent",
+    access: { roles: [], users: ["u1"] }, runtime: { cwd: "." },
+  },
+}
+const threadMsg: InboundMessage = {
+  chatId: "thread123", threadParentId: "chanA", messageId: "m1", userId: "u1", user: "alice",
+  content: "hi", ts: new Date().toISOString(), isDM: false,
+}
+
+test("a thread message under a threaded+pinned channel dispatches via dispatchThread, not dispatch", async () => {
+  const threadHub: HubConfig = {
+    ...hub,
+    channelAgents: [{ channelId: "chanA", agent: "dev-agent", threaded: true }],
+    threadAgents: { enabled: true, idleTimeoutMinutes: 60, maxConcurrentInstancesPerChannel: 5 },
+  }
+  const threadCalls: { agent: string; parentChannelId: string; inbound: InboundMessage; repo: string | undefined }[] = []
+  const f = fakes()
+  f.deps.dispatchThread = async (agent: string, parentChannelId: string, inbound: InboundMessage, repo?: string) => {
+    threadCalls.push({ agent, parentChannelId, inbound, repo })
+    return { ok: true as const }
+  }
+  const o = new Orchestrator(threadHub, devAgentReg, f.deps as any)
+  await o.handleMessage(threadMsg)
+
+  expect(threadCalls.length).toBe(1)
+  expect(threadCalls[0].agent).toBe("dev-agent")
+  expect(threadCalls[0].parentChannelId).toBe("chanA")
+  expect(threadCalls[0].inbound.chatId).toBe("thread123")
+  expect(threadCalls[0].repo).toBeUndefined()
+  expect(f.dispatched.length).toBe(0)
+})
+
+test("a thread message under a non-threaded pinned channel falls through to normal dispatch (unchanged)", async () => {
+  const threadHub: HubConfig = {
+    ...hub,
+    channelAgents: [{ channelId: "chanA", agent: "dev-agent" }],
+    threadAgents: { enabled: true, idleTimeoutMinutes: 60, maxConcurrentInstancesPerChannel: 5 },
+  }
+  const threadCalls: unknown[] = []
+  const f = fakes()
+  f.deps.dispatchThread = async (agent: string, parentChannelId: string, inbound: InboundMessage, repo?: string) => {
+    threadCalls.push({ agent, parentChannelId, inbound, repo })
+    return { ok: true as const }
+  }
+  const o = new Orchestrator(threadHub, reg, f.deps as any)
+  await o.handleMessage(threadMsg)
+
+  expect(threadCalls.length).toBe(0)
+  expect(f.dispatched.length).toBe(1)
+})
+
+test("dispatchThread reporting a cap rejection sends the 'too many active threads' notice", async () => {
+  const threadHub: HubConfig = {
+    ...hub,
+    channelAgents: [{ channelId: "chanA", agent: "dev-agent", threaded: true }],
+    threadAgents: { enabled: true, idleTimeoutMinutes: 60, maxConcurrentInstancesPerChannel: 1 },
+  }
+  const f = fakes()
+  f.deps.dispatchThread = async () => ({ ok: false as const, reason: "cap" as const })
+  const o = new Orchestrator(threadHub, devAgentReg, f.deps as any)
+  await o.handleMessage(threadMsg)
+
+  expect(f.dispatched.length).toBe(0)
+  expect(f.plain[0].chatId).toBe("thread123")
+  expect(f.plain[0].text).toContain("Too many active")
+})
+
+test("dispatchThread reporting a worktree_error sends the specific git error, not the cap message", async () => {
+  const threadHub: HubConfig = {
+    ...hub,
+    channelAgents: [{ channelId: "chanA", agent: "dev-agent", threaded: true }],
+    threadAgents: { enabled: true, idleTimeoutMinutes: 60, maxConcurrentInstancesPerChannel: 5 },
+  }
+  const f = fakes()
+  f.deps.dispatchThread = async () => ({ ok: false as const, reason: "worktree_error" as const, error: "fatal: disk full" })
+  const o = new Orchestrator(threadHub, devAgentReg, f.deps as any)
+  await o.handleMessage(threadMsg)
+
+  expect(f.dispatched.length).toBe(0)
+  expect(f.plain[0].text).toContain("fatal: disk full")
+  expect(f.plain[0].text).not.toContain("Too many active")
 })

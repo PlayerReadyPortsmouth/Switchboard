@@ -182,6 +182,10 @@ export class Gateway {
   private modalSubmitCb: (customId: string, userId: string, fields: Record<string, string>) => void = () => {}
   private reactionCb: (emojiName: string, userId: string, channelId: string, messageId: string) => void = () => {}
   onReaction(cb: typeof this.reactionCb): void { this.reactionCb = cb }
+  private threadArchivedCb: (threadId: string) => void = () => {}
+  /** Called when a Discord thread the hub may have a per-thread agent instance
+   *  for is archived or deleted, so the caller can hard-clean up its worktree. */
+  onThreadArchived(cb: typeof this.threadArchivedCb): void { this.threadArchivedCb = cb }
 
   registerModal(customId: string, spec: CardModal): void { this.modalByCustomId.set(customId, spec) }
   unregisterModals(customIds: string[]): void { for (const id of customIds) this.modalByCustomId.delete(id) }
@@ -264,6 +268,10 @@ export class Gateway {
         this.onMessage(buildInboundFromMessage(msg, forwards, quote))
       })()
     })
+    this.client.on("threadUpdate", (oldThread, newThread) => {
+      if (!oldThread.archived && newThread.archived) this.threadArchivedCb(newThread.id)
+    })
+    this.client.on("threadDelete", (thread) => { this.threadArchivedCb(thread.id) })
     this.client.on("interactionCreate", async (interaction: Interaction) => {
       // Modal submissions: collect fields and relay to the owning agent.
       if (interaction.isModalSubmit()) {
