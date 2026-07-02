@@ -1,7 +1,10 @@
+import { dirname } from "path"
+
 export type GitExec = (argv: string[], cwd: string) => Promise<{ code: number; stdout: string; stderr: string }>
 
-/** Real git executor: Bun.spawn against `git`, cwd = the base repo (for add) or
- *  the worktree itself (for status/remove). */
+/** Real git executor: Bun.spawn against `git`, cwd = the base repo (for add and
+ *  worktree remove — removing a worktree must run outside it) or the worktree
+ *  itself (for status). */
 export const bunGitExec: GitExec = async (argv, cwd) => {
   const proc = Bun.spawn(["git", ...argv], { cwd, stdout: "pipe", stderr: "pipe" })
   const [stdout, stderr, code] = await Promise.all([
@@ -31,6 +34,6 @@ export async function removeWorktree(
   const status = await exec(["status", "--porcelain"], worktreePath)
   if (status.code !== 0) return { ok: false, error: status.stderr.trim() || "git status failed" }
   if (status.stdout.trim().length > 0) return { ok: false, dirty: true }
-  const rm = await exec(["worktree", "remove", worktreePath], worktreePath)
+  const rm = await exec(["worktree", "remove", worktreePath], dirname(dirname(worktreePath)))
   return rm.code === 0 ? { ok: true } : { ok: false, error: rm.stderr.trim() || rm.stdout.trim() }
 }
