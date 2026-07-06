@@ -179,6 +179,14 @@
     "enabled": true,
     "timeoutMs": 90000
   },
+  "federation": {
+    "enabled": false,
+    "name": "<this hub's federation name>",
+    "listenAddr": "<wg interface ip>:9920",
+    "peers": {
+      "<peer hub name>": { "addr": "<peer wg ip>:9920", "authKeyEnv": "FED_KEY_PEER" }
+    }
+  },
   "workflow": {
     "enabled": true,
     "stepTimeoutMs": 120000

@@ -41,5 +41,20 @@ export function loadConfigs(dir: string): { hub: HubConfig; agents: AgentRegistr
       throw new Error(`config: agent "${name}" has invalid mode "${cfg.mode}"`)
     }
   }
+  if (hub.federation?.enabled) {
+    const f = hub.federation
+    if (!f.name) throw new Error("config: federation.name is required when federation.enabled")
+    if (!f.listenAddr || !f.listenAddr.includes(":")) {
+      throw new Error(`config: federation.listenAddr must be "host:port" (got "${f.listenAddr}")`)
+    }
+    for (const [peer, p] of Object.entries(f.peers ?? {})) {
+      if (!p.addr || !p.addr.includes(":")) {
+        throw new Error(`config: federation.peers.${peer}.addr must be "host:port"`)
+      }
+      if (!p.authKeyEnv) {
+        throw new Error(`config: federation.peers.${peer}.authKeyEnv is required`)
+      }
+    }
+  }
   return { hub, agents }
 }
