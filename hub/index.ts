@@ -1577,6 +1577,7 @@ gateway.onThreadArchived((threadId) => { void threadRegistry.hardCleanup(threadI
 const webhookHandlers: WebhookHandler[] = (hub.webhooks ?? []).map((w) => ({
   path: w.path,
   secret: process.env[w.secretEnv] ?? "",
+  signatureHeader: w.signatureHeader,
   onBody: (rawBody: string) => {
     const content = w.prefix ? `${w.prefix} ${rawBody}` : rawBody
     deliverToAgent(w.agent, w.channelId, `webhook:${w.path}`, content)
