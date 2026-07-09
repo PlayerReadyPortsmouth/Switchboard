@@ -152,6 +152,7 @@ export interface WebhookRoute {
   agent: string         // agent that receives the delivered body
   channelId: string     // channel the delivery is scoped to
   prefix?: string       // optional token prepended to the raw body
+  signatureHeader?: string  // HMAC header name (default "X-Switchboard-Signature"); e.g. "X-Hub-Signature-256" for GitHub
 }
 
 /** A scheduled message delivered to an agent.

@@ -13,6 +13,7 @@ export function verifySignature(rawBody: string, header: string, secret: string)
 export interface WebhookHandler {
   path: string
   secret: string
+  signatureHeader?: string  // default "X-Switchboard-Signature" if absent
   onBody: (rawBody: string) => void
 }
 
@@ -26,7 +27,7 @@ export async function handleWebhookRequest(
   if (!route) return new Response("not found", { status: 404 })
   if (req.method !== "POST") return new Response("method", { status: 405 })
   const raw = await req.text()
-  const sig = req.headers.get("X-Switchboard-Signature") ?? ""
+  const sig = req.headers.get(route.signatureHeader ?? "X-Switchboard-Signature") ?? ""
   if (!verifySignature(raw, sig, route.secret)) return new Response("bad signature", { status: 401 })
   try { route.onBody(raw) } catch (e) { process.stderr.write(`webhook onBody failed: ${e}\n`) }
   return new Response("ok", { status: 202 })

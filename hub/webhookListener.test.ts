@@ -68,3 +68,29 @@ test("extraHandler is consulted first; null falls through to routes", async () =
   expect((await compose(new Request("http://h/peer/x", { method: "POST" }))).status).toBe(202)
   expect((await compose(new Request("http://h/other", { method: "POST" }))).status).toBe(200)
 })
+
+test("handleWebhookRequest honors a route's custom signatureHeader", async () => {
+  const seen: string[] = []
+  const body = JSON.stringify({ action: "opened" })
+  const routes: WebhookHandler[] = [
+    { path: "/hooks/github-pr", secret: SECRET, signatureHeader: "X-Hub-Signature-256", onBody: (b) => seen.push(b) },
+  ]
+  const req = new Request("http://h/hooks/github-pr", {
+    method: "POST", body, headers: { "X-Hub-Signature-256": sign(body) },
+  })
+  const res = await handleWebhookRequest(req, routes)
+  expect(res.status).toBe(202)
+  expect(seen).toEqual([body])
+})
+
+test("handleWebhookRequest rejects a custom-header route signed on the default header instead", async () => {
+  const body = JSON.stringify({ action: "opened" })
+  const routes: WebhookHandler[] = [
+    { path: "/hooks/github-pr", secret: SECRET, signatureHeader: "X-Hub-Signature-256", onBody: () => {} },
+  ]
+  const req = new Request("http://h/hooks/github-pr", {
+    method: "POST", body, headers: { "X-Switchboard-Signature": sign(body) },
+  })
+  const res = await handleWebhookRequest(req, routes)
+  expect(res.status).toBe(401)
+})
