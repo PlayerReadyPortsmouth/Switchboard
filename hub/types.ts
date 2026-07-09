@@ -313,6 +313,7 @@ export interface HubConfig {
   toolObservability?: ToolObservabilityConfig  // capture + surface per-agent tool usage (default off)
   memoryBrowse?: MemoryBrowseConfig  // operator memory browse & forget UI (default off)
   receipts?: ReceiptsConfig      // outbound receipts for post_card/update_card/attach_file (default off)
+  federation?: FederationConfig  // inter-hub consult federation over a private network (default off)
 }
 
 /** Outbound-receipt confirmation. Absent/disabled ⇒ post_card/update_card/attach_file
@@ -427,6 +428,30 @@ export interface PeeringConfig {
 export interface ConsultConfig {
   enabled?: boolean              // expose ask_agent + honor consults (default off)
   timeoutMs?: number             // hub-side wait for the target's reply (default 90000)
+}
+
+/** One configured remote peer hub: where to dial it and which env var holds the
+ *  shared HMAC key used to sign/verify consults exchanged with it. */
+export interface FederationPeerConfig {
+  addr: string          // "host:port" of the peer hub's federation listener
+  authKeyEnv: string    // env var name holding the shared HMAC key for this peer
+}
+
+/** Inter-hub federation (default off). Lets an agent consult a REMOTE agent by
+ *  addressing it as "<hub>:<agent>" (e.g. ask_agent { agent: "ready:dev-ori" }).
+ *  The hub binds a listener on `listenAddr` (intended to be a WireGuard interface
+ *  IP:port) and dials configured `peers`. Auth is a per-peer shared key (HMAC over
+ *  the request) — the WG link already encrypts, so the key provides identity +
+ *  integrity, not confidentiality. Absent/disabled ⇒ no listener and a
+ *  "<hub>:<agent>" consult target is rejected exactly like an unknown agent.
+ *  100% generic: hub names, addresses, agent names and keys all live here in
+ *  operator config — never in the engine. */
+export interface FederationConfig {
+  enabled?: boolean             // master switch (default off)
+  name: string                  // this hub's federation identity (the "from" hub name)
+  listenAddr: string            // "host:port" to bind the listener to (e.g. a WG interface IP)
+  peers: Record<string, FederationPeerConfig>  // remote hub name → dial target + key env
+  edges?: Record<string, unknown>  // RESERVED (follow-up): expose/accept consent allowlist
 }
 
 // Audit log — one append-only ledger of every governed effect (hub/audit.ts).
