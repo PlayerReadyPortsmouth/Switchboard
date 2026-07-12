@@ -1,9 +1,33 @@
 import { Database } from "bun:sqlite"
-import { expect, test } from "bun:test"
+import { afterEach, expect, test } from "bun:test"
+import { mkdtempSync, rmSync } from "fs"
+import { tmpdir } from "os"
+import { join } from "path"
 import { RepositoryConflictError } from "../hub/conversations/repository"
 import { SqliteConversationRepository } from "../hub/conversations/sqliteRepository"
 
 const makeRepo = () => new SqliteConversationRepository(new Database(":memory:"))
+const tempDirs: string[] = []
+afterEach(() => {
+  for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
+})
+
+test("persists conversations and messages across a file database reopen", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sb-conversations-"))
+  tempDirs.push(dir)
+  const file = join(dir, "switchboard.sqlite")
+  let db = new Database(file, { create: true })
+  let repo = new SqliteConversationRepository(db)
+  repo.createConversation({ id: "c1", title: "Durable", primaryAgent: "architect", createdBy: "owner", createdAt: 10 })
+  repo.appendMessage({ id: "m1", conversationId: "c1", author: "owner", origin: "web", content: "saved", clientKey: "key-1", createdAt: 11 })
+  db.close()
+
+  db = new Database(file)
+  repo = new SqliteConversationRepository(db)
+  expect(repo.getConversation("c1")?.title).toBe("Durable")
+  expect(repo.listMessages("c1").map(({ content }) => content)).toEqual(["saved"])
+  db.close()
+})
 
 test("assigns ordered message sequences and returns a duplicate client key once", () => {
   const repo = makeRepo()

@@ -28,6 +28,7 @@ export function loadConfigs(dir: string): { hub: HubConfig; agents: AgentRegistr
 
   hub.socketPath = expandHome(hub.socketPath)
   hub.stateDir = expandHome(hub.stateDir)
+  if (hub.conversationDbFile) hub.conversationDbFile = expandHome(hub.conversationDbFile)
   if (hub.outboundAttachments?.outboxDir)
     hub.outboundAttachments.outboxDir = expandHome(hub.outboundAttachments.outboxDir)
   if (hub.shareLinks?.artifactsDir) hub.shareLinks.artifactsDir = expandHome(hub.shareLinks.artifactsDir)
