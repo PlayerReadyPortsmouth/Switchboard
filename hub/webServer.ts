@@ -4,6 +4,10 @@ import type { TraceRecord } from "./turnTrace"
 import type { AgentConfig, HubConfig } from "./types"
 import type { AgentChangeClassification } from "./agentConfigDraft"
 import type { HubChangeClassification } from "./hubConfigDraft"
+import type { Conversation, Message, SyncMode, TransportLink } from "./conversations/types"
+import type { ConversationEvent } from "./conversations/events"
+import { ConversationForbiddenError, ConversationValidationError, MAX_MESSAGES_PAGE_SIZE } from "./conversations/service"
+import { RepositoryConflictError, RepositoryNotFoundError, type AppendMessageResult } from "./conversations/repository"
 
 export interface ChannelInfo { channelId: string; name?: string; agent: string }
 
@@ -31,6 +35,15 @@ export interface WebDeps {
   confirmHubConfigChange: (id: string, actor: string) => Promise<{
     state: "applied" | "not_found" | "conflict"; fullRestart: string[]
   }>
+  createConversation?: (identity: string, input: { title: string; primaryAgent: string }) => Conversation
+  listConversations?: (identity: string, includeArchived?: boolean) => Conversation[]
+  getConversation?: (identity: string, conversationId: string) => Conversation
+  archiveConversation?: (identity: string, conversationId: string) => Conversation
+  appendConversationMessage?: (identity: string, conversationId: string, input: { content: string; clientKey: string; replyTo?: string }) => AppendMessageResult
+  listConversationMessages?: (identity: string, conversationId: string, afterSequence?: number, limit?: number) => Message[]
+  addConversationLink?: (identity: string, conversationId: string, input: { adapter: string; externalLocationId: string; label?: string | null; syncMode?: SyncMode; enabled?: boolean }) => TransportLink
+  listConversationLinks?: (identity: string, conversationId: string) => TransportLink[]
+  subscribeConversation?: (identity: string, conversationId: string, afterSequence: number, cb: (event: ConversationEvent) => void) => () => void
 }
 
 const json = (body: unknown, status = 200) =>
@@ -46,6 +59,26 @@ function sseResponse(subscribe: (cb: (evt: ChannelEvent) => void) => () => void)
     cancel() { unsubscribe() },
   })
   return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream", "cache-control": "no-cache" } })
+}
+
+function conversationSseResponse(subscribe: (cb: (event: ConversationEvent) => void) => () => void): Response {
+  let unsubscribe: () => void = () => {}
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      const enc = new TextEncoder()
+      unsubscribe = subscribe(event => controller.enqueue(enc.encode(`id: ${event.sequence}\ndata: ${JSON.stringify(event)}\n\n`)))
+    },
+    cancel() { unsubscribe() },
+  })
+  return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream", "cache-control": "no-cache" } })
+}
+
+const bodyJson = async (req: Request) => await req.json().catch(() => null) as Record<string, unknown> | null
+const nonNegativeInteger = (value: string | null, fallback: number): number | null => {
+  if (value === null) return fallback
+  if (!/^\d+$/.test(value)) return null
+  const parsed = Number(value)
+  return Number.isSafeInteger(parsed) ? parsed : null
 }
 
 /** Route a dashboard/API request. `GET /` and `GET /api/status` are unauthenticated
@@ -81,10 +114,16 @@ export async function handleWebRequest(req: Request, deps: WebDeps): Promise<Res
   const hubConfigMatch = path === "/api/hub-config"
   const hubConfigPreviewMatch = path === "/api/hub-config/preview"
   const hubConfigConfirmMatch = path === "/api/hub-config/confirm"
+  const conversationsMatch = path === "/api/conversations"
+  const conversationItemMatch = /^\/api\/conversations\/([^/]+)$/.exec(path)
+  const conversationMessagesMatch = /^\/api\/conversations\/([^/]+)\/messages$/.exec(path)
+  const conversationEventsMatch = /^\/api\/conversations\/([^/]+)\/events$/.exec(path)
+  const conversationLinksMatch = /^\/api\/conversations\/([^/]+)\/links$/.exec(path)
   const isGuardedRoute = path === "/api/channels" || approvalMatch || channelHistoryMatch ||
     channelTimelineMatch || channelStreamMatch || channelMessageMatch || commandMatch ||
     agentsMatch || agentPreviewMatch || agentConfirmMatch ||
-    hubConfigMatch || hubConfigPreviewMatch || hubConfigConfirmMatch
+    hubConfigMatch || hubConfigPreviewMatch || hubConfigConfirmMatch || conversationsMatch ||
+    conversationItemMatch || conversationMessagesMatch || conversationEventsMatch || conversationLinksMatch
 
   if (isGuardedRoute) {
     // Auth runs before method dispatch below, so a wrong-method request without
@@ -92,6 +131,72 @@ export async function handleWebRequest(req: Request, deps: WebDeps): Promise<Res
     // so an unauthenticated caller can't probe which methods/routes exist.
     const email = deps.requireUser(req)
     if (!email) return json({ error: "missing_identity" }, 400)
+
+    const conversationAction = (conversationsMatch && (method === "GET" || method === "POST")) ||
+      (conversationItemMatch && (method === "GET" || method === "DELETE")) ||
+      (conversationMessagesMatch && (method === "GET" || method === "POST")) ||
+      (conversationEventsMatch && method === "GET") || (conversationLinksMatch && (method === "GET" || method === "POST"))
+    if (conversationAction && (!deps.createConversation || !deps.listConversations || !deps.getConversation ||
+      !deps.archiveConversation || !deps.appendConversationMessage || !deps.listConversationMessages ||
+      !deps.addConversationLink || !deps.listConversationLinks || !deps.subscribeConversation)) {
+      return json({ error: "conversation_service_unavailable" }, 503)
+    }
+
+    try {
+      if (conversationsMatch && method === "GET") {
+        const includeArchived = url.searchParams.get("includeArchived")
+        if (includeArchived !== null && includeArchived !== "true" && includeArchived !== "false") return json({ error: "invalid_includeArchived" }, 400)
+        return json(deps.listConversations!(email, includeArchived === "true"))
+      }
+      if (conversationsMatch && method === "POST") {
+        const body = await bodyJson(req)
+        if (typeof body?.title !== "string" || typeof body?.primaryAgent !== "string") return json({ error: "missing_fields" }, 400)
+        return json(deps.createConversation!(email, { title: body.title, primaryAgent: body.primaryAgent }), 201)
+      }
+
+      const decodeId = (match: RegExpExecArray) => decodeURIComponent(match[1])
+      if (conversationItemMatch && method === "GET") return json(deps.getConversation!(email, decodeId(conversationItemMatch)))
+      if (conversationItemMatch && method === "DELETE") return json(deps.archiveConversation!(email, decodeId(conversationItemMatch)))
+
+      if (conversationMessagesMatch && method === "GET") {
+        const after = nonNegativeInteger(url.searchParams.get("after"), 0)
+        const limit = nonNegativeInteger(url.searchParams.get("limit"), 100)
+        if (after === null || limit === null || limit < 1 || limit > MAX_MESSAGES_PAGE_SIZE) return json({ error: "invalid_cursor" }, 400)
+        return json(deps.listConversationMessages!(email, decodeId(conversationMessagesMatch), after, limit))
+      }
+      if (conversationMessagesMatch && method === "POST") {
+        const body = await bodyJson(req)
+        const clientKey = req.headers.get("idempotency-key") ?? (typeof body?.clientKey === "string" ? body.clientKey : null)
+        if (typeof body?.content !== "string" || !clientKey || (body.replyTo !== undefined && typeof body.replyTo !== "string")) return json({ error: "missing_fields" }, 400)
+        const conversationId = decodeId(conversationMessagesMatch)
+        const result = deps.appendConversationMessage!(email, conversationId, { content: body.content, clientKey, ...(typeof body.replyTo === "string" ? { replyTo: body.replyTo } : {}) })
+        return json(result.message, result.inserted ? 201 : 200)
+      }
+
+      if (conversationLinksMatch && method === "GET") return json(deps.listConversationLinks!(email, decodeId(conversationLinksMatch)))
+      if (conversationLinksMatch && method === "POST") {
+        const body = await bodyJson(req)
+        if (typeof body?.adapter !== "string" || typeof body?.externalLocationId !== "string" || !body.adapter.trim() || !body.externalLocationId.trim()) return json({ error: "missing_fields" }, 400)
+        const syncModes = ["two_way", "inbound_only", "outbound_only", "notifications_only"]
+        if (body.syncMode !== undefined && (typeof body.syncMode !== "string" || !syncModes.includes(body.syncMode))) return json({ error: "invalid_syncMode" }, 400)
+        if (body.label !== undefined && body.label !== null && typeof body.label !== "string") return json({ error: "invalid_label" }, 400)
+        if (body.enabled !== undefined && typeof body.enabled !== "boolean") return json({ error: "invalid_enabled" }, 400)
+        return json(deps.addConversationLink!(email, decodeId(conversationLinksMatch), { ...(body as { adapter: string; externalLocationId: string; label?: string | null; syncMode?: SyncMode; enabled?: boolean }), adapter: body.adapter.trim(), externalLocationId: body.externalLocationId.trim() }), 201)
+      }
+
+      if (conversationEventsMatch && method === "GET") {
+        const cursorText = url.searchParams.has("after") ? url.searchParams.get("after") : req.headers.get("last-event-id")
+        const after = nonNegativeInteger(cursorText, 0)
+        if (after === null) return json({ error: "invalid_after" }, 400)
+        return conversationSseResponse(cb => deps.subscribeConversation!(email, decodeId(conversationEventsMatch), after, cb))
+      }
+    } catch (error) {
+      if (error instanceof ConversationForbiddenError) return json({ error: error.message }, 403)
+      if (error instanceof RepositoryNotFoundError) return json({ error: error.message }, 404)
+      if (error instanceof RepositoryConflictError) return json({ error: error.message }, 409)
+      if (error instanceof ConversationValidationError || error instanceof URIError) return json({ error: error.message }, 400)
+      throw error
+    }
 
     if (method === "GET" && path === "/api/channels") return json(deps.listChannels())
 
@@ -171,11 +276,11 @@ export async function handleWebRequest(req: Request, deps: WebDeps): Promise<Res
   return new Response("not found", { status: 404 })
 }
 
-/** Start the dashboard/API listener on `port`; returns a stop fn, or null (no-op)
+/** Start the dashboard/API listener on `port`; returns an async stop fn, or null (no-op)
  *  when `port` is unset — off by default. Binds `host` (default 127.0.0.1 —
  *  loopback-only unless an operator opts in). */
-export function startWebServer(port: number, deps: WebDeps, host = "127.0.0.1"): { stop: () => void } | null {
+export function startWebServer(port: number, deps: WebDeps, host = "127.0.0.1"): { stop: () => Promise<void> } | null {
   if (!port) return null
   const server = Bun.serve({ port, hostname: host, fetch: (req) => handleWebRequest(req, deps) })
-  return { stop: () => server.stop(true) }
+  return { stop: async () => { await server.stop(true) } }
 }

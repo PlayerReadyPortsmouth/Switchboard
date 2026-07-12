@@ -68,7 +68,6 @@ Source of truth: this file is a snapshot of the code as of 2026-07-02. Re-derive
 Conversation HTTP routes trust the `X-Switchboard-User` request header as the authenticated identity. Deploy the web listener only behind a trusted proxy that strips any client-supplied copy of this header and sets it from the authenticated session; do not expose these routes directly to untrusted clients.
 
 SQLite uses write-ahead logging while the hub is running. A consistent live backup must include both the configured database file and its `-wal` file, captured consistently, or be made with SQLite's backup command. After a clean hub shutdown, the database file can be backed up normally.
-
 ## 3. `agents.json` — agent registry
 
 Top-level keys are agent names → `AgentConfig` (`hub/types.ts:136-142`):

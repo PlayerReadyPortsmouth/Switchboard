@@ -262,6 +262,7 @@ export interface HubConfig {
   guildIds: string[]
   socketPath: string
   stateDir: string
+  conversationDbFile?: string
   routerModel: string
   switchThreshold: number
   timezone?: string             // default tz for cron schedules (default "Europe/London")

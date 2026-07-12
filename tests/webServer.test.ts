@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test"
-import { handleWebRequest } from "../hub/webServer"
+import { handleWebRequest, startWebServer } from "../hub/webServer"
 import type { WebInput, DashboardJson } from "../hub/web"
 import type { WebDeps } from "../hub/webServer"
 import type { AgentConfig } from "../hub/types"
@@ -38,6 +38,11 @@ const post = (path: string, body: unknown, headers: Record<string, string> = {})
   new Request(`http://hub${path}`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) })
 const del = (path: string, headers: Record<string, string> = {}) =>
   new Request(`http://hub${path}`, { method: "DELETE", headers })
+
+test("web server exposes asynchronous stop completion", () => {
+  const start: (port: number, deps: WebDeps, host?: string) => { stop: () => Promise<void> } | null = startWebServer
+  expect(start).toBe(startWebServer)
+})
 
 test("GET / → 200 HTML dashboard (no auth required)", async () => {
   const res = await handleWebRequest(get("/"), fakeDeps())

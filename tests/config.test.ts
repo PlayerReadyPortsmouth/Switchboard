@@ -1,11 +1,11 @@
 import { test, expect } from "bun:test"
 import { loadConfigs, expandHome } from "../hub/config"
 import { mkdtempSync, writeFileSync } from "fs"
-import { join } from "path"
-import { tmpdir } from "os"
+import { isAbsolute, join } from "path"
+import { homedir, tmpdir } from "os"
 
 test("expandHome resolves a leading ~", () => {
-  expect(expandHome("~/x").startsWith("/")).toBe(true)
+  expect(isAbsolute(expandHome("~/x"))).toBe(true)
 })
 
 test("loads and validates both files", () => {
@@ -21,7 +21,22 @@ test("loads and validates both files", () => {
   }))
   const { hub, agents } = loadConfigs(dir)
   expect(hub.defaultAgent).toBe("qa")
+  expect(hub.conversationDbFile).toBeUndefined()
   expect(agents.qa.mode).toBe("ephemeral")
+})
+
+test("expands a configured conversation database path", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sb-cfg-"))
+  writeFileSync(join(dir, "hub.config.json"), JSON.stringify({
+    botTokenEnv: "T", guildIds: [], socketPath: "s", stateDir: "d",
+    conversationDbFile: "~/custom.sqlite", routerModel: "m", switchThreshold: 0.7,
+    defaultAgent: "qa", ephemeralTimeoutMs: 1, tagStyle: "prefix", chatKeyScope: "user",
+  }))
+  writeFileSync(join(dir, "agents.json"), JSON.stringify({
+    qa: { emoji: "x", description: "q", mode: "ephemeral", access: { roles: ["*"] }, runtime: { cwd: "." } },
+  }))
+
+  expect(loadConfigs(dir).hub.conversationDbFile).toBe(join(homedir(), "custom.sqlite"))
 })
 
 test("rejects an enabled federation block with a malformed listenAddr", () => {

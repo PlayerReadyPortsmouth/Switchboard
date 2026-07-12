@@ -78,6 +78,9 @@ import { makeAttachHandler } from "./attachHandler"
 import { publishArtifact } from "./publishLink"
 import { selectExpired } from "./publishCleanup"
 import { randomBytes, randomUUID } from "crypto"
+import { Database } from "bun:sqlite"
+import { ConversationEventStream, ConversationService, SqliteConversationRepository } from "./conversations"
+import { createAsyncShutdown } from "./shutdown"
 import { MemoryBrowse } from "./memoryBrowse"
 import { BrowseSessions } from "./memoryBrowseSessions"
 import { renderListCard, renderDetailCard, renderConfirmCard, parseMemArg, type NoteSummary } from "./memoryCard"
@@ -2086,6 +2089,10 @@ if (metricsServer) console.error(`switchboard hub: metrics/health on ${hub.metri
 function collectWeb(): WebInput {
   return { ...collectMetrics(), recent: audit.recent({ limit: 30 }), pendingApprovalList: approvalRegistry.list() }
 }
+const conversationDb = new Database(hub.conversationDbFile ?? join(hub.stateDir, "switchboard.sqlite"), { create: true })
+const conversationRepo = new SqliteConversationRepository(conversationDb)
+const conversationEvents = new ConversationEventStream((id, after, limit) => conversationRepo.listMessages(id, after, limit))
+const conversationService = new ConversationService(conversationRepo, () => Date.now(), () => randomUUID(), conversationEvents)
 const webDeps: WebDeps = {
   collect: collectWeb,
   requireUser: (req) => req.headers.get("x-switchboard-user"),
@@ -2287,9 +2294,41 @@ const webDeps: WebDeps = {
 
     return { state: "applied", fullRestart: preview.classification.fullRestart }
   },
+
+  createConversation: (identity, input) => conversationService.create(identity, input),
+  listConversations: (identity, includeArchived) => conversationService.list(identity, includeArchived),
+  getConversation: (identity, conversationId) => conversationService.get(identity, conversationId),
+  archiveConversation: (identity, conversationId) => conversationService.archive(identity, conversationId),
+  appendConversationMessage: (identity, conversationId, input) => conversationService.appendUserMessage(identity, conversationId, input),
+  listConversationMessages: (identity, conversationId, afterSequence, limit) => conversationService.history(identity, conversationId, afterSequence, limit),
+  addConversationLink: (identity, conversationId, input) => conversationService.addTransportLink(identity, conversationId, input),
+  listConversationLinks: (identity, conversationId) => conversationService.listTransportLinks(identity, conversationId),
+  subscribeConversation: (identity, conversationId, afterSequence, cb) => {
+    conversationService.get(identity, conversationId)
+    return conversationEvents.subscribe(conversationId, afterSequence, cb)
+  },
 }
 const webServer = startWebServer(hub.webPort ?? 0, webDeps, hub.webHost)
 if (webServer) console.error(`switchboard hub: web dashboard on ${hub.webHost ?? "127.0.0.1"}:${hub.webPort}`)
+
+const cleanupConversations = createAsyncShutdown(
+  () => webServer?.stop() ?? Promise.resolve(),
+  () => conversationDb.close(),
+)
+let shuttingDown = false
+const shutdownConversations = async () => {
+  if (shuttingDown) return
+  shuttingDown = true
+  try {
+    await cleanupConversations()
+    process.exit(0)
+  } catch (error) {
+    process.stderr.write(`switchboard hub: shutdown failed: ${error}\n`)
+    process.exit(1)
+  }
+}
+process.once("SIGINT", () => { void shutdownConversations() })
+process.once("SIGTERM", () => { void shutdownConversations() })
 
 // Auto-deny pending approvals past their TTL: edit the card to "Expired" and
 // audit the lapse. The held effect never fires (fail-closed).
