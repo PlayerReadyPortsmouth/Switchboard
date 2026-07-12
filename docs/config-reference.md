@@ -17,7 +17,8 @@ Source of truth: this file is a snapshot of the code as of 2026-07-02. Re-derive
 
 | Key | Type | Default | Purpose |
 |---|---|---|---|
-| `botTokenEnv` | string | `"DISCORD_BOT_TOKEN"` | Name of the env var holding the bot token — **not the token itself**. |
+| `discord.enabled` | boolean | `true` | Starts the Discord compatibility surface. Omission remains enabled for backward compatibility; set `false` for web-only operation. |
+| `botTokenEnv` | string | `"DISCORD_BOT_TOKEN"` | Name of the env var holding the bot token — **not the token itself**. Read only when Discord is enabled. |
 | `guildIds` | string[] | `[]` (must set) | Discord guild IDs the bot resolves roles against. |
 | `socketPath` | string | `~/.switchboard/hub.sock` | Unix socket the hub listens on for agent shims. `~` expanded. |
 | `stateDir` | string | `~/.switchboard` | Root for all hub state: memory vault, audit log, outbox, caches, share-artifacts (if not overridden), `.env`, sockets. |
@@ -92,7 +93,9 @@ Top-level keys are agent names → `AgentConfig` (`hub/types.ts:136-142`):
 | Var | Set by | Description | Required? |
 |---|---|---|---|
 | `SWITCHBOARD_CONFIG` | operator | Overrides config directory. | Optional |
-| `<botTokenEnv>` (default `DISCORD_BOT_TOKEN`) | operator, in `<stateDir>/.env` | Discord bot token. Hub exits if unset. | **Required** |
+| `<botTokenEnv>` (default `DISCORD_BOT_TOKEN`) | operator, in `<stateDir>/.env` | Discord bot token. Hub exits if unset while `discord.enabled` is true. | Required only for Discord |
+
+Setting `discord.enabled` to `false` starts the canonical HTTP/SSE conversation APIs and agents without reading a bot token, logging in to Discord, resolving Discord roles, or touching the Discord client during startup/shutdown. Web message posts are real agent turns: replies are committed to the canonical transcript and streamed as conversation events even when the conversation has no surface links. Cards, buttons, modals, and other interaction compatibility behavior remain Discord-specific in Phase 2.
 | `<memory.openai.apiKeyEnv>` | operator | Only read when `memory.embedder === "openai"`. | Optional |
 | `<memory.qdrant.apiKeyEnv>` | operator | Only read when `memory.index === "qdrant"`. | Optional |
 | `<webhooks[].secretEnv>` | operator | Inbound HMAC secret per webhook route. Defaults to `""` (can't verify) if unset. | Optional per-route, effectively required if using `webhooks[]` |

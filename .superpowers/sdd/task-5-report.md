@@ -1,71 +1,42 @@
-# Task 5 report: Conversation HTTP and resumable SSE API
+# Task 5 report
 
-## Result
+## Status
 
-- Added authenticated collection, item, message, event, and transport-link routes under `/api/conversations`.
-- Added decoded path IDs, JSON/input validation, service/repository error-to-status mapping, wrong-method handling, and documented 200/201 behavior.
-- Added resumable SSE framing with `id:` and serialized `data:`, supporting `after` and `Last-Event-ID` cursors.
-- Added transport-local idempotency status tracking so repeated successful requests using the same identity, conversation, and `Idempotency-Key` return the canonical message with 200 after the initial 201.
-- Preserved existing route authentication and status behavior.
+Implemented optional Discord startup and canonical web agent turns.
+
+## Changes
+
+- Added `discord?: { enabled?: boolean }`; config loading materializes the backward-compatible `true` default.
+- Added `resolveDiscordStartup`, which returns before accessing the environment when disabled and requires the configured/default token only when enabled.
+- Composed `DiscordAdapter`/`SurfaceRouter` only when enabled. Disabled startup uses an empty router, an empty role resolver, and shutdown never calls the Discord gateway.
+- Allowed the gateway's legacy handler and canonical surface handler to coexist. Linked Discord locations go only through the canonical coordinator; unlinked locations retain legacy commands/cards/interactions.
+- Routed canonical HTTP message POSTs through `TurnCoordinator.submitWebTurn` while retaining 201/200 `{ message, inserted }` semantics.
+- Routed canonical agent text replies through `acceptAgentReply`, so they persist and stream without requiring a surface link and do not fall through to `gateway.sendReply`.
+- Documented the flag, default, web-only behavior, and Phase 2 Discord-specific card/interaction limitation.
 
 ## TDD evidence
 
-RED:
+Initial focused run failed as expected:
 
-`bun test tests/conversationWeb.test.ts`
+- `loads and validates both files`: expected `hub.discord.enabled` true, received undefined.
+- `message POST awaits asynchronous turn submission`: expected 201, received 200 because the Promise was not awaited.
+- The later environment-access tests first failed with `Export named 'resolveDiscordStartup' not found`.
 
-Result: 0 pass, 6 fail, 6 expect() calls. Each new route returned 404 as expected.
+Final fresh verification:
 
-GREEN (focused):
-
-`bun test tests/conversationWeb.test.ts`
-
-Result: 6 pass, 0 fail, 21 expect() calls.
-
-Final verification:
-
-- `bun test tests/conversationWeb.test.ts tests/webServer.test.ts tests/web.test.ts` — 39 pass, 0 fail, 96 expect() calls.
-- `bun test` — 720 pass, 0 fail, 1719 expect() calls.
-- `bun run typecheck` — exit 0.
-- `git diff --check` — exit 0 (Git emitted only its configured LF-to-CRLF working-copy warning).
+- `git diff --check` — exit 0 (only Git CRLF conversion warnings).
+- `bun test tests/discordOptional.test.ts tests/conversationWeb.test.ts tests/config.test.ts` — 25 pass, 0 fail, 70 assertions.
+- `bun run typecheck` — exit 0 (`tsc --noEmit`).
+- `bun test` — 781 pass, 0 fail, 1900 assertions across 107 files.
 
 ## Self-review
 
-- Authentication runs before method dispatch, matching the existing anti-enumeration behavior: unauthenticated known routes return 400 and authenticated wrong methods return 405.
-- Conversation IDs are decoded only at dispatch, with malformed encodings mapped to 400.
-- Cursor parsing accepts only safe, non-negative decimal integers; query `after` takes precedence over `Last-Event-ID`.
-- SSE cancellation invokes the injected unsubscribe function.
-- Existing channel SSE framing remains unchanged.
-- The initial process-local idempotency implementation described below was superseded by the durable review follow-up.
+- Backward compatibility: omission enables Discord and defaults the token variable to `DISCORD_BOT_TOKEN`; legacy non-linked Discord traffic remains on the existing orchestration path.
+- Web-only safety: disabled resolution performs zero environment property reads; no adapter is constructed or started; role resolution returns `[]`; empty-router shutdown never invokes `gateway.stop()`/`gateway.client`.
+- Canonical routing: coordinator initialization precedes surface startup; linked Discord inbound is not double-dispatched; canonical agent replies return before legacy Discord delivery.
+- HTTP compatibility: asynchronous coordinator results preserve the existing inserted-dependent 201/200 response behavior.
+- Scope note: `hub/gateway.ts` and `hub/webServer.ts` were additionally required to multiplex legacy/canonical inbound listeners and await the coordinator Promise respectively.
 
 ## Concerns
 
-- The existing production `WebDeps` composition does not yet construct the conversation repository/service. Conversation dependency members remain optional for staged compatibility and must be injected before these routes are served in production; this task tests the required injected composition directly.
-- Production construction remains intentionally deferred to Task 6; until then authenticated conversation actions fail closed with 503.
-
-## Review follow-up: authorization, durable idempotency, and validation
-
-- Made `subscribeConversation` identity-aware; the trusted authenticated email now crosses the dependency boundary before subscription, and non-members map to 403.
-- Carried repository `AppendMessageResult` through `ConversationService` and `WebDeps`. HTTP status now comes from durable `inserted`, eliminating process-local classification and correctly handling fresh dependency objects and concurrent requests.
-- Changed normal missing-conversation service paths to throw `RepositoryNotFoundError`, preserving validation errors for malformed operations and enabling HTTP 404 mapping.
-- Added focused coverage for repository conflict 409, validation 400, unauthenticated wrong methods, malformed percent encoding, query-cursor precedence, SSE cancellation, non-member SSE, malformed `includeArchived`, and malformed link options.
-- Conversation routes return a controlled 503 while Task 6's production service dependencies are absent, instead of throwing a `TypeError`. Task 6 still owns `hub/index.ts` construction and wiring.
-
-Review RED evidence:
-
-`bun test tests/conversationWeb.test.ts tests/conversationService.test.ts`
-
-Result: 9 pass, 7 fail, 43 expect() calls. Failures reproduced the discarded insertion result, identity-less SSE boundary, unvalidated query/link options, and wrong missing-conversation error type.
-
-Missing-dependency RED evidence:
-
-`bun test tests/conversationWeb.test.ts`
-
-Result: 11 pass, 1 fail, 36 expect() calls. The absent Task 6 dependency reproduced the accidental `TypeError`.
-
-Review final verification:
-
-- `bun test tests/conversationWeb.test.ts tests/conversationService.test.ts tests/conversationRepository.test.ts tests/webServer.test.ts tests/web.test.ts` — 60 pass, 0 fail, 161 expect() calls.
-- `bun test` — 726 pass, 0 fail, 1739 expect() calls.
-- `bun run typecheck` — exit 0.
-- `git diff --check` — exit 0 (Git emitted only configured LF-to-CRLF working-copy warnings).
+No known functional concerns. Cards, updates, modals, and interaction handling intentionally remain on the Discord compatibility path in Phase 2, as documented.

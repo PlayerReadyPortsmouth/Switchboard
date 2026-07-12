@@ -7,6 +7,17 @@ export function expandHome(p: string): string {
   return p.startsWith("~") ? join(homedir(), p.slice(1)) : p
 }
 
+export function resolveDiscordStartup(
+  config: Pick<HubConfig, "discord" | "botTokenEnv">,
+  env: Record<string, string | undefined>,
+): { enabled: false } | { enabled: true; token: string } {
+  if (config.discord?.enabled === false) return { enabled: false }
+  const name = config.botTokenEnv ?? "DISCORD_BOT_TOKEN"
+  const token = env[name]
+  if (!token) throw new Error(`missing ${name}`)
+  return { enabled: true, token }
+}
+
 function readConfigFile(dir: string, file: string, hint: string): string {
   try {
     return readFileSync(join(dir, file), "utf8")
@@ -25,6 +36,8 @@ export function loadConfigs(dir: string): { hub: HubConfig; agents: AgentRegistr
   const agents = JSON.parse(
     readConfigFile(dir, "agents.json", "copy config/agents.example.json to config/agents.json"),
   ) as AgentRegistry
+
+  hub.discord = { ...hub.discord, enabled: hub.discord?.enabled !== false }
 
   hub.socketPath = expandHome(hub.socketPath)
   hub.stateDir = expandHome(hub.stateDir)

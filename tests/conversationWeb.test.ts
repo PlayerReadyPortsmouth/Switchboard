@@ -58,6 +58,16 @@ test("posting the same Idempotency-Key returns 201 then 200 with the same messag
   expect((await first.json()).id).toBe((await duplicate.json()).id)
 })
 
+test("message POST awaits asynchronous turn submission", async () => {
+  let submitted = false
+  const response = await handleWebRequest(req("/api/conversations/c%2F1/messages", "POST", { content: "hello" }, { "idempotency-key": "key-1" }), deps({
+    appendConversationMessage: async () => { submitted = true; return { message, inserted: true } },
+  }))
+  expect(submitted).toBe(true)
+  expect(response.status).toBe(201)
+  expect((await response.json()).id).toBe(message.id)
+})
+
 test("concurrent idempotent requests use durable insertion results", async () => {
   let calls = 0
   const append = () => ({ message, inserted: calls++ === 0 })

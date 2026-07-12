@@ -175,7 +175,7 @@ export function buildInboundFromMessage(
 /** Thin discord.js wrapper. Caller supplies handlers; this owns the client + I/O. */
 export class Gateway {
   readonly client: Client
-  private onMessage: (m: InboundMessage) => void = () => {}
+  private onMessages: Array<(m: InboundMessage) => void> = []
   private permButtonCb: (requestId: string, behavior: "allow" | "deny") => void = () => {}
   private notifyButtonCb: (customId: string, userId: string) => void = () => {}
   private isAuthorized: (userId: string) => boolean = () => false
@@ -206,7 +206,7 @@ export class Gateway {
     })
   }
 
-  handleInbound(cb: (m: InboundMessage) => void): void { this.onMessage = cb }
+  handleInbound(cb: (m: InboundMessage) => void): void { this.onMessages.push(cb) }
 
   /** Called by the hub: which users may answer permission prompts (base-gate allowlist). */
   setPermissionAuthorizer(fn: (userId: string) => boolean): void { this.isAuthorized = fn }
@@ -267,7 +267,8 @@ export class Gateway {
         // no author. Forwarded files are merged into the attachment list so they
         // flow through the existing download/Read pipeline.
         const forwards = extractForwards(msg)
-        this.onMessage(buildInboundFromMessage(msg, forwards, quote))
+        const inbound = buildInboundFromMessage(msg, forwards, quote)
+        for (const handler of this.onMessages) handler(inbound)
       })()
     })
     this.client.on("threadUpdate", (oldThread, newThread) => {

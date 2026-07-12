@@ -1,4 +1,5 @@
 {
+  "discord": { "enabled": true },
   "botTokenEnv": "DISCORD_BOT_TOKEN",
   "guildIds": [],
   "socketPath": "~/.switchboard/hub.sock",

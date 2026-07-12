@@ -21,8 +21,22 @@ test("loads and validates both files", () => {
   }))
   const { hub, agents } = loadConfigs(dir)
   expect(hub.defaultAgent).toBe("qa")
+  expect(hub.discord?.enabled).toBe(true)
   expect(hub.conversationDbFile).toBeUndefined()
   expect(agents.qa.mode).toBe("ephemeral")
+})
+
+test("explicitly disabled Discord remains disabled", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sb-cfg-"))
+  writeFileSync(join(dir, "hub.config.json"), JSON.stringify({
+    discord: { enabled: false }, guildIds: [], socketPath: "s", stateDir: "d",
+    routerModel: "m", switchThreshold: 0.7, defaultAgent: "qa",
+    ephemeralTimeoutMs: 1, tagStyle: "prefix", chatKeyScope: "user",
+  }))
+  writeFileSync(join(dir, "agents.json"), JSON.stringify({
+    qa: { emoji: "x", description: "q", mode: "ephemeral", access: { roles: ["*"] }, runtime: { cwd: "." } },
+  }))
+  expect(loadConfigs(dir).hub.discord?.enabled).toBe(false)
 })
 
 test("expands a configured conversation database path", () => {

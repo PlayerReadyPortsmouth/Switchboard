@@ -1,7 +1,7 @@
 import { join, dirname } from "path"
 import { unlinkSync, appendFileSync, mkdirSync, readFileSync, writeFileSync, existsSync, statSync, renameSync, readdirSync, rmSync } from "fs"
 import { config as loadEnv } from "./env"
-import { loadConfigs } from "./config"
+import { loadConfigs, resolveDiscordStartup } from "./config"
 import { escalatedRuntime, countErrors, RateCap } from "./escalation"
 import { planReload } from "./configReload"
 import { classifyAgentChange, invalidAgentConfigShape, type AgentChangeClassification } from "./agentConfigDraft"
@@ -79,7 +79,8 @@ import { publishArtifact } from "./publishLink"
 import { selectExpired } from "./publishCleanup"
 import { randomBytes, randomUUID } from "crypto"
 import { Database } from "bun:sqlite"
-import { ConversationEventStream, ConversationService, SqliteConversationRepository } from "./conversations"
+import { ConversationEventStream, ConversationService, SqliteConversationRepository, TurnCoordinator } from "./conversations"
+import { DiscordAdapter, SurfaceRouter } from "./surfaces"
 import { createAsyncShutdown } from "./shutdown"
 import { MemoryBrowse } from "./memoryBrowse"
 import { BrowseSessions } from "./memoryBrowseSessions"
@@ -158,10 +159,15 @@ const startedAt = Date.now()          // for the metrics/health uptime gauge
 // federation is disabled; a "<hub>:<agent>" consult then resolves like any unknown
 // agent. Listener is started later, once the consult plumbing exists.
 const fedRuntime = resolveFederation(hub.federation, process.env)
-const token = process.env[hub.botTokenEnv]
-if (!token) { console.error(`missing ${hub.botTokenEnv}`); process.exit(1) }
+let discordStartup: ReturnType<typeof resolveDiscordStartup>
+try { discordStartup = resolveDiscordStartup(hub, process.env) }
+catch (error) { console.error(error instanceof Error ? error.message : error); process.exit(1) }
+const discordEnabled = discordStartup.enabled
+const token = discordStartup.enabled ? discordStartup.token : undefined
 
 const gateway = new Gateway(hub, agents)
+const surfaceRouter = new SurfaceRouter(discordEnabled ? [new DiscordAdapter(gateway, token!)] : [])
+let turnCoordinator: TurnCoordinator | undefined
 const deployApprover = hub.deployApproverUserId ?? ""
 // Approval buttons are pressable only by configured approvers (default: the
 // deploy approver); everything else keeps the existing deploy/gated-action gate.
@@ -1049,6 +1055,10 @@ async function onAgentReply(reply: AgentReply, key: string): Promise<void | Send
     if (out !== undefined) missionRegistry.settle(reply.chatId, out)
     return
   }
+  // Canonical conversations own their transcript independently of any surface.
+  // Persist/stream text replies there and let the surface router fan out only to
+  // configured links; never fall through to the legacy Discord reply path.
+  if (reply.kind === "reply" && turnCoordinator && await turnCoordinator.acceptAgentReply(reply)) return
   if (reply.kind === "card" && reply.card) {
     trace.record({ agent: reply.agent, chat: reply.chatId, kind: "card", text: cardTraceText(reply.card) })
     return await cardLifecycle.onCard(reply, key)
@@ -1740,7 +1750,7 @@ const orchestrator = new Orchestrator(hub, agents, {
     return r
   },
   resolvePermission: () => false,   // tool permissions handled by --dangerously-skip-permissions
-  resolveRoles: (id) => gateway.resolveRoles(id),
+  resolveRoles: (id) => discordEnabled ? gateway.resolveRoles(id) : Promise.resolve([]),
   route: (msg, permitted, current) =>
     routeFn({ message: msg, permitted, current }, routerRunner, hub.routerModel),
   dispatch: (agent, key, inbound) => dispatcher.dispatch(agent, key, inbound),
@@ -1882,6 +1892,9 @@ function gatherDoctorFacts(): DoctorFacts {
   }
 }
 gateway.handleInbound((m) => {
+  // Linked locations are canonical conversation traffic and are handled by the
+  // Discord surface adapter; all other locations retain the legacy command/card path.
+  if (turnCoordinator && conversationRepo.resolveTransportLink("discord", m.chatId)) return
   channelStream.publish(m.chatId, { kind: "chat", ts: Date.now(), author: m.user, content: m.content, origin: "discord" })
   const trimmed = m.content.trim()
   // Audit ledger query (operator-only): list recent governed effects or a rollup.
@@ -2058,8 +2071,23 @@ gateway.handleInbound((m) => {
   }
   void orchestrator.handleMessage(m)
 })
-await gateway.start(token)
-console.error("switchboard hub: gateway connected")
+const conversationDb = new Database(hub.conversationDbFile ?? join(hub.stateDir, "switchboard.sqlite"), { create: true })
+const conversationRepo = new SqliteConversationRepository(conversationDb)
+const conversationEvents = new ConversationEventStream((id, after, limit) => conversationRepo.listMessages(id, after, limit))
+const conversationService = new ConversationService(conversationRepo, () => Date.now(), () => randomUUID(), conversationEvents)
+turnCoordinator = new TurnCoordinator(
+  conversationService,
+  conversationRepo,
+  { dispatch: (agent, conversationId, inbound) => dispatcher.dispatch(agent, conversationId, inbound) },
+  conversationEvents,
+  surfaceRouter,
+  () => Date.now(),
+  () => randomUUID(),
+)
+if (discordEnabled) {
+  await surfaceRouter.startAll(event => turnCoordinator?.acceptSurfaceEvent(event).then(() => {}) ?? Promise.resolve())
+  console.error("switchboard hub: gateway connected")
+}
 
 setInterval(() => {
   for (const { chatId } of drainApprovals(hub.stateDir)) {
@@ -2089,10 +2117,6 @@ if (metricsServer) console.error(`switchboard hub: metrics/health on ${hub.metri
 function collectWeb(): WebInput {
   return { ...collectMetrics(), recent: audit.recent({ limit: 30 }), pendingApprovalList: approvalRegistry.list() }
 }
-const conversationDb = new Database(hub.conversationDbFile ?? join(hub.stateDir, "switchboard.sqlite"), { create: true })
-const conversationRepo = new SqliteConversationRepository(conversationDb)
-const conversationEvents = new ConversationEventStream((id, after, limit) => conversationRepo.listMessages(id, after, limit))
-const conversationService = new ConversationService(conversationRepo, () => Date.now(), () => randomUUID(), conversationEvents)
 const webDeps: WebDeps = {
   collect: collectWeb,
   requireUser: (req) => req.headers.get("x-switchboard-user"),
@@ -2299,7 +2323,7 @@ const webDeps: WebDeps = {
   listConversations: (identity, includeArchived) => conversationService.list(identity, includeArchived),
   getConversation: (identity, conversationId) => conversationService.get(identity, conversationId),
   archiveConversation: (identity, conversationId) => conversationService.archive(identity, conversationId),
-  appendConversationMessage: (identity, conversationId, input) => conversationService.appendUserMessage(identity, conversationId, input),
+  appendConversationMessage: (identity, conversationId, input) => turnCoordinator!.submitWebTurn(identity, conversationId, input),
   listConversationMessages: (identity, conversationId, afterSequence, limit) => conversationService.history(identity, conversationId, afterSequence, limit),
   addConversationLink: (identity, conversationId, input) => conversationService.addTransportLink(identity, conversationId, input),
   listConversationLinks: (identity, conversationId) => conversationService.listTransportLinks(identity, conversationId),
@@ -2312,7 +2336,7 @@ const webServer = startWebServer(hub.webPort ?? 0, webDeps, hub.webHost)
 if (webServer) console.error(`switchboard hub: web dashboard on ${hub.webHost ?? "127.0.0.1"}:${hub.webPort}`)
 
 const cleanupConversations = createAsyncShutdown(
-  () => webServer?.stop() ?? Promise.resolve(),
+  async () => { await webServer?.stop(); await surfaceRouter.stopAll() },
   () => conversationDb.close(),
 )
 let shuttingDown = false

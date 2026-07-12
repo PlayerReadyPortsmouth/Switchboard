@@ -39,7 +39,7 @@ export interface WebDeps {
   listConversations?: (identity: string, includeArchived?: boolean) => Conversation[]
   getConversation?: (identity: string, conversationId: string) => Conversation
   archiveConversation?: (identity: string, conversationId: string) => Conversation
-  appendConversationMessage?: (identity: string, conversationId: string, input: { content: string; clientKey: string; replyTo?: string }) => AppendMessageResult
+  appendConversationMessage?: (identity: string, conversationId: string, input: { content: string; clientKey: string; replyTo?: string }) => AppendMessageResult | Promise<AppendMessageResult>
   listConversationMessages?: (identity: string, conversationId: string, afterSequence?: number, limit?: number) => Message[]
   addConversationLink?: (identity: string, conversationId: string, input: { adapter: string; externalLocationId: string; label?: string | null; syncMode?: SyncMode; enabled?: boolean }) => TransportLink
   listConversationLinks?: (identity: string, conversationId: string) => TransportLink[]
@@ -169,7 +169,7 @@ export async function handleWebRequest(req: Request, deps: WebDeps): Promise<Res
         const clientKey = req.headers.get("idempotency-key") ?? (typeof body?.clientKey === "string" ? body.clientKey : null)
         if (typeof body?.content !== "string" || !clientKey || (body.replyTo !== undefined && typeof body.replyTo !== "string")) return json({ error: "missing_fields" }, 400)
         const conversationId = decodeId(conversationMessagesMatch)
-        const result = deps.appendConversationMessage!(email, conversationId, { content: body.content, clientKey, ...(typeof body.replyTo === "string" ? { replyTo: body.replyTo } : {}) })
+        const result = await deps.appendConversationMessage!(email, conversationId, { content: body.content, clientKey, ...(typeof body.replyTo === "string" ? { replyTo: body.replyTo } : {}) })
         return json(result.message, result.inserted ? 201 : 200)
       }
 

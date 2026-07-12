@@ -259,7 +259,8 @@ export interface OutboundRoute {
 }
 
 export interface HubConfig {
-  botTokenEnv: string
+  botTokenEnv?: string
+  discord?: { enabled?: boolean }
   guildIds: string[]
   socketPath: string
   stateDir: string
