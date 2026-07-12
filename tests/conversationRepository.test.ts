@@ -11,7 +11,7 @@ test("assigns ordered message sequences and returns a duplicate client key once"
   const first = repo.appendMessage({ id: "m1", conversationId: "c1", author: "a@example.com", origin: "web", content: "one", clientKey: "k1", createdAt: 11 })
   const duplicate = repo.appendMessage({ id: "m2", conversationId: "c1", author: "a@example.com", origin: "web", content: "one", clientKey: "k1", createdAt: 12 })
   const second = repo.appendMessage({ id: "m3", conversationId: "c1", author: "a@example.com", origin: "web", content: "two", clientKey: "k2", createdAt: 13 })
-  expect([first.sequence, duplicate.id, second.sequence]).toEqual([1, "m1", 2])
+  expect([first.message.sequence, first.inserted, duplicate.message.id, duplicate.inserted, second.message.sequence]).toEqual([1, true, "m1", false, 2])
 })
 
 test("deduplicates an external event and returns its canonical message", () => {

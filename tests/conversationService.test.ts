@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite"
 import { expect, test } from "bun:test"
 import { ConversationForbiddenError, ConversationService, ConversationValidationError } from "../hub/conversations/service"
+import { ConversationEventStream } from "../hub/conversations/events"
 import { SqliteConversationRepository } from "../hub/conversations/sqliteRepository"
 
 const fixture = () => {
@@ -54,4 +55,19 @@ test("transport links default to two-way and creation is owner-only", () => {
   expect(saved.syncMode).toBe("two_way")
   expect(service.listTransportLinks("member", c.id)).toEqual([saved])
   expect(() => service.listTransportLinks("stranger", c.id)).toThrow(ConversationForbiddenError)
+})
+
+test("a duplicate client key emits one committed event", () => {
+  const repo = new SqliteConversationRepository(new Database(":memory:"))
+  const stream = new ConversationEventStream((conversationId, after) => repo.listMessages(conversationId, after))
+  let identifier = 0
+  const service = new ConversationService(repo, () => 10, () => `id-${++identifier}`, stream)
+  const conversation = service.create("owner", { title: "Events", primaryAgent: "architect" })
+  const seen: number[] = []
+  stream.subscribe(conversation.id, 0, (event) => seen.push(event.sequence))
+
+  service.appendUserMessage("owner", conversation.id, { content: "hello", clientKey: "same" })
+  service.appendUserMessage("owner", conversation.id, { content: "hello", clientKey: "same" })
+
+  expect(seen).toEqual([1])
 })

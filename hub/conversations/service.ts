@@ -1,5 +1,6 @@
 import { RepositoryConflictError, type ConversationRepository } from "./repository"
 import type { Conversation, Message, SyncMode, TransportLink } from "./types"
+import type { ConversationEventStream } from "./events"
 
 export class ConversationForbiddenError extends Error {
   constructor(message: string) { super(message); this.name = "ConversationForbiddenError" }
@@ -18,6 +19,7 @@ export class ConversationService {
     private repo: ConversationRepository,
     private now: () => number,
     private id: () => string,
+    private events?: ConversationEventStream,
   ) {}
 
   create(identity: string, input: CreateInput): Conversation {
@@ -53,7 +55,11 @@ export class ConversationService {
     if (!input.clientKey?.trim()) throw new ConversationValidationError("Client key is required")
     this.requireRole(identity, conversationId, ["owner", "member"])
     try {
-      return this.repo.appendMessage({ id: this.id(), conversationId, author: identity, origin: "web", content: input.content, replyTo: input.replyTo, state: "committed", clientKey: input.clientKey, createdAt: this.now() })
+      const result = this.repo.appendMessage({ id: this.id(), conversationId, author: identity, origin: "web", content: input.content, replyTo: input.replyTo, state: "committed", clientKey: input.clientKey, createdAt: this.now() })
+      if (result.inserted) {
+        this.events?.publish({ kind: "message_committed", conversationId, sequence: result.message.sequence, ts: result.message.createdAt, message: result.message })
+      }
+      return result.message
     } catch (error) {
       if (error instanceof RepositoryConflictError) throw new ConversationValidationError(error.message)
       throw error
