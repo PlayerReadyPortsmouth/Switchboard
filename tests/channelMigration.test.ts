@@ -37,19 +37,22 @@ test("repeated ensure resolves the unique transport-link winner", () => {
   expect(repo.resolveTransportLink("discord", "c1")?.conversationId).toBe(ensure(event, "c").id)
 })
 
-test("multiple connections racing to ensure a channel produce one conversation and no orphan", async () => {
+test("lock contention across processes retries and produces one conversation with no orphan", async () => {
   const dir = mkdtempSync(join(tmpdir(), "switchboard-migrate-")); const file = join(dir, "db.sqlite")
-  let dbA: Database | undefined, dbB: Database | undefined, inspect: Database | undefined
+  let db: Database | undefined, inspect: Database | undefined
   try {
-    dbA = new Database(file, { create: true }); dbB = new Database(file, { create: true })
-    const repoA = new SqliteConversationRepository(dbA)
-    const repoB = new SqliteConversationRepository(dbB)
-    let n = 0; const deps = (repo: SqliteConversationRepository) => ({ repo, now: () => 100, id: () => `race-${++n}` })
+    db = new Database(file, { create: true }); const repo = new SqliteConversationRepository(db); db.exec("PRAGMA busy_timeout=1000")
+    const holder = new Worker(new URL("./fixtures/sqliteLockWorker.ts", import.meta.url).href)
+    const nextMessage = () => new Promise<string>((resolve, reject) => { holder.onmessage = event => resolve(event.data); holder.onerror = reject })
+    const locked = nextMessage(); holder.postMessage({ file, channelId: "race", holdMs: 150 }); expect(await locked).toBe("locked")
+    let n = 0; const deps = { repo, now: () => 100, id: () => `race-${++n}` }
     const event = { adapter: "discord", eventId: "m", externalLocationId: "race", externalMessageId: "m", authorId: "u", authorName: "U", content: "x", createdAt: 1 }
-    const [a, b] = await Promise.all([Promise.resolve().then(() => createDiscordConversationMigrator(deps(repoA))(event, "a")), Promise.resolve().then(() => createDiscordConversationMigrator(deps(repoB))(event, "b"))])
-    expect(a.id).toBe(b.id)
-    inspect = new Database(file); expect(inspect.query<{ n: number }, []>("SELECT count(*) AS n FROM conversations").get()?.n).toBe(1)
-  } finally { inspect?.close(); dbB?.close(); dbA?.close(); rmSync(dir, { recursive: true, force: true }) }
+    const released = nextMessage(); const a = createDiscordConversationMigrator(deps)(event, "a"); expect(await released).toBe("released"); holder.terminate()
+    const b = createDiscordConversationMigrator(deps)(event, "b"); expect(a.id).toBe("worker-conversation"); expect(a.id).toBe(b.id)
+    inspect = new Database(file)
+    expect(inspect.query<{ n: number }, []>("SELECT count(*) AS n FROM conversations").get()?.n).toBe(1)
+    expect(inspect.query<{ n: number }, []>("SELECT count(*) AS n FROM transport_links").get()?.n).toBe(1)
+  } finally { inspect?.close(); db?.close(); rmSync(dir, { recursive: true, force: true }) }
 })
 
 test("existing links resume a partial cache import without duplicate messages or participants", () => {

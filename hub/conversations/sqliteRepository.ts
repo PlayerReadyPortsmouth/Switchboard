@@ -75,6 +75,33 @@ export class SqliteConversationRepository implements ConversationRepository {
     return row ? link(row) : null
   }
   ensureConversationForTransport(input: EnsureTransportConversationInput): { conversation: Conversation; link: TransportLink; created: boolean } {
+    if (input.link.conversationId !== input.conversation.id) throw new RepositoryConflictError("Transport link conversation must match the conversation")
+    const timeout = this.db.query<{ timeout: number }, []>("PRAGMA busy_timeout").get()?.timeout ?? 0
+    const deadline = Date.now() + Math.max(0, timeout)
+    let busyError: unknown
+    // sqlite's native busy handler may consume the whole budget in one opaque
+    // call. Disable it temporarily so retries are bounded and winner reloads
+    // happen at predictable intervals, then restore the configured timeout.
+    this.db.exec("PRAGMA busy_timeout=0")
+    try {
+      do {
+        try { return this.ensureConversationForTransportOnce(input) }
+        catch (error) {
+          if (!isSqliteBusy(error)) throw error
+          busyError = error
+          const remaining = deadline - Date.now()
+          if (remaining <= 0) break
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.min(10, remaining))
+        }
+      } while (true)
+      try {
+        const winner = this.resolveTransportLink(input.link.adapter, input.link.externalLocationId)
+        if (winner) return { conversation: this.getConversation(winner.conversationId)!, link: winner, created: false }
+      } catch (error) { if (!isSqliteBusy(error)) throw error }
+      throw busyError
+    } finally { this.db.exec(`PRAGMA busy_timeout=${Math.max(0, timeout)}`) }
+  }
+  private ensureConversationForTransportOnce(input: EnsureTransportConversationInput): { conversation: Conversation; link: TransportLink; created: boolean } {
     return this.db.transaction(() => {
       const existing = this.resolveTransportLink(input.link.adapter, input.link.externalLocationId)
       if (existing) return { conversation: this.getConversation(existing.conversationId)!, link: existing, created: false }
@@ -158,4 +185,9 @@ export class SqliteConversationRepository implements ConversationRepository {
       return saved
     }).immediate()
   }
+}
+
+function isSqliteBusy(error: unknown): boolean {
+  const code = (error as { code?: string })?.code
+  return code === "SQLITE_BUSY" || code === "SQLITE_LOCKED" || /SQLITE_(?:BUSY|LOCKED)|database (?:is )?locked/i.test(String(error))
 }

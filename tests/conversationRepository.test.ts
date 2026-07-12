@@ -258,3 +258,14 @@ test("rejects mismatched conversation owners without persisting transaction chan
     expect(db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM participants").get()?.count).toBe(0)
   }
 })
+
+test("atomic transport ensure rejects a link for another conversation and rolls back", () => {
+  const db = new Database(":memory:"); const repo = new SqliteConversationRepository(db)
+  expect(() => repo.ensureConversationForTransport({
+    conversation: { id: "c-new", title: "new", primaryAgent: "a", createdBy: "owner", createdAt: 1 },
+    owner: { conversationId: "c-new", identity: "owner", kind: "user", role: "owner", createdAt: 1 },
+    link: { id: "l-new", conversationId: "wrong", adapter: "discord", externalLocationId: "channel", label: null, syncMode: "two_way", enabled: true }, now: 1,
+  })).toThrow("Transport link conversation must match")
+  expect(repo.getConversation("c-new")).toBeNull()
+  expect(db.query<{ n: number }, []>("SELECT count(*) AS n FROM transport_links WHERE id='l-new'").get()?.n).toBe(0)
+})
