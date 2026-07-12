@@ -5,7 +5,7 @@ import type { ConversationEvent } from "../hub/conversations/events"
 import type { InboundMessage } from "../hub/types"
 import type { NormalizedSurfaceEvent, SurfaceDeliveryResult } from "../hub/surfaces"
 
-function fixture(options: { dispatch?: boolean } = {}) {
+function fixture(options: { dispatch?: boolean; dispatchError?: Error } = {}) {
   const repo = new SqliteConversationRepository(new Database(":memory:"))
   let now = 100
   let id = 0
@@ -21,14 +21,14 @@ function fixture(options: { dispatch?: boolean } = {}) {
     dispatch(_agent: string, _conversationId: string, inbound: InboundMessage) {
       order.push(`dispatch:${repo.listMessages(conversation.id).length}`)
       dispatched.push(inbound)
+      if (options.dispatchError) throw options.dispatchError
       return options.dispatch ?? true
     },
-    isAvailable() { return true },
   }
   const delivered: string[] = []
   const router = {
     async deliver(message: { id: string }): Promise<SurfaceDeliveryResult[]> {
-      order.push(`deliver:${repo.getMessage(message.id)?.state}`)
+      order.push(`deliver:${repo.getMessage(message.id)?.state}:${repo.listDueDeliveries(999).length}`)
       delivered.push(message.id)
       return []
     },
@@ -46,6 +46,16 @@ describe("TurnCoordinator", () => {
     expect(f.order).toEqual(["dispatch:1"])
     expect(f.dispatched[0]).toMatchObject({ chatId: f.conversation.id, messageId: result.message.id, userId: "web:owner", user: "owner", content: "hello", isDM: false })
     expect(f.events.filter(({ kind }) => kind === "turn_state").map(({ state }) => state)).toEqual(["queued", "working"])
+  })
+
+  test("does not redispatch a duplicate web submission", async () => {
+    const f = fixture()
+    const input = { content: "hello", clientKey: "same-web-key" }
+
+    expect((await f.coordinator.submitWebTurn("owner", f.conversation.id, input)).inserted).toBe(true)
+    expect((await f.coordinator.submitWebTurn("owner", f.conversation.id, input)).inserted).toBe(false)
+    expect(f.dispatched).toHaveLength(1)
+    expect(f.repo.listMessages(f.conversation.id)).toHaveLength(1)
   })
 
   test("deduplicates a surface receipt before dispatch", async () => {
@@ -78,7 +88,7 @@ describe("TurnCoordinator", () => {
 
     expect(result?.message).toMatchObject({ origin: "agent", author: "architect", content: "answer", state: "completed" })
     expect(result?.deliveries).toHaveLength(1)
-    expect(f.order).toContain("deliver:completed")
+    expect(f.order).toContain("deliver:completed:1")
     expect(f.repo.listDueDeliveries(999)).toHaveLength(1)
   })
 
@@ -96,6 +106,15 @@ describe("TurnCoordinator", () => {
     const result = await f.coordinator.submitWebTurn("owner", f.conversation.id, { content: "stay", clientKey: "failure" })
 
     expect(f.repo.getMessage(result.message.id)?.content).toBe("stay")
+    expect(f.events.filter(({ kind }) => kind === "turn_state").map(({ state }) => state)).toEqual(["queued", "failed"])
+  })
+
+  test("publishes failed and rethrows when dispatcher throws", async () => {
+    const failure = new Error("transport exploded")
+    const f = fixture({ dispatchError: failure })
+
+    await expect(f.coordinator.submitWebTurn("owner", f.conversation.id, { content: "persist me", clientKey: "throwing" })).rejects.toBe(failure)
+    expect(f.repo.listMessages(f.conversation.id).map(({ content }) => content)).toEqual(["persist me"])
     expect(f.events.filter(({ kind }) => kind === "turn_state").map(({ state }) => state)).toEqual(["queued", "failed"])
   })
 })

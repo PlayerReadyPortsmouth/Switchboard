@@ -7,7 +7,6 @@ import type { AppendMessageInput, Delivery, Message, TransportLink } from "./typ
 
 export interface TurnDispatcher {
   dispatch(agent: string, conversationId: string, inbound: InboundMessage): boolean
-  isAvailable(agent: string): boolean
 }
 
 export interface TurnEventPublisher { publish(event: ConversationEvent): void }
@@ -68,8 +67,13 @@ export class TurnCoordinator {
     if (!conversation) return
     this.turnState(message, "queued")
     const inbound: InboundMessage = { chatId: conversationId, messageId: message.id, userId, user, content: message.content, ts: new Date(message.createdAt).toISOString(), isDM: false }
-    if (this.dispatcher.dispatch(conversation.primaryAgent, conversationId, inbound)) this.turnState(message, "working")
-    else this.turnState(message, "failed")
+    try {
+      if (this.dispatcher.dispatch(conversation.primaryAgent, conversationId, inbound)) this.turnState(message, "working")
+      else this.turnState(message, "failed")
+    } catch (error) {
+      this.turnState(message, "failed")
+      throw error
+    }
   }
 
   private turnState(message: Message, state: "queued" | "working" | "failed"): void {

@@ -56,3 +56,26 @@ Typecheck result: exit 0; `tsc --noEmit` completed without diagnostics.
 - Agent reply idempotency requires `correlationId` or `messageId`; missing callback identity is rejected rather than silently risking duplicate output.
 - Surface inserted detection compares the freshly generated canonical ID with the receipt-returned message ID. Coordinator-generated IDs are fresh, while duplicate receipts return the original ID.
 - No unrelated pre-existing untracked files were modified or staged.
+
+## Review follow-up
+
+- Wrapped dispatcher invocation so thrown transport errors publish terminal `failed` after persistence, then rethrow the original error as the caller contract.
+- Added direct coverage proving duplicate web client keys do not redispatch.
+- Strengthened delivery ordering coverage: the router mock observes both the completed agent message and one pending delivery row during `deliver()`.
+- Removed unused `isAvailable` from the focused `TurnDispatcher` interface; availability remains encapsulated by `dispatch()`'s boolean result.
+
+Follow-up RED command:
+
+`bun test tests/turnCoordinator.test.ts`
+
+Follow-up RED result: exit 1; 7 pass, 1 fail. The throwing-dispatch test observed `["queued"]` instead of `["queued", "failed"]`, proving the missing terminal event.
+
+Follow-up GREEN command:
+
+`bun test tests/turnCoordinator.test.ts`
+
+Follow-up GREEN result: exit 0; 8 pass, 0 fail, 34 assertions.
+
+Follow-up regression result: `bun test tests/turnCoordinator.test.ts tests/conversationService.test.ts tests/conversationEvents.test.ts tests/conversationRepository.test.ts` exited 0 with 41 pass, 0 fail, 135 assertions across 4 files.
+
+Follow-up typecheck result: `bun run typecheck` exited 0 with no TypeScript diagnostics.
