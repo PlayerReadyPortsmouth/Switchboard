@@ -1,11 +1,11 @@
 import { test, expect } from "bun:test"
 import { loadConfigs, expandHome } from "../hub/config"
 import { mkdtempSync, writeFileSync } from "fs"
-import { join } from "path"
+import { isAbsolute, join } from "path"
 import { tmpdir } from "os"
 
 test("expandHome resolves a leading ~", () => {
-  expect(expandHome("~/x").startsWith("/")).toBe(true)
+  expect(isAbsolute(expandHome("~/x"))).toBe(true)
 })
 
 test("loads and validates both files", () => {
