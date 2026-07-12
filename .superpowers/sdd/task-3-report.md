@@ -37,3 +37,27 @@ Command:
 `git diff --check`
 
 Result: exit 0; no whitespace errors (Git emitted only line-ending conversion warnings).
+
+## Review fix: owner transaction invariant
+
+- Added a repository regression test covering mismatched conversation ID, creator identity, and owner role.
+- Each case asserts the creation rejects with `RepositoryConflictError` and leaves both conversations and participants empty.
+- Added explicit invariant validation inside the repository creation transaction.
+
+RED command:
+
+`bun test tests/conversationRepository.test.ts --test-name-pattern "mismatched conversation owners"`
+
+Result: exit 1; 0 pass, 1 fail. The first mismatch produced a raw foreign-key error instead of `RepositoryConflictError`, proving explicit validation was missing.
+
+GREEN command:
+
+`bun test tests/conversationRepository.test.ts --test-name-pattern "mismatched conversation owners"`
+
+Result: exit 0; 1 pass, 0 fail, 9 assertions.
+
+Full verification command:
+
+`bun test tests/conversationRepository.test.ts tests/conversationService.test.ts; if ($LASTEXITCODE -eq 0) { bun run typecheck }`
+
+Result: exit 0; 13 pass, 0 fail, 42 assertions; `tsc --noEmit` completed successfully.

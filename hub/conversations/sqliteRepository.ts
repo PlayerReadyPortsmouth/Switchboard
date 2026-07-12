@@ -17,6 +17,9 @@ export class SqliteConversationRepository implements ConversationRepository {
   }
   createConversationWithOwner(input: NewConversation, owner: Participant): Conversation {
     this.db.transaction(() => {
+      if (owner.conversationId !== input.id || owner.identity !== input.createdBy || owner.role !== "owner") {
+        throw new RepositoryConflictError("Conversation owner must match the conversation creator")
+      }
       this.db.query("INSERT INTO conversations(id,title,primary_agent,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?)").run(input.id, input.title, input.primaryAgent, input.createdBy, input.createdAt, input.createdAt)
       this.db.query("INSERT INTO participants(conversation_id,identity,kind,role,created_at) VALUES (?,?,?,?,?)").run(owner.conversationId, owner.identity, owner.kind, owner.role, owner.createdAt)
     })()

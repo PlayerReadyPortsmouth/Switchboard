@@ -66,3 +66,19 @@ test("rejects foreign-key violations", () => {
   const repo = makeRepo()
   expect(() => repo.addParticipant({ conversationId: "missing", identity: "user", kind: "user", role: "member", createdAt: 1 })).toThrow()
 })
+
+test("rejects mismatched conversation owners without persisting transaction changes", () => {
+  const mismatches = [
+    { conversationId: "other", identity: "creator", kind: "user" as const, role: "owner" as const, createdAt: 10 },
+    { conversationId: "c1", identity: "other", kind: "user" as const, role: "owner" as const, createdAt: 10 },
+    { conversationId: "c1", identity: "creator", kind: "user" as const, role: "member" as const, createdAt: 10 },
+  ]
+
+  for (const owner of mismatches) {
+    const db = new Database(":memory:")
+    const repo = new SqliteConversationRepository(db)
+    expect(() => repo.createConversationWithOwner({ id: "c1", title: "Invalid", primaryAgent: "architect", createdBy: "creator", createdAt: 10 }, owner)).toThrow(RepositoryConflictError)
+    expect(db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM conversations").get()?.count).toBe(0)
+    expect(db.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM participants").get()?.count).toBe(0)
+  }
+})
