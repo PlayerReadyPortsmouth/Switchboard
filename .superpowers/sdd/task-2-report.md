@@ -1,59 +1,42 @@
-# Task 2 Report: SQLite Conversation Repository
+# Task 2 Report: Delivery and Link Repository Operations
 
-## Outcome
+## Status
 
-Implemented the `ConversationRepository` contract and transactional Bun SQLite implementation on top of the Task 1 domain types and migration runner.
+Implemented the canonical SQLite repository operations for transport-link resolution, atomic agent message and delivery persistence, idempotent delivery creation, delivery outcome transitions, and bounded due-delivery polling.
 
-## Implementation
+## TDD evidence
 
-- Added concrete repository method signatures and `RepositoryConflictError` / `RepositoryNotFoundError`.
-- Added row-to-domain mappings for conversations, participants, messages, and transport links.
-- Migration setup runs from the repository constructor.
-- Conversation creation atomically inserts the conversation and its owner participant.
-- Message append uses an immediate transaction, returns canonical client-key duplicates, rejects missing/archived conversations, assigns the next sequence, and updates conversation activity time.
-- External event recording uses one immediate transaction for receipt lookup, message append, and receipt insertion.
-- Transport link uniqueness violations are translated to `RepositoryConflictError`.
-- Listing supports identity visibility, archive filtering, deterministic ordering, and message pagination.
+- RED: `bun test tests/conversationRepository.test.ts`
+  - Result: exit 1; 12 passed, 5 failed.
+  - Expected failures were missing `resolveTransportLink`, `appendAgentMessage`, and `createDeliveries` repository methods.
+- GREEN: `bun test tests/conversationRepository.test.ts`
+  - Result after implementation: exit 0; 17 passed, 0 failed.
+- Final focused verification: `bun test tests/conversationMigrations.test.ts tests/conversationRepository.test.ts`
+  - Result: exit 0; 20 passed, 0 failed, 56 assertions.
+- Type verification: `bun run typecheck`
+  - Result: exit 0 (`tsc --noEmit`).
+- Full regression suite: `bun test`
+  - Result: exit 0; 749 passed, 0 failed, 1812 assertions across 104 files.
+- Diff hygiene: `git diff --check`
+  - Result: exit 0; no whitespace errors.
 
-## TDD Evidence
+## Coverage added
 
-RED command:
-
-`bun test tests/conversationRepository.test.ts`
-
-Observed expected failure before production modules existed: `Cannot find module '../hub/conversations/repository'`; 0 pass, 1 fail, 1 error.
-
-GREEN command:
-
-`bun test tests/conversationRepository.test.ts`
-
-Observed: 8 pass, 0 fail, 13 assertions.
-
-## Tests Added
-
-1. assigns ordered message sequences and returns a duplicate client key once
-2. deduplicates an external event and returns its canonical message
-3. looks up participants and lists conversations visible to the owner
-4. excludes archived conversations unless requested
-5. paginates messages after a sequence
-6. persists default two-way transport links
-7. rejects duplicate external transport locations
-8. rejects foreign-key violations
-
-## Verification
-
-- `bun test tests/conversationRepository.test.ts tests/conversationMigrations.test.ts`: 9 pass, 0 fail, 15 assertions.
-- `bun test`: 703 pass, 0 fail, 1660 assertions across 99 files.
-- `bun run typecheck`: exit 0.
-- `git diff --check`: exit 0.
+- Adapter/external-location link resolution and missing-link behavior.
+- Atomic agent message plus delivery insertion, including transaction rollback.
+- Idempotent repeated agent callbacks and unique `(message_id, link_id, event_kind)` deliveries.
+- Delivered state and external message ID persistence.
+- Retry attempt increments, next-attempt timestamps, 500-character error truncation, and exhausted state.
+- Pending and elapsed-retry due selection, deterministic ordering, requested limits, and the hard 200-row cap.
 
 ## Self-review
 
-- Checked every required interface method is present with concrete return types.
-- Checked all SQL columns are mapped to camel-case domain fields and booleans are normalized.
-- Checked the required transaction order for client-key and external-event deduplication.
-- Checked foreign keys remain enabled through constructor migrations.
-- Checked link conflicts only translate unique-constraint failures; foreign-key errors propagate.
-- Checked no unrelated tracked files were changed.
+- `appendAgentMessage` uses one SQLite immediate transaction around message and delivery writes.
+- Delivery IDs are generated only for attempted inserts; tuple uniqueness remains the canonical idempotency guard, and existing rows are returned after conflicts.
+- State transitions throw `RepositoryNotFoundError` for unknown delivery IDs and clear stale retry data on successful delivery.
+- Due polling excludes delivered, exhausted, and future retry rows and clamps caller limits to 200.
+- No schema migration was required because the Phase 1 schema already defines delivery columns and tuple uniqueness.
 
-No known concerns.
+## Concerns
+
+None identified. The task brief listed `hub/conversations/types.ts`, but the required `Delivery`, `DeliveryState`, and `TransportLink` domain types already existed unchanged from Phase 1; only repository interfaces and implementation required extension.

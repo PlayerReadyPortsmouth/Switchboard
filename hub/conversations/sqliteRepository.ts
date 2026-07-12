@@ -1,13 +1,15 @@
 import type { Database } from "bun:sqlite"
+import { randomUUID } from "node:crypto"
 import { runConversationMigrations } from "./migrations"
 import { RepositoryConflictError, RepositoryNotFoundError, type AppendMessageResult, type ConversationRepository } from "./repository"
-import type { AppendMessageInput, Conversation, Message, NewConversation, Participant, TransportLink } from "./types"
+import type { AppendMessageInput, Conversation, Delivery, Message, NewConversation, Participant, TransportLink } from "./types"
 
 type Row = Record<string, unknown>
 const conversation = (r: Row): Conversation => ({ id: r.id as string, title: r.title as string, primaryAgent: r.primary_agent as string, createdBy: r.created_by as string, createdAt: r.created_at as number, updatedAt: r.updated_at as number, archivedAt: r.archived_at as number | null })
 const participant = (r: Row): Participant => ({ conversationId: r.conversation_id as string, identity: r.identity as string, kind: r.kind as Participant["kind"], role: r.role as Participant["role"], createdAt: r.created_at as number })
 const message = (r: Row): Message => ({ id: r.id as string, conversationId: r.conversation_id as string, sequence: r.sequence as number, author: r.author as string, origin: r.origin as Message["origin"], content: r.content as string, replyTo: r.reply_to as string | null, state: r.state as Message["state"], clientKey: r.client_key as string | null, createdAt: r.created_at as number })
 const link = (r: Row): TransportLink => ({ id: r.id as string, conversationId: r.conversation_id as string, adapter: r.adapter as string, externalLocationId: r.external_location_id as string, label: r.label as string | null, syncMode: r.sync_mode as TransportLink["syncMode"], enabled: Boolean(r.enabled), createdAt: r.created_at as number, updatedAt: r.updated_at as number })
+const delivery = (r: Row): Delivery => ({ id: r.id as string, messageId: r.message_id as string, linkId: r.link_id as string, eventKind: r.event_kind as string, state: r.state as Delivery["state"], attempts: r.attempts as number, nextAttemptAt: r.next_attempt_at as number | null, externalMessageId: r.external_message_id as string | null, error: r.error as string | null, createdAt: r.created_at as number, updatedAt: r.updated_at as number })
 
 export class SqliteConversationRepository implements ConversationRepository {
   constructor(private readonly db: Database) { runConversationMigrations(db) }
@@ -68,6 +70,50 @@ export class SqliteConversationRepository implements ConversationRepository {
     return this.listTransportLinks(input.conversationId).find(({ id }) => id === input.id)!
   }
   listTransportLinks(conversationId: string): TransportLink[] { return this.db.query<Row, [string]>("SELECT * FROM transport_links WHERE conversation_id=? ORDER BY created_at,id").all(conversationId).map(link) }
+  resolveTransportLink(adapter: string, externalLocationId: string): TransportLink | null {
+    const row = this.db.query<Row, [string, string]>("SELECT * FROM transport_links WHERE adapter=? AND external_location_id=?").get(adapter, externalLocationId)
+    return row ? link(row) : null
+  }
+  appendAgentMessage(input: AppendMessageInput, links: TransportLink[], now: number): { message: Message; deliveries: Delivery[]; inserted: boolean } {
+    return this.db.transaction(() => {
+      const saved = this.appendWithinTransaction(input)
+      return { ...saved, deliveries: this.createDeliveriesWithinTransaction(saved.message.id, links, "message", now) }
+    }).immediate()
+  }
+  createDeliveries(messageId: string, links: TransportLink[], eventKind: string, now: number): Delivery[] {
+    return this.db.transaction(() => this.createDeliveriesWithinTransaction(messageId, links, eventKind, now)).immediate()
+  }
+  private createDeliveriesWithinTransaction(messageId: string, links: TransportLink[], eventKind: string, now: number): Delivery[] {
+    const results: Delivery[] = []
+    const seen = new Set<string>()
+    for (const transportLink of links) {
+      if (seen.has(transportLink.id)) continue
+      seen.add(transportLink.id)
+      this.db.query("INSERT OR IGNORE INTO deliveries(id,message_id,link_id,event_kind,state,attempts,next_attempt_at,external_message_id,error,created_at,updated_at) VALUES (?,?,?,?, 'pending',0,NULL,NULL,NULL,?,?)").run(randomUUID(), messageId, transportLink.id, eventKind, now, now)
+      const row = this.db.query<Row, [string, string, string]>("SELECT * FROM deliveries WHERE message_id=? AND link_id=? AND event_kind=?").get(messageId, transportLink.id, eventKind)
+      if (!row) throw new RepositoryConflictError(`Could not create delivery for link ${transportLink.id}`)
+      results.push(delivery(row))
+    }
+    return results
+  }
+  markDeliveryDelivered(id: string, externalMessageId: string | null, now: number): Delivery {
+    const result = this.db.query("UPDATE deliveries SET state='delivered', external_message_id=?, error=NULL, next_attempt_at=NULL, updated_at=? WHERE id=?").run(externalMessageId, now, id)
+    if (!result.changes) throw new RepositoryNotFoundError(`Delivery ${id} not found`)
+    return this.getDelivery(id)!
+  }
+  markDeliveryRetry(id: string, error: string, nextAttemptAt: number | null, exhausted: boolean, now: number): Delivery {
+    const result = this.db.query("UPDATE deliveries SET state=?, attempts=attempts+1, next_attempt_at=?, error=?, updated_at=? WHERE id=?").run(exhausted ? "exhausted" : "retry_wait", exhausted ? null : nextAttemptAt, error.slice(0, 500), now, id)
+    if (!result.changes) throw new RepositoryNotFoundError(`Delivery ${id} not found`)
+    return this.getDelivery(id)!
+  }
+  listDueDeliveries(now: number, limit = 200): Delivery[] {
+    const boundedLimit = Math.min(200, Math.max(0, Math.trunc(limit)))
+    return this.db.query<Row, [number, number]>("SELECT * FROM deliveries WHERE state='pending' OR (state='retry_wait' AND next_attempt_at<=?) ORDER BY COALESCE(next_attempt_at,created_at),created_at,id LIMIT ?").all(now, boundedLimit).map(delivery)
+  }
+  private getDelivery(id: string): Delivery | null {
+    const row = this.db.query<Row, [string]>("SELECT * FROM deliveries WHERE id=?").get(id)
+    return row ? delivery(row) : null
+  }
   recordExternalMessage(adapter: string, externalEventId: string, input: AppendMessageInput): Message {
     return this.db.transaction(() => {
       const receipt = this.db.query<{ message_id: string }, [string,string]>("SELECT message_id FROM external_event_receipts WHERE adapter=? AND external_event_id=?").get(adapter, externalEventId)

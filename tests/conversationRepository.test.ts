@@ -99,6 +99,84 @@ test("rejects duplicate external transport locations", () => {
   expect(() => repo.createTransportLink({ ...link, id: "l2", conversationId: "c2" }, 13)).toThrow(RepositoryConflictError)
 })
 
+test("resolves a transport link by adapter and external location", () => {
+  const repo = makeRepo()
+  repo.createConversation({ id: "c1", title: "Links", primaryAgent: "architect", createdBy: "owner", createdAt: 10 })
+  const saved = repo.createTransportLink({ id: "l1", conversationId: "c1", adapter: "discord", externalLocationId: "room", label: null, syncMode: "two_way", enabled: true }, 11)
+  expect(repo.resolveTransportLink("discord", "room")).toEqual(saved)
+  expect(repo.resolveTransportLink("discord", "missing")).toBeNull()
+})
+
+test("atomically appends an agent message and its unique deliveries", () => {
+  const repo = makeRepo()
+  repo.createConversation({ id: "c1", title: "Agent", primaryAgent: "architect", createdBy: "owner", createdAt: 10 })
+  const links = ["l1", "l2"].map((id, index) => repo.createTransportLink({ id, conversationId: "c1", adapter: `adapter-${id}`, externalLocationId: `room-${id}`, label: null, syncMode: "two_way", enabled: true }, 11 + index))
+  const input = { id: "m1", conversationId: "c1", author: "architect", origin: "agent" as const, content: "answer", clientKey: "agent-turn-1", createdAt: 20 }
+
+  const first = repo.appendAgentMessage(input, links, 21)
+  const duplicate = repo.appendAgentMessage({ ...input, id: "m2", createdAt: 22 }, links, 23)
+
+  expect(first.inserted).toBe(true)
+  expect(first.deliveries.map(({ linkId }) => linkId)).toEqual(["l1", "l2"])
+  expect(first.deliveries.every(({ eventKind, state, attempts }) => eventKind === "message" && state === "pending" && attempts === 0)).toBe(true)
+  expect(duplicate.inserted).toBe(false)
+  expect(duplicate.message.id).toBe("m1")
+  expect(duplicate.deliveries.map(({ id }) => ({ id }))).toEqual(first.deliveries.map(({ id }) => ({ id })))
+})
+
+test("rolls back an agent message when delivery creation fails", () => {
+  const repo = makeRepo()
+  repo.createConversation({ id: "c1", title: "Agent", primaryAgent: "architect", createdBy: "owner", createdAt: 10 })
+  const missingLink = { id: "missing", conversationId: "c1", adapter: "discord", externalLocationId: "room", label: null, syncMode: "two_way" as const, enabled: true, createdAt: 11, updatedAt: 11 }
+  expect(() => repo.appendAgentMessage({ id: "m1", conversationId: "c1", author: "architect", origin: "agent", content: "answer", createdAt: 20 }, [missingLink], 21)).toThrow()
+  expect(repo.getMessage("m1")).toBeNull()
+})
+
+test("creates each delivery tuple once", () => {
+  const repo = makeRepo()
+  repo.createConversation({ id: "c1", title: "Delivery", primaryAgent: "architect", createdBy: "owner", createdAt: 10 })
+  const link = repo.createTransportLink({ id: "l1", conversationId: "c1", adapter: "discord", externalLocationId: "room", label: null, syncMode: "two_way", enabled: true }, 11)
+  repo.appendMessage({ id: "m1", conversationId: "c1", author: "owner", origin: "web", content: "hello", createdAt: 12 })
+  const first = repo.createDeliveries("m1", [link, link], "message", 13)
+  const duplicate = repo.createDeliveries("m1", [link], "message", 14)
+  expect(first).toHaveLength(1)
+  expect(duplicate).toEqual(first)
+})
+
+test("persists delivered and retry state transitions", () => {
+  const repo = makeRepo()
+  repo.createConversation({ id: "c1", title: "Delivery", primaryAgent: "architect", createdBy: "owner", createdAt: 10 })
+  const link = repo.createTransportLink({ id: "l1", conversationId: "c1", adapter: "discord", externalLocationId: "room", label: null, syncMode: "two_way", enabled: true }, 11)
+  repo.appendMessage({ id: "m1", conversationId: "c1", author: "owner", origin: "web", content: "hello", createdAt: 12 })
+  const retry = repo.markDeliveryRetry(repo.createDeliveries("m1", [link], "message", 13)[0]!.id, "x".repeat(600), 30, false, 14)
+  expect({ state: retry.state, attempts: retry.attempts, nextAttemptAt: retry.nextAttemptAt, errorLength: retry.error?.length }).toEqual({ state: "retry_wait", attempts: 1, nextAttemptAt: 30, errorLength: 500 })
+  const delivered = repo.markDeliveryDelivered(retry.id, "external-1", 31)
+  expect({ state: delivered.state, externalMessageId: delivered.externalMessageId, error: delivered.error, nextAttemptAt: delivered.nextAttemptAt }).toEqual({ state: "delivered", externalMessageId: "external-1", error: null, nextAttemptAt: null })
+})
+
+test("marks retries exhausted and lists only due deliveries in deterministic order", () => {
+  const repo = makeRepo()
+  repo.createConversation({ id: "c1", title: "Delivery", primaryAgent: "architect", createdBy: "owner", createdAt: 10 })
+  const links = Array.from({ length: 4 }, (_, index) => repo.createTransportLink({ id: `l${index}`, conversationId: "c1", adapter: `a${index}`, externalLocationId: `room${index}`, label: null, syncMode: "two_way", enabled: true }, 11 + index))
+  repo.appendMessage({ id: "m1", conversationId: "c1", author: "owner", origin: "web", content: "hello", createdAt: 20 })
+  const deliveries = repo.createDeliveries("m1", links, "message", 20)
+  repo.markDeliveryRetry(deliveries[0]!.id, "later", 40, false, 21)
+  repo.markDeliveryRetry(deliveries[1]!.id, "due", 25, false, 22)
+  const exhausted = repo.markDeliveryRetry(deliveries[2]!.id, "dead", null, true, 23)
+  expect({ state: exhausted.state, attempts: exhausted.attempts, nextAttemptAt: exhausted.nextAttemptAt }).toEqual({ state: "exhausted", attempts: 1, nextAttemptAt: null })
+  expect(repo.listDueDeliveries(30).map(({ id }) => id)).toEqual([deliveries[3]!.id, deliveries[1]!.id])
+  expect(repo.listDueDeliveries(50, 1).map(({ id }) => id)).toEqual([deliveries[3]!.id])
+})
+
+test("caps due-delivery batches at 200", () => {
+  const repo = makeRepo()
+  repo.createConversation({ id: "c1", title: "Delivery", primaryAgent: "architect", createdBy: "owner", createdAt: 10 })
+  repo.appendMessage({ id: "m1", conversationId: "c1", author: "owner", origin: "web", content: "hello", createdAt: 20 })
+  const links = Array.from({ length: 201 }, (_, index) => repo.createTransportLink({ id: `l${index}`, conversationId: "c1", adapter: `a${index}`, externalLocationId: `room${index}`, label: null, syncMode: "two_way", enabled: true }, 21 + index))
+  repo.createDeliveries("m1", links, "message", 30)
+  expect(repo.listDueDeliveries(30, 500)).toHaveLength(200)
+})
+
 test("rejects foreign-key violations", () => {
   const repo = makeRepo()
   expect(() => repo.addParticipant({ conversationId: "missing", identity: "user", kind: "user", role: "member", createdAt: 1 })).toThrow()
