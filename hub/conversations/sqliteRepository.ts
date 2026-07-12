@@ -13,9 +13,12 @@ export class SqliteConversationRepository implements ConversationRepository {
   constructor(private readonly db: Database) { runConversationMigrations(db) }
 
   createConversation(input: NewConversation): Conversation {
+    return this.createConversationWithOwner(input, { conversationId: input.id, identity: input.createdBy, kind: "user", role: "owner", createdAt: input.createdAt })
+  }
+  createConversationWithOwner(input: NewConversation, owner: Participant): Conversation {
     this.db.transaction(() => {
       this.db.query("INSERT INTO conversations(id,title,primary_agent,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?)").run(input.id, input.title, input.primaryAgent, input.createdBy, input.createdAt, input.createdAt)
-      this.db.query("INSERT INTO participants(conversation_id,identity,kind,role,created_at) VALUES (?,?,?,?,?)").run(input.id, input.createdBy, "user", "owner", input.createdAt)
+      this.db.query("INSERT INTO participants(conversation_id,identity,kind,role,created_at) VALUES (?,?,?,?,?)").run(owner.conversationId, owner.identity, owner.kind, owner.role, owner.createdAt)
     })()
     return this.getConversation(input.id)!
   }

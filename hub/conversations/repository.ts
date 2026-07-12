@@ -10,6 +10,7 @@ export class RepositoryNotFoundError extends Error {
 
 export interface ConversationRepository {
   createConversation(input: NewConversation): Conversation
+  createConversationWithOwner(input: NewConversation, owner: Participant): Conversation
   getConversation(id: string): Conversation | null
   listConversations(identity: string, includeArchived?: boolean): Conversation[]
   archiveConversation(id: string, archivedAt: number): Conversation
