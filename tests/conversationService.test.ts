@@ -3,6 +3,7 @@ import { expect, test } from "bun:test"
 import { ConversationForbiddenError, ConversationService, ConversationValidationError } from "../hub/conversations/service"
 import { ConversationEventStream } from "../hub/conversations/events"
 import { SqliteConversationRepository } from "../hub/conversations/sqliteRepository"
+import { RepositoryNotFoundError } from "../hub/conversations/repository"
 
 const fixture = () => {
   const repo = new SqliteConversationRepository(new Database(":memory:"))
@@ -18,7 +19,7 @@ test("owner can write and viewer can only read", () => {
   repo.addParticipant({ conversationId: c.id, identity: "viewer@example.com", kind: "user", role: "viewer", createdAt: 2 })
   expect(service.history("viewer@example.com", c.id)).toEqual([])
   expect(() => service.appendUserMessage("viewer@example.com", c.id, { content: "no", clientKey: "v1" })).toThrow(ConversationForbiddenError)
-  expect(service.appendUserMessage("owner@example.com", c.id, { content: "yes", clientKey: "o1" }).sequence).toBe(1)
+  expect(service.appendUserMessage("owner@example.com", c.id, { content: "yes", clientKey: "o1" }).message.sequence).toBe(1)
 })
 
 test("supports lifecycle access rules and rejects writes after archive", () => {
@@ -28,9 +29,9 @@ test("supports lifecycle access rules and rejects writes after archive", () => {
   expect(c.title).toBe("Plan")
   expect(service.get("member", c.id).id).toBe(c.id)
   expect(service.list("member").map(({ id }) => id)).toEqual([c.id])
-  expect(service.appendUserMessage("member", c.id, { content: "hello", clientKey: "m1" }).author).toBe("member")
+  expect(service.appendUserMessage("member", c.id, { content: "hello", clientKey: "m1" }).message.author).toBe("member")
   expect(() => service.get("stranger", c.id)).toThrow(ConversationForbiddenError)
-  expect(() => service.get("owner", "missing")).toThrow(ConversationValidationError)
+  expect(() => service.get("owner", "missing")).toThrow(RepositoryNotFoundError)
   expect(() => service.archive("member", c.id)).toThrow(ConversationForbiddenError)
   expect(service.archive("owner", c.id).archivedAt).not.toBeNull()
   expect(() => service.appendUserMessage("member", c.id, { content: "late", clientKey: "m2" })).toThrow(ConversationValidationError)
@@ -66,10 +67,13 @@ test("a duplicate client key emits one committed event", () => {
   const seen: number[] = []
   stream.subscribe(conversation.id, 0, (event) => seen.push(event.sequence))
 
-  service.appendUserMessage("owner", conversation.id, { content: "hello", clientKey: "same" })
-  service.appendUserMessage("owner", conversation.id, { content: "hello", clientKey: "same" })
+  const first = service.appendUserMessage("owner", conversation.id, { content: "hello", clientKey: "same" })
+  const duplicate = service.appendUserMessage("owner", conversation.id, { content: "hello", clientKey: "same" })
 
   expect(seen).toEqual([1])
+  expect(first.inserted).toBe(true)
+  expect(duplicate.inserted).toBe(false)
+  expect(duplicate.message.id).toBe(first.message.id)
 })
 
 test("a throwing event subscriber does not make a persisted append appear failed", () => {

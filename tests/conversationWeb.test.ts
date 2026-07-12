@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test"
 import { handleWebRequest, type WebDeps } from "../hub/webServer"
 import { ConversationForbiddenError, ConversationValidationError } from "../hub/conversations/service"
+import { RepositoryConflictError, RepositoryNotFoundError } from "../hub/conversations/repository"
 import type { ConversationEvent } from "../hub/conversations/events"
 import type { Conversation, Message, TransportLink } from "../hub/conversations/types"
 
@@ -13,7 +14,7 @@ function deps(overrides: Partial<WebDeps> = {}): WebDeps {
     collect: () => ({ now: 1, startedAt: 0, status: { now: 1, agents: [], overseers: [], routes: [], routeRate10m: 0, ephemerals: [] }, audit: { total: 0, byKind: {}, byOutcome: {}, costUsd: 0, actors: 0 }, recent: [], pendingApprovals: 0, pendingApprovalList: [] }),
     requireUser: req => req.headers.get("x-switchboard-user"), resolveApproval: async () => "not_found", listChannels: () => [], fetchChannelHistory: async () => [], fetchChannelTimeline: async () => [], subscribeChannel: () => () => {}, sendChannelMessage: async () => {}, runCommand: async () => null, listAgents: async () => ({}), previewAgentChange: async () => ({ error: "unused" }), confirmAgentChange: async () => ({ state: "not_found", restarted: [], fullRestart: [] }), listHubConfig: async () => ({}), previewHubConfigChange: async () => ({ error: "unused" }), confirmHubConfigChange: async () => ({ state: "not_found", fullRestart: [] }),
     createConversation: () => conversation, listConversations: () => [conversation], getConversation: () => conversation, archiveConversation: () => conversation,
-    appendConversationMessage: () => message, listConversationMessages: () => [message], addConversationLink: () => link, listConversationLinks: () => [link], subscribeConversation: () => () => {},
+    appendConversationMessage: () => ({ message, inserted: true }), listConversationMessages: () => [message], addConversationLink: () => link, listConversationLinks: () => [link], subscribeConversation: () => () => {},
     ...overrides,
   }
 }
@@ -27,6 +28,14 @@ test("conversation routes require identity and create a conversation", async () 
   expect((await created.json()).title).toBe("Design")
 })
 
+test("conversation routes fail closed when Task 6 dependencies are not injected", async () => {
+  const incomplete = deps()
+  delete incomplete.listConversations
+  const response = await handleWebRequest(req("/api/conversations"), incomplete)
+  expect(response.status).toBe(503)
+  expect(await response.json()).toEqual({ error: "conversation_service_unavailable" })
+})
+
 test("conversation collection and item routes dispatch decoded IDs", async () => {
   const seen: string[] = []
   const d = deps({ getConversation: (_user, id) => { seen.push(id); return conversation }, archiveConversation: (_user, id) => { seen.push(id); return conversation } })
@@ -38,12 +47,25 @@ test("conversation collection and item routes dispatch decoded IDs", async () =>
 })
 
 test("posting the same Idempotency-Key returns 201 then 200 with the same message", async () => {
-  const d = deps()
+  let firstCall = true
+  const append = () => ({ message, inserted: firstCall ? (firstCall = false, true) : false })
   const headers = { "idempotency-key": "key-1" }
-  const first = await handleWebRequest(req("/api/conversations/c%2F1/messages", "POST", { content: "hello" }, headers), d)
-  const duplicate = await handleWebRequest(req("/api/conversations/c%2F1/messages", "POST", { content: "hello" }, headers), d)
+  const first = await handleWebRequest(req("/api/conversations/c%2F1/messages", "POST", { content: "hello" }, headers), deps({ appendConversationMessage: append }))
+  const duplicate = await handleWebRequest(req("/api/conversations/c%2F1/messages", "POST", { content: "hello" }, headers), deps({ appendConversationMessage: append }))
   expect(first.status).toBe(201); expect(duplicate.status).toBe(200)
   expect((await first.json()).id).toBe((await duplicate.json()).id)
+})
+
+test("concurrent idempotent requests use durable insertion results", async () => {
+  let calls = 0
+  const append = () => ({ message, inserted: calls++ === 0 })
+  const headers = { "idempotency-key": "key-1" }
+  const [left, right] = await Promise.all([
+    handleWebRequest(req("/api/conversations/c1/messages", "POST", { content: "hello" }, headers), deps({ appendConversationMessage: append })),
+    handleWebRequest(req("/api/conversations/c1/messages", "POST", { content: "hello" }, headers), deps({ appendConversationMessage: append })),
+  ])
+  expect([left.status, right.status].sort()).toEqual([200, 201])
+  expect((await left.json()).id).toBe((await right.json()).id)
 })
 
 test("message and link reads and creates use documented statuses", async () => {
@@ -57,14 +79,47 @@ test("conversation errors map to transport statuses", async () => {
   expect((await handleWebRequest(req("/api/conversations", "POST", undefined), deps())).status).toBe(400)
   expect((await handleWebRequest(req("/api/conversations/c1"), deps({ getConversation: () => { throw new ConversationForbiddenError("no") } }))).status).toBe(403)
   expect((await handleWebRequest(req("/api/conversations", "POST", {}), deps({ createConversation: () => { throw new ConversationValidationError("bad") } }))).status).toBe(400)
+  expect((await handleWebRequest(req("/api/conversations/missing"), deps({ getConversation: () => { throw new RepositoryNotFoundError("missing") } }))).status).toBe(404)
+  expect((await handleWebRequest(req("/api/conversations/c1/links", "POST", { adapter: "discord", externalLocationId: "room" }), deps({ addConversationLink: () => { throw new RepositoryConflictError("duplicate") } }))).status).toBe(409)
 })
 
 test("events validate cursor, accept Last-Event-ID, and emit resumable SSE IDs", async () => {
   expect((await handleWebRequest(req("/api/conversations/c1/events?after=bad"), deps())).status).toBe(400)
   let after = -1
   const event: ConversationEvent = { kind: "activity", conversationId: "c1", sequence: 7, ts: 2, detail: { working: true } }
-  const response = await handleWebRequest(req("/api/conversations/c1/events", "GET", undefined, { "last-event-id": "6" }), deps({ subscribeConversation: (_id, cursor, cb) => { after = cursor; cb(event); return () => {} } }))
+  let unsubscribed = false
+  const response = await handleWebRequest(req("/api/conversations/c1/events", "GET", undefined, { "last-event-id": "6" }), deps({ subscribeConversation: (identity, _id, cursor, cb) => { expect(identity).toBe("owner@example.com"); after = cursor; cb(event); return () => { unsubscribed = true } } }))
   expect(after).toBe(6); expect(response.status).toBe(200)
-  const { value } = await response.body!.getReader().read()
+  const reader = response.body!.getReader()
+  const { value } = await reader.read()
   expect(new TextDecoder().decode(value)).toBe(`id: 7\ndata: ${JSON.stringify(event)}\n\n`)
+  await reader.cancel()
+  expect(unsubscribed).toBe(true)
+})
+
+test("event authorization rejects non-members", async () => {
+  const response = await handleWebRequest(req("/api/conversations/c1/events"), deps({ subscribeConversation: () => { throw new ConversationForbiddenError("no") } }))
+  expect(response.status).toBe(403)
+})
+
+test("query after takes precedence over Last-Event-ID", async () => {
+  let after = -1
+  const response = await handleWebRequest(req("/api/conversations/c1/events?after=2", "GET", undefined, { "last-event-id": "bad" }), deps({ subscribeConversation: (_identity, _id, cursor) => { after = cursor; return () => {} } }))
+  expect(response.status).toBe(200)
+  expect(after).toBe(2)
+  await response.body!.cancel()
+})
+
+test("guarded wrong methods authenticate first and malformed IDs return 400", async () => {
+  expect((await handleWebRequest(new Request("http://x/api/conversations", { method: "PATCH" }), deps())).status).toBe(400)
+  expect((await handleWebRequest(req("/api/conversations/%E0%A4%A"), deps())).status).toBe(400)
+})
+
+test("conversation query and link option shapes are validated", async () => {
+  expect((await handleWebRequest(req("/api/conversations?includeArchived=yes"), deps())).status).toBe(400)
+  for (const input of [
+    { adapter: "discord", externalLocationId: "room", syncMode: "invalid" },
+    { adapter: "discord", externalLocationId: "room", label: 3 },
+    { adapter: "discord", externalLocationId: "room", enabled: "yes" },
+  ]) expect((await handleWebRequest(req("/api/conversations/c1/links", "POST", input), deps())).status).toBe(400)
 })

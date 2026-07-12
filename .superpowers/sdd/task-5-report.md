@@ -36,9 +36,36 @@ Final verification:
 - Cursor parsing accepts only safe, non-negative decimal integers; query `after` takes precedence over `Last-Event-ID`.
 - SSE cancellation invokes the injected unsubscribe function.
 - Existing channel SSE framing remains unchanged.
-- Successful idempotency entries are recorded only after the injected append returns, so failed attempts do not poison retries.
+- The initial process-local idempotency implementation described below was superseded by the durable review follow-up.
 
 ## Concerns
 
 - The existing production `WebDeps` composition does not yet construct the conversation repository/service. Conversation dependency members remain optional for staged compatibility and must be injected before these routes are served in production; this task tests the required injected composition directly.
-- Duplicate HTTP status memory is process-local. Repository idempotency remains durable and canonical, but the first retry after an HTTP process restart can report 201 because the service method intentionally returns only the domain `Message`, not the repository insertion flag.
+- Production construction remains intentionally deferred to Task 6; until then authenticated conversation actions fail closed with 503.
+
+## Review follow-up: authorization, durable idempotency, and validation
+
+- Made `subscribeConversation` identity-aware; the trusted authenticated email now crosses the dependency boundary before subscription, and non-members map to 403.
+- Carried repository `AppendMessageResult` through `ConversationService` and `WebDeps`. HTTP status now comes from durable `inserted`, eliminating process-local classification and correctly handling fresh dependency objects and concurrent requests.
+- Changed normal missing-conversation service paths to throw `RepositoryNotFoundError`, preserving validation errors for malformed operations and enabling HTTP 404 mapping.
+- Added focused coverage for repository conflict 409, validation 400, unauthenticated wrong methods, malformed percent encoding, query-cursor precedence, SSE cancellation, non-member SSE, malformed `includeArchived`, and malformed link options.
+- Conversation routes return a controlled 503 while Task 6's production service dependencies are absent, instead of throwing a `TypeError`. Task 6 still owns `hub/index.ts` construction and wiring.
+
+Review RED evidence:
+
+`bun test tests/conversationWeb.test.ts tests/conversationService.test.ts`
+
+Result: 9 pass, 7 fail, 43 expect() calls. Failures reproduced the discarded insertion result, identity-less SSE boundary, unvalidated query/link options, and wrong missing-conversation error type.
+
+Missing-dependency RED evidence:
+
+`bun test tests/conversationWeb.test.ts`
+
+Result: 11 pass, 1 fail, 36 expect() calls. The absent Task 6 dependency reproduced the accidental `TypeError`.
+
+Review final verification:
+
+- `bun test tests/conversationWeb.test.ts tests/conversationService.test.ts tests/conversationRepository.test.ts tests/webServer.test.ts tests/web.test.ts` — 60 pass, 0 fail, 161 expect() calls.
+- `bun test` — 726 pass, 0 fail, 1739 expect() calls.
+- `bun run typecheck` — exit 0.
+- `git diff --check` — exit 0 (Git emitted only configured LF-to-CRLF working-copy warnings).

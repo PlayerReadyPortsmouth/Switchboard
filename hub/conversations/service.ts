@@ -1,4 +1,4 @@
-import { RepositoryConflictError, type ConversationRepository } from "./repository"
+import { RepositoryConflictError, RepositoryNotFoundError, type AppendMessageResult, type ConversationRepository } from "./repository"
 import type { Conversation, Message, SyncMode, TransportLink } from "./types"
 import type { ConversationEventStream } from "./events"
 
@@ -50,7 +50,7 @@ export class ConversationService {
     return this.repo.archiveConversation(conversationId, this.now())
   }
 
-  appendUserMessage(identity: string, conversationId: string, input: UserMessageInput): Message {
+  appendUserMessage(identity: string, conversationId: string, input: UserMessageInput): AppendMessageResult {
     if (!input.content.trim()) throw new ConversationValidationError("Message content is required")
     if (!input.clientKey?.trim()) throw new ConversationValidationError("Client key is required")
     this.requireRole(identity, conversationId, ["owner", "member"])
@@ -59,7 +59,7 @@ export class ConversationService {
       if (result.inserted) {
         this.events?.publish({ kind: "message_committed", conversationId, sequence: result.message.sequence, ts: result.message.createdAt, message: result.message })
       }
-      return result.message
+      return result
     } catch (error) {
       if (error instanceof RepositoryConflictError) throw new ConversationValidationError(error.message)
       throw error
@@ -83,7 +83,7 @@ export class ConversationService {
 
   private requireConversation(conversationId: string): Conversation {
     const conversation = this.repo.getConversation(conversationId)
-    if (!conversation) throw new ConversationValidationError(`Conversation ${conversationId} not found`)
+    if (!conversation) throw new RepositoryNotFoundError(`Conversation ${conversationId} not found`)
     return conversation
   }
 
