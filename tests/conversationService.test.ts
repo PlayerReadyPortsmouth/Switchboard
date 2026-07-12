@@ -71,3 +71,15 @@ test("a duplicate client key emits one committed event", () => {
 
   expect(seen).toEqual([1])
 })
+
+test("a throwing event subscriber does not make a persisted append appear failed", () => {
+  const repo = new SqliteConversationRepository(new Database(":memory:"))
+  const stream = new ConversationEventStream((conversationId, after) => repo.listMessages(conversationId, after))
+  let identifier = 0
+  const service = new ConversationService(repo, () => 10, () => `id-${++identifier}`, stream)
+  const conversation = service.create("owner", { title: "Events", primaryAgent: "architect" })
+  stream.subscribe(conversation.id, 0, () => { throw new Error("subscriber failed") })
+
+  expect(() => service.appendUserMessage("owner", conversation.id, { content: "hello", clientKey: "key" })).not.toThrow()
+  expect(repo.listMessages(conversation.id).map(({ content }) => content)).toEqual(["hello"])
+})

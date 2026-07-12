@@ -36,3 +36,29 @@ test("subscribe suppresses a live event already covered by replay", () => {
   stream.subscribe("c1", 1, (event) => seen.push(event.sequence))
   expect(seen).toEqual([2])
 })
+
+test("reentrant publish preserves sequence order for every subscriber", () => {
+  const stream = new ConversationEventStream(() => [])
+  const seenA: number[] = []
+  const seenB: number[] = []
+  stream.subscribe("c1", 0, (event) => {
+    seenA.push(event.sequence)
+    if (event.sequence === 1) stream.publish({ kind: "activity", conversationId: "c1", sequence: 2, ts: 20 })
+  })
+  stream.subscribe("c1", 0, (event) => seenB.push(event.sequence))
+
+  stream.publish({ kind: "activity", conversationId: "c1", sequence: 1, ts: 10 })
+
+  expect(seenA).toEqual([1, 2])
+  expect(seenB).toEqual([1, 2])
+})
+
+test("a throwing subscriber does not escape publish or starve another subscriber", () => {
+  const stream = new ConversationEventStream(() => [])
+  const seen: number[] = []
+  stream.subscribe("c1", 0, () => { throw new Error("subscriber failed") })
+  stream.subscribe("c1", 0, (event) => seen.push(event.sequence))
+
+  expect(() => stream.publish({ kind: "activity", conversationId: "c1", sequence: 1, ts: 10 })).not.toThrow()
+  expect(seen).toEqual([1])
+})

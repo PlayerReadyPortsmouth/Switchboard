@@ -39,3 +39,21 @@ Final verification:
 ## Concerns
 
 - The history callback is synchronous by design, matching the current synchronous repository. A future asynchronous repository would require an async subscription/replay contract.
+
+## Review follow-up: reentrant delivery and callback isolation
+
+- Added a per-conversation publication queue and drain. A recursive publish is queued until the current event has reached every subscriber, preserving monotonic delivery for all subscribers.
+- Isolated callback exceptions inside delivery so they cannot escape `publish`, starve later subscribers, or make an already-persisted service append appear failed.
+- Added focused regressions for two-subscriber recursive publication, throwing-subscriber fan-out, and service persistence with a throwing subscriber.
+
+RED:
+
+`bun test tests/conversationEvents.test.ts tests/conversationService.test.ts`
+
+Result: 7 pass, 3 fail, 27 expect() calls. The failures reproduced subscriber B receiving only sequence 2 and callback exceptions escaping both stream publication and service append.
+
+GREEN / final verification:
+
+- `bun test tests/conversationEvents.test.ts tests/conversationService.test.ts tests/conversationRepository.test.ts` — 19 pass, 0 fail, 51 expect() calls.
+- `bun run typecheck` — exit 0.
+- `git diff --check` — exit 0 (Git emitted only configured LF-to-CRLF working-copy warnings).

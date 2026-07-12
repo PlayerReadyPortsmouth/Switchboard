@@ -17,17 +17,33 @@ type Subscription = {
   replaying: boolean
   pending: ConversationEvent[]
 }
+type ConversationQueue = { events: ConversationEvent[]; draining: boolean }
 
 export class ConversationEventStream {
   private readonly subscriptions = new Map<string, Set<Subscription>>()
+  private readonly queues = new Map<string, ConversationQueue>()
 
   constructor(private readonly history: (conversationId: string, afterSequence: number) => Message[]) {}
 
   publish(event: ConversationEvent): void {
-    for (const subscription of this.subscriptions.get(event.conversationId) ?? []) {
-      if (event.sequence <= subscription.highWaterMark) continue
-      if (subscription.replaying) subscription.pending.push(event)
-      else this.deliver(subscription, event)
+    const queue = this.queues.get(event.conversationId) ?? { events: [], draining: false }
+    queue.events.push(event)
+    this.queues.set(event.conversationId, queue)
+    if (queue.draining) return
+
+    queue.draining = true
+    try {
+      while (queue.events.length) {
+        const next = queue.events.shift()!
+        for (const subscription of this.subscriptions.get(next.conversationId) ?? []) {
+          if (next.sequence <= subscription.highWaterMark) continue
+          if (subscription.replaying) subscription.pending.push(next)
+          else this.deliver(subscription, next)
+        }
+      }
+    } finally {
+      queue.draining = false
+      if (!queue.events.length) this.queues.delete(event.conversationId)
     }
   }
 
@@ -63,6 +79,10 @@ export class ConversationEventStream {
   private deliver(subscription: Subscription, event: ConversationEvent): void {
     if (event.sequence <= subscription.highWaterMark) return
     subscription.highWaterMark = event.sequence
-    subscription.callback(event)
+    try {
+      subscription.callback(event)
+    } catch {
+      // Subscriber failures must not interrupt persistence callers or other subscribers.
+    }
   }
 }
