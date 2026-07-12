@@ -40,3 +40,25 @@ Implemented the canonical SQLite repository operations for transport-link resolu
 ## Concerns
 
 None identified. The task brief listed `hub/conversations/types.ts`, but the required `Delivery`, `DeliveryState`, and `TransportLink` domain types already existed unchanged from Phase 1; only repository interfaces and implementation required extension.
+
+## Review follow-up
+
+Addressed the repository integrity review findings:
+
+- Delivery creation now resolves the canonical message conversation and validates every persisted link belongs to it inside the same immediate transaction. Missing or cross-conversation links raise `RepositoryConflictError`; agent message insertion is rolled back.
+- Non-exhausted retries now require a non-null `nextAttemptAt`.
+- Delivered and exhausted rows are terminal. Delivery outcome updates are guarded to `pending`/`retry_wait`, returning `RepositoryConflictError` instead of reopening terminal rows.
+
+### Follow-up TDD and verification evidence
+
+- RED: `bun test tests/conversationRepository.test.ts`
+  - Result: exit 1; 18 passed, 3 failed.
+  - Expected failures reproduced cross-conversation delivery acceptance, null retry scheduling, and reopening a delivered row.
+- GREEN: `bun test tests/conversationRepository.test.ts`
+  - Result: exit 0; 21 passed, 0 failed, 57 assertions.
+- Focused final: `bun test tests/conversationMigrations.test.ts tests/conversationRepository.test.ts`
+  - Result: exit 0; 23 passed, 0 failed, 65 assertions.
+- Type verification: `bun run typecheck`
+  - Result: exit 0 (`tsc --noEmit`).
+- Full regression suite: `bun test`
+  - Result: exit 0; 752 passed, 0 failed, 1821 assertions across 104 files.

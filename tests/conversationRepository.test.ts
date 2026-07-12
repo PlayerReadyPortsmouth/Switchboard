@@ -132,6 +132,18 @@ test("rolls back an agent message when delivery creation fails", () => {
   expect(repo.getMessage("m1")).toBeNull()
 })
 
+test("rejects cross-conversation delivery links and rolls back agent messages", () => {
+  const repo = makeRepo()
+  for (const id of ["c1", "c2"]) repo.createConversation({ id, title: id, primaryAgent: "architect", createdBy: "owner", createdAt: 10 })
+  const foreignLink = repo.createTransportLink({ id: "l2", conversationId: "c2", adapter: "discord", externalLocationId: "room", label: null, syncMode: "two_way", enabled: true }, 11)
+  repo.appendMessage({ id: "web", conversationId: "c1", author: "owner", origin: "web", content: "hello", createdAt: 12 })
+
+  expect(() => repo.createDeliveries("web", [foreignLink], "message", 13)).toThrow(RepositoryConflictError)
+  expect(() => repo.appendAgentMessage({ id: "agent", conversationId: "c1", author: "architect", origin: "agent", content: "answer", createdAt: 14 }, [foreignLink], 15)).toThrow(RepositoryConflictError)
+  expect(repo.getMessage("agent")).toBeNull()
+  expect(repo.listDueDeliveries(20)).toEqual([])
+})
+
 test("creates each delivery tuple once", () => {
   const repo = makeRepo()
   repo.createConversation({ id: "c1", title: "Delivery", primaryAgent: "architect", createdBy: "owner", createdAt: 10 })
@@ -152,6 +164,31 @@ test("persists delivered and retry state transitions", () => {
   expect({ state: retry.state, attempts: retry.attempts, nextAttemptAt: retry.nextAttemptAt, errorLength: retry.error?.length }).toEqual({ state: "retry_wait", attempts: 1, nextAttemptAt: 30, errorLength: 500 })
   const delivered = repo.markDeliveryDelivered(retry.id, "external-1", 31)
   expect({ state: delivered.state, externalMessageId: delivered.externalMessageId, error: delivered.error, nextAttemptAt: delivered.nextAttemptAt }).toEqual({ state: "delivered", externalMessageId: "external-1", error: null, nextAttemptAt: null })
+})
+
+test("rejects retries without a schedule and keeps the pending delivery due", () => {
+  const repo = makeRepo()
+  repo.createConversation({ id: "c1", title: "Delivery", primaryAgent: "architect", createdBy: "owner", createdAt: 10 })
+  const link = repo.createTransportLink({ id: "l1", conversationId: "c1", adapter: "discord", externalLocationId: "room", label: null, syncMode: "two_way", enabled: true }, 11)
+  repo.appendMessage({ id: "m1", conversationId: "c1", author: "owner", origin: "web", content: "hello", createdAt: 12 })
+  const pending = repo.createDeliveries("m1", [link], "message", 13)[0]!
+
+  expect(() => repo.markDeliveryRetry(pending.id, "missing schedule", null, false, 14)).toThrow(RepositoryConflictError)
+  expect(repo.listDueDeliveries(14)).toEqual([pending])
+})
+
+test("does not reopen delivered or exhausted deliveries", () => {
+  const repo = makeRepo()
+  repo.createConversation({ id: "c1", title: "Delivery", primaryAgent: "architect", createdBy: "owner", createdAt: 10 })
+  const links = ["l1", "l2"].map((id) => repo.createTransportLink({ id, conversationId: "c1", adapter: id, externalLocationId: id, label: null, syncMode: "two_way", enabled: true }, 11))
+  repo.appendMessage({ id: "m1", conversationId: "c1", author: "owner", origin: "web", content: "hello", createdAt: 12 })
+  const [delivered, exhausted] = repo.createDeliveries("m1", links, "message", 13)
+  repo.markDeliveryDelivered(delivered!.id, "external", 14)
+  repo.markDeliveryRetry(exhausted!.id, "dead", null, true, 14)
+
+  expect(() => repo.markDeliveryRetry(delivered!.id, "reopen", 20, false, 15)).toThrow(RepositoryConflictError)
+  expect(() => repo.markDeliveryDelivered(exhausted!.id, "external-2", 15)).toThrow(RepositoryConflictError)
+  expect(repo.listDueDeliveries(30)).toEqual([])
 })
 
 test("marks retries exhausted and lists only due deliveries in deterministic order", () => {

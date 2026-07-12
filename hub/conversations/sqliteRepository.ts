@@ -86,9 +86,15 @@ export class SqliteConversationRepository implements ConversationRepository {
   private createDeliveriesWithinTransaction(messageId: string, links: TransportLink[], eventKind: string, now: number): Delivery[] {
     const results: Delivery[] = []
     const seen = new Set<string>()
+    const messageRow = this.db.query<{ conversation_id: string }, [string]>("SELECT conversation_id FROM messages WHERE id=?").get(messageId)
+    if (!messageRow) throw new RepositoryNotFoundError(`Message ${messageId} not found`)
     for (const transportLink of links) {
       if (seen.has(transportLink.id)) continue
       seen.add(transportLink.id)
+      const linkRow = this.db.query<{ conversation_id: string }, [string]>("SELECT conversation_id FROM transport_links WHERE id=?").get(transportLink.id)
+      if (!linkRow || linkRow.conversation_id !== messageRow.conversation_id) {
+        throw new RepositoryConflictError(`Delivery link ${transportLink.id} must belong to conversation ${messageRow.conversation_id}`)
+      }
       this.db.query("INSERT OR IGNORE INTO deliveries(id,message_id,link_id,event_kind,state,attempts,next_attempt_at,external_message_id,error,created_at,updated_at) VALUES (?,?,?,?, 'pending',0,NULL,NULL,NULL,?,?)").run(randomUUID(), messageId, transportLink.id, eventKind, now, now)
       const row = this.db.query<Row, [string, string, string]>("SELECT * FROM deliveries WHERE message_id=? AND link_id=? AND event_kind=?").get(messageId, transportLink.id, eventKind)
       if (!row) throw new RepositoryConflictError(`Could not create delivery for link ${transportLink.id}`)
@@ -97,13 +103,14 @@ export class SqliteConversationRepository implements ConversationRepository {
     return results
   }
   markDeliveryDelivered(id: string, externalMessageId: string | null, now: number): Delivery {
-    const result = this.db.query("UPDATE deliveries SET state='delivered', external_message_id=?, error=NULL, next_attempt_at=NULL, updated_at=? WHERE id=?").run(externalMessageId, now, id)
-    if (!result.changes) throw new RepositoryNotFoundError(`Delivery ${id} not found`)
+    const result = this.db.query("UPDATE deliveries SET state='delivered', external_message_id=?, error=NULL, next_attempt_at=NULL, updated_at=? WHERE id=? AND state IN ('pending','retry_wait')").run(externalMessageId, now, id)
+    if (!result.changes) this.throwDeliveryTransitionError(id)
     return this.getDelivery(id)!
   }
   markDeliveryRetry(id: string, error: string, nextAttemptAt: number | null, exhausted: boolean, now: number): Delivery {
-    const result = this.db.query("UPDATE deliveries SET state=?, attempts=attempts+1, next_attempt_at=?, error=?, updated_at=? WHERE id=?").run(exhausted ? "exhausted" : "retry_wait", exhausted ? null : nextAttemptAt, error.slice(0, 500), now, id)
-    if (!result.changes) throw new RepositoryNotFoundError(`Delivery ${id} not found`)
+    if (!exhausted && nextAttemptAt === null) throw new RepositoryConflictError("A retry schedule is required unless the delivery is exhausted")
+    const result = this.db.query("UPDATE deliveries SET state=?, attempts=attempts+1, next_attempt_at=?, error=?, updated_at=? WHERE id=? AND state IN ('pending','retry_wait')").run(exhausted ? "exhausted" : "retry_wait", exhausted ? null : nextAttemptAt, error.slice(0, 500), now, id)
+    if (!result.changes) this.throwDeliveryTransitionError(id)
     return this.getDelivery(id)!
   }
   listDueDeliveries(now: number, limit = 200): Delivery[] {
@@ -113,6 +120,10 @@ export class SqliteConversationRepository implements ConversationRepository {
   private getDelivery(id: string): Delivery | null {
     const row = this.db.query<Row, [string]>("SELECT * FROM deliveries WHERE id=?").get(id)
     return row ? delivery(row) : null
+  }
+  private throwDeliveryTransitionError(id: string): never {
+    if (!this.getDelivery(id)) throw new RepositoryNotFoundError(`Delivery ${id} not found`)
+    throw new RepositoryConflictError(`Delivery ${id} is already terminal`)
   }
   recordExternalMessage(adapter: string, externalEventId: string, input: AppendMessageInput): Message {
     return this.db.transaction(() => {
