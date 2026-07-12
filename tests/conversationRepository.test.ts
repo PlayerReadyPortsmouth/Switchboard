@@ -238,6 +238,20 @@ test("caps due-delivery batches at 200", () => {
   expect(repo.listDueDeliveries(30, 500)).toHaveLength(200)
 })
 
+test("claims deliveries atomically and recovers them only after lease expiry", () => {
+  const repo = makeRepo()
+  repo.createConversation({ id: "c1", title: "Lease", primaryAgent: "a", createdBy: "o", createdAt: 1 })
+  const link = repo.createTransportLink({ id: "l", conversationId: "c1", adapter: "discord", externalLocationId: "x", label: null, syncMode: "two_way", enabled: true }, 1)
+  const message = repo.appendMessage({ id: "m", conversationId: "c1", author: "a", origin: "agent", content: "x", createdAt: 1 }).message
+  const [delivery] = repo.createDeliveries(message.id, [link], "message", 1)
+  expect(repo.claimDeliveries([delivery!.id], "worker-a", 10, 20)).toHaveLength(1)
+  expect(repo.claimDeliveries([delivery!.id], "worker-b", 19, 30)).toHaveLength(0)
+  expect(repo.claimDueDeliveries("worker-b", 20, 30)).toHaveLength(1)
+  expect(() => repo.markDeliveryDelivered(delivery!.id, "wrong", 21, "worker-a")).toThrow(RepositoryConflictError)
+  expect(repo.markDeliveryDelivered(delivery!.id, "ok", 21, "worker-b").state).toBe("delivered")
+  expect(repo.claimDueDeliveries("worker-c", 99, 109)).toHaveLength(0)
+})
+
 test("rejects foreign-key violations", () => {
   const repo = makeRepo()
   expect(() => repo.addParticipant({ conversationId: "missing", identity: "user", kind: "user", role: "member", createdAt: 1 })).toThrow()

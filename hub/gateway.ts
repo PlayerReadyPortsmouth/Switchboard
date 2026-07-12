@@ -365,6 +365,7 @@ export class Gateway {
       for (let i = 0; i < chunks.length; i++) {
         const msg = await (ch as any).send({
           content: chunks[i],
+          allowedMentions: { parse: [] },
           nonce: createHash("sha256").update(`${deliveryId}:${i}`).digest("hex").slice(0, 25),
           enforceNonce: true,
           ...(i === 0 && replyTo ? { reply: { messageReference: replyTo, failIfNotExists: false } } : {}),

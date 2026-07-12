@@ -9,7 +9,7 @@ const conversation = (r: Row): Conversation => ({ id: r.id as string, title: r.t
 const participant = (r: Row): Participant => ({ conversationId: r.conversation_id as string, identity: r.identity as string, kind: r.kind as Participant["kind"], role: r.role as Participant["role"], createdAt: r.created_at as number })
 const message = (r: Row): Message => ({ id: r.id as string, conversationId: r.conversation_id as string, sequence: r.sequence as number, author: r.author as string, origin: r.origin as Message["origin"], content: r.content as string, replyTo: r.reply_to as string | null, state: r.state as Message["state"], clientKey: r.client_key as string | null, createdAt: r.created_at as number })
 const link = (r: Row): TransportLink => ({ id: r.id as string, conversationId: r.conversation_id as string, adapter: r.adapter as string, externalLocationId: r.external_location_id as string, label: r.label as string | null, syncMode: r.sync_mode as TransportLink["syncMode"], enabled: Boolean(r.enabled), createdAt: r.created_at as number, updatedAt: r.updated_at as number })
-const delivery = (r: Row): Delivery => ({ id: r.id as string, messageId: r.message_id as string, linkId: r.link_id as string, eventKind: r.event_kind as string, state: r.state as Delivery["state"], attempts: r.attempts as number, nextAttemptAt: r.next_attempt_at as number | null, externalMessageId: r.external_message_id as string | null, error: r.error as string | null, createdAt: r.created_at as number, updatedAt: r.updated_at as number })
+const delivery = (r: Row): Delivery => ({ id: r.id as string, messageId: r.message_id as string, linkId: r.link_id as string, eventKind: r.event_kind as string, state: r.state as Delivery["state"], attempts: r.attempts as number, nextAttemptAt: r.next_attempt_at as number | null, externalMessageId: r.external_message_id as string | null, error: r.error as string | null, leaseOwner: r.lease_owner as string | null, leaseExpiresAt: r.lease_expires_at as number | null, createdAt: r.created_at as number, updatedAt: r.updated_at as number })
 
 export class SqliteConversationRepository implements ConversationRepository {
   constructor(private readonly db: Database) { runConversationMigrations(db) }
@@ -141,8 +141,20 @@ export class SqliteConversationRepository implements ConversationRepository {
     }
     return results
   }
-  markDeliveryDelivered(id: string, externalMessageId: string | null, now: number): Delivery {
-    const result = this.db.query("UPDATE deliveries SET state='delivered', external_message_id=?, error=NULL, next_attempt_at=NULL, updated_at=? WHERE id=? AND state IN ('pending','retry_wait')").run(externalMessageId, now, id)
+  claimDeliveries(ids: string[], owner: string, now: number, leaseExpiresAt: number): Delivery[] {
+    if (!owner.trim() || !Number.isFinite(now) || !Number.isFinite(leaseExpiresAt) || leaseExpiresAt <= now) throw new RepositoryConflictError("A valid delivery lease is required")
+    return this.db.transaction(() => ids.flatMap(id => {
+      const result = this.db.query("UPDATE deliveries SET lease_owner=?,lease_expires_at=?,updated_at=? WHERE id=? AND state IN ('pending','retry_wait') AND (lease_owner IS NULL OR lease_expires_at<=?)").run(owner, leaseExpiresAt, now, id, now)
+      return result.changes ? [this.getDelivery(id)!] : []
+    })).immediate()
+  }
+  claimDueDeliveries(owner: string, now: number, leaseExpiresAt: number, limit = 200): Delivery[] {
+    const due = this.listDueDeliveries(now, limit)
+    return this.claimDeliveries(due.map(item => item.id), owner, now, leaseExpiresAt)
+  }
+  markDeliveryDelivered(id: string, externalMessageId: string | null, now: number, owner = "direct"): Delivery {
+    if (owner === "direct") this.claimDeliveries([id], owner, now, now + 1)
+    const result = this.db.query("UPDATE deliveries SET state='delivered', external_message_id=?, error=NULL, next_attempt_at=NULL,lease_owner=NULL,lease_expires_at=NULL,updated_at=? WHERE id=? AND state IN ('pending','retry_wait') AND lease_owner=?").run(externalMessageId, now, id, owner)
     if (!result.changes) this.throwDeliveryTransitionError(id)
     return this.getDelivery(id)!
   }
@@ -152,15 +164,16 @@ export class SqliteConversationRepository implements ConversationRepository {
     const row = this.db.query<{ external_message_id: string | null }, [string, string]>("SELECT external_message_id FROM deliveries WHERE message_id=? AND link_id=? AND state='delivered' AND external_message_id IS NOT NULL ORDER BY updated_at DESC LIMIT 1").get(messageId, linkId)
     return row?.external_message_id ?? null
   }
-  markDeliveryRetry(id: string, error: string, nextAttemptAt: number | null, exhausted: boolean, now: number): Delivery {
+  markDeliveryRetry(id: string, error: string, nextAttemptAt: number | null, exhausted: boolean, now: number, owner = "direct"): Delivery {
     if (!exhausted && nextAttemptAt === null) throw new RepositoryConflictError("A retry schedule is required unless the delivery is exhausted")
-    const result = this.db.query("UPDATE deliveries SET state=?, attempts=attempts+1, next_attempt_at=?, error=?, updated_at=? WHERE id=? AND state IN ('pending','retry_wait')").run(exhausted ? "exhausted" : "retry_wait", exhausted ? null : nextAttemptAt, error.slice(0, 500), now, id)
+    if (owner === "direct") this.claimDeliveries([id], owner, now, now + 1)
+    const result = this.db.query("UPDATE deliveries SET state=?, attempts=attempts+1, next_attempt_at=?, error=?,lease_owner=NULL,lease_expires_at=NULL,updated_at=? WHERE id=? AND state IN ('pending','retry_wait') AND lease_owner=?").run(exhausted ? "exhausted" : "retry_wait", exhausted ? null : nextAttemptAt, error.slice(0, 500), now, id, owner)
     if (!result.changes) this.throwDeliveryTransitionError(id)
     return this.getDelivery(id)!
   }
   listDueDeliveries(now: number, limit = 200): Delivery[] {
     const boundedLimit = Math.min(200, Math.max(0, Math.trunc(limit)))
-    return this.db.query<Row, [number, number]>("SELECT * FROM deliveries WHERE state='pending' OR (state='retry_wait' AND next_attempt_at<=?) ORDER BY COALESCE(next_attempt_at,created_at),created_at,id LIMIT ?").all(now, boundedLimit).map(delivery)
+    return this.db.query<Row, [number, number, number]>("SELECT * FROM deliveries WHERE (state='pending' OR (state='retry_wait' AND next_attempt_at<=?)) AND (lease_owner IS NULL OR lease_expires_at<=?) ORDER BY COALESCE(next_attempt_at,created_at),created_at,id LIMIT ?").all(now, now, boundedLimit).map(delivery)
   }
   private getDelivery(id: string): Delivery | null {
     const row = this.db.query<Row, [string]>("SELECT * FROM deliveries WHERE id=?").get(id)

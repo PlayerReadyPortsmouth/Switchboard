@@ -26,7 +26,7 @@ export function inboundLinkRoute(link: TransportLink | null | undefined): "canon
 export class TurnCoordinator {
   constructor(
     private readonly service: Pick<ConversationService, "appendUserMessage" | "appendExternalMessage" | "appendAgentMessage">,
-    private readonly repo: Pick<ConversationRepository, "getConversation" | "resolveTransportLink" | "listTransportLinks" | "resolveDeliveredExternalMessageId" | "createDeliveries" | "markDeliveryDelivered" | "markDeliveryRetry">,
+    private readonly repo: Pick<ConversationRepository, "getConversation" | "resolveTransportLink" | "listTransportLinks" | "resolveDeliveredExternalMessageId" | "createDeliveries" | "claimDeliveries" | "markDeliveryDelivered" | "markDeliveryRetry">,
     private readonly dispatcher: TurnDispatcher,
     private readonly events: TurnEventPublisher,
     private readonly router: TurnSurfaceRouter,
@@ -40,7 +40,7 @@ export class TurnCoordinator {
       const links = this.repo.listTransportLinks(conversationId).filter(link => link.enabled && link.syncMode !== "inbound_only" && link.syncMode !== "notifications_only")
       if (links.length) {
         const deliveries = this.repo.createDeliveries(result.message.id, links, "message", this.now())
-        this.persistDeliveryResults(deliveries, await this.router.deliver(result.message, links, "transcript"))
+        await this.deliverClaimed(result.message, deliveries, links)
       }
       this.dispatch(conversationId, result.message, `web:${identity}`, identity)
     }
@@ -48,6 +48,9 @@ export class TurnCoordinator {
   }
 
   async acceptSurfaceEvent(event: NormalizedSurfaceEvent): Promise<AppendMessageResult | null> {
+    if (![event.adapter,event.eventId,event.externalLocationId,event.externalMessageId,event.authorId,event.authorName,event.content].every(value => typeof value === "string" && value.trim()) || !Number.isFinite(event.createdAt)) {
+      throw new Error("Malformed normalized surface event")
+    }
     const link = this.repo.resolveTransportLink(event.adapter, event.externalLocationId)
     if (!acceptsInboundLink(link)) return null
     const input: AppendMessageInput = {
@@ -56,7 +59,11 @@ export class TurnCoordinator {
       state: "committed", clientKey: `${event.adapter}:${event.eventId}`, createdAt: event.createdAt,
     }
     const result = this.service.appendExternalMessage(event.adapter, event.eventId, input, { linkId: link.id, externalMessageId: event.externalMessageId })
-    if (result.inserted) this.dispatch(link.conversationId, result.message, `${event.adapter}:${event.authorId}`, `${event.adapter}:${event.authorName}`)
+    if (result.inserted) {
+      const links = this.repo.listTransportLinks(link.conversationId).filter(item => item.id !== link.id && item.enabled && item.syncMode !== "inbound_only" && item.syncMode !== "notifications_only")
+      if (links.length) await this.deliverClaimed(result.message, this.repo.createDeliveries(result.message.id, links, "message", this.now()), links)
+      this.dispatch(link.conversationId, result.message, `${event.adapter}:${event.authorId}`, `${event.adapter}:${event.authorName}`)
+    }
     return result
   }
 
@@ -79,7 +86,7 @@ export class TurnCoordinator {
         const externalId = this.repo.resolveDeliveredExternalMessageId(result.message.replyTo, link.id)
         if (externalId) replyIds.set(link.id, externalId)
       }
-      this.persistDeliveryResults(result.deliveries, await this.router.deliver(result.message, links, "transcript", replyIds))
+      await this.deliverClaimed(result.message, result.deliveries, links, replyIds)
     }
     return result
   }
@@ -103,9 +110,17 @@ export class TurnCoordinator {
       const delivery = deliveries[index]
       if (!delivery) continue
       const now = this.now()
-      if (result.ok) this.repo.markDeliveryDelivered(delivery.id, result.externalMessageId ?? null, now)
-      else this.repo.markDeliveryRetry(delivery.id, result.error ?? "Surface adapter returned no delivery result", result.retryable === false ? null : now + 1_000, result.retryable === false, now)
+      if (result.ok) this.repo.markDeliveryDelivered(delivery.id, result.externalMessageId ?? null, now, "coordinator")
+      else this.repo.markDeliveryRetry(delivery.id, result.error ?? "Surface adapter returned no delivery result", result.retryable === false ? null : now + 1_000, result.retryable === false, now, "coordinator")
     }
+  }
+
+  private async deliverClaimed(message: Message, deliveries: Delivery[], links: TransportLink[], replyIds?: ReadonlyMap<string,string>): Promise<void> {
+    const claimed = this.repo.claimDeliveries(deliveries.map(item => item.id), "coordinator", this.now(), this.now() + 30_000)
+    if (!claimed.length) return
+    const claimedIds = new Set(claimed.map(item => item.id))
+    const claimedLinks = links.filter((_, index) => claimedIds.has(deliveries[index]!.id))
+    this.persistDeliveryResults(claimed, await this.router.deliver(message, claimedLinks, "transcript", replyIds))
   }
 
   private turnState(message: Message, state: "queued" | "working" | "failed"): void {

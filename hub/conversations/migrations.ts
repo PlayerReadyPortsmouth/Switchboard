@@ -77,6 +77,11 @@ const migrationTwo = `
     UNIQUE (link_id, external_message_id)
   );
 `
+const migrationThree = `
+  ALTER TABLE deliveries ADD COLUMN lease_owner TEXT;
+  ALTER TABLE deliveries ADD COLUMN lease_expires_at INTEGER;
+  CREATE INDEX deliveries_due_lease_idx ON deliveries(state, next_attempt_at, lease_expires_at);
+`
 
 export function runConversationMigrations(db: Database): void {
   db.exec("PRAGMA foreign_keys = ON")
@@ -103,6 +108,11 @@ export function runConversationMigrations(db: Database): void {
       db.exec(migrationTwo)
       db.query("INSERT INTO conversation_schema_migrations(version, applied_at) VALUES (?, ?)").run(2, Date.now())
     }
-    db.exec("PRAGMA user_version = 2")
+    const v3 = db.query<{ version: number }, [number]>("SELECT version FROM conversation_schema_migrations WHERE version = ?").get(3)
+    if (!v3) {
+      db.exec(migrationThree)
+      db.query("INSERT INTO conversation_schema_migrations(version, applied_at) VALUES (?, ?)").run(3, Date.now())
+    }
+    db.exec("PRAGMA user_version = 3")
   })()
 }

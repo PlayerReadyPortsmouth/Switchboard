@@ -78,6 +78,25 @@ describe("TurnCoordinator", () => {
     expect(f.dispatched[0]).toMatchObject({ chatId: f.conversation.id, userId: "discord:42", user: "discord:Ada", content: "from discord" })
   })
 
+  test("durably fans inbound events to other eligible links but never echoes to the origin", async () => {
+    const f = fixture()
+    f.repo.createTransportLink({ id: "origin", conversationId: f.conversation.id, adapter: "discord", externalLocationId: "room", label: null, syncMode: "two_way", enabled: true }, 1)
+    f.repo.createTransportLink({ id: "webhook", conversationId: f.conversation.id, adapter: "webhook", externalLocationId: "other", label: null, syncMode: "outbound_only", enabled: true }, 1)
+    f.repo.createTransportLink({ id: "inbound", conversationId: f.conversation.id, adapter: "mail", externalLocationId: "in", label: null, syncMode: "inbound_only", enabled: true }, 1)
+    const result = await f.coordinator.acceptSurfaceEvent({ adapter: "discord", eventId: "fan", externalLocationId: "room", externalMessageId: "fan", authorId: "u", authorName: "U", content: "fan out", createdAt: 2 })
+    expect(result?.inserted).toBe(true)
+    expect(f.delivered).toEqual([result!.message.id])
+    expect(f.repo.listDueDeliveries(99)).toHaveLength(0)
+  })
+
+  test("rejects malformed normalized events without persistence or dispatch", async () => {
+    const f = fixture()
+    f.repo.createTransportLink({ id: "link", conversationId: f.conversation.id, adapter: "discord", externalLocationId: "room", label: null, syncMode: "two_way", enabled: true }, 1)
+    await expect(f.coordinator.acceptSurfaceEvent({ adapter: "discord", eventId: " ", externalLocationId: "room", externalMessageId: "m", authorId: "u", authorName: "U", content: "x", createdAt: Number.NaN })).rejects.toThrow("Malformed normalized surface event")
+    expect(f.repo.listMessages(f.conversation.id)).toHaveLength(0)
+    expect(f.dispatched).toHaveLength(0)
+  })
+
   test("rejects disabled and non-inbound surface links", async () => {
     for (const [syncMode, enabled] of [["outbound_only", true], ["notifications_only", true], ["two_way", false]] as const) {
       const f = fixture()
@@ -104,8 +123,8 @@ describe("TurnCoordinator", () => {
 
     expect(result?.message).toMatchObject({ origin: "agent", author: "architect", content: "answer", state: "completed" })
     expect(result?.deliveries).toHaveLength(1)
-    expect(f.order).toContain("deliver:completed:1")
-    expect(f.repo.listDueDeliveries(999)).toHaveLength(1)
+    expect(f.order).toContain("deliver:completed:0")
+    expect(f.repo.listDueDeliveries(999)).toHaveLength(0)
   })
 
   test("resolves a canonical parent through the repository and router for Discord threading", async () => {
@@ -131,7 +150,7 @@ describe("TurnCoordinator", () => {
     expect((await f.coordinator.acceptAgentReply(callback))?.inserted).toBe(true)
     expect((await f.coordinator.acceptAgentReply(callback))?.inserted).toBe(false)
     expect(f.repo.listMessages(f.conversation.id).map(({ content }) => content)).toEqual(["once"])
-    expect(f.delivered).toHaveLength(1)
+    expect(f.delivered).toHaveLength(0)
   })
 
   test("keeps the committed user message and publishes failed when dispatch fails", async () => {

@@ -13,7 +13,7 @@ test("creates the canonical conversation schema idempotently", () => {
     "conversations", "participants", "messages", "transport_links",
     "deliveries", "external_event_receipts", "external_message_links", "conversation_schema_migrations",
   ]))
-  expect(db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(2)
+  expect(db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(3)
 })
 
 test("upgrades an existing v1 database with link-scoped external message mappings", () => {
@@ -22,7 +22,7 @@ test("upgrades an existing v1 database with link-scoped external message mapping
   db.exec("DROP TABLE external_message_links; DELETE FROM conversation_schema_migrations WHERE version=2; PRAGMA user_version=1")
   runConversationMigrations(db)
   expect(db.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type='table' AND name='external_message_links'").get()?.name).toBe("external_message_links")
-  expect(db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(2)
+  expect(db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(3)
 })
 
 test("schema rejects values outside domain enums", () => {
@@ -39,5 +39,5 @@ test("schema rejects values outside domain enums", () => {
   for (const sql of invalidStatements) expect(() => db.exec(sql)).toThrow(/CHECK constraint failed/)
   db.exec("INSERT INTO messages VALUES ('m','c',1,'u','web','x',NULL,'committed',NULL,1)")
   db.exec("INSERT INTO transport_links VALUES ('l','c','a','x',NULL,'two_way',1,1,1)")
-  expect(() => db.exec("INSERT INTO deliveries VALUES ('d','m','l','send','invalid',0,NULL,NULL,NULL,1,1)")).toThrow(/CHECK constraint failed/)
+  expect(() => db.exec("INSERT INTO deliveries(id,message_id,link_id,event_kind,state,attempts,next_attempt_at,external_message_id,error,created_at,updated_at) VALUES ('d','m','l','send','invalid',0,NULL,NULL,NULL,1,1)")).toThrow(/CHECK constraint failed/)
 })

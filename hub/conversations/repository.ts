@@ -34,9 +34,11 @@ export interface ConversationRepository {
   ensureConversationForTransport(input: EnsureTransportConversationInput): { conversation: Conversation; link: TransportLink; created: boolean }
   appendAgentMessage(input: AppendMessageInput, links: TransportLink[], now: number): { message: Message; deliveries: Delivery[]; inserted: boolean }
   createDeliveries(messageId: string, links: TransportLink[], eventKind: string, now: number): Delivery[]
-  markDeliveryDelivered(id: string, externalMessageId: string | null, now: number): Delivery
+  claimDeliveries(ids: string[], owner: string, now: number, leaseExpiresAt: number): Delivery[]
+  claimDueDeliveries(owner: string, now: number, leaseExpiresAt: number, limit?: number): Delivery[]
+  markDeliveryDelivered(id: string, externalMessageId: string | null, now: number, owner?: string): Delivery
   resolveDeliveredExternalMessageId(messageId: string, linkId: string): string | null
-  markDeliveryRetry(id: string, error: string, nextAttemptAt: number | null, exhausted: boolean, now: number): Delivery
+  markDeliveryRetry(id: string, error: string, nextAttemptAt: number | null, exhausted: boolean, now: number, owner?: string): Delivery
   listDueDeliveries(now: number, limit?: number): Delivery[]
   recordExternalMessage(adapter: string, externalEventId: string, input: AppendMessageInput, external?: ExternalMessageLink): Message
 }

@@ -1,8 +1,9 @@
 import type { ConversationRepository } from "../conversations/repository"
+import { randomUUID } from "node:crypto"
 import type { SurfaceDeliveryResult } from "./types"
 
 type DeliveryRepository = Pick<ConversationRepository,
-  "listDueDeliveries" | "getMessage" | "listTransportLinks" | "markDeliveryDelivered" | "markDeliveryRetry">
+  "claimDueDeliveries" | "getMessage" | "listTransportLinks" | "markDeliveryDelivered" | "markDeliveryRetry">
 
 export interface DeliveryRouter {
   deliver: (message: NonNullable<ReturnType<DeliveryRepository["getMessage"]>>, links: ReturnType<DeliveryRepository["listTransportLinks"]>) => Promise<SurfaceDeliveryResult[]>
@@ -65,19 +66,20 @@ export class DeliveryWorker {
 
   private async processDue(): Promise<void> {
     const queriedAt = this.now()
-    const deliveries = this.repo.listDueDeliveries(queriedAt, 100)
+    const owner = `worker:${randomUUID()}`
+    const deliveries = this.repo.claimDueDeliveries(owner, queriedAt, queriedAt + 30_000, 100)
     for (const delivery of deliveries) {
       const now = this.now()
       try {
         const message = this.repo.getMessage(delivery.messageId)
         const link = message && this.repo.listTransportLinks(message.conversationId).find(item => item.id === delivery.linkId)
         if (!message || !link) {
-          this.repo.markDeliveryRetry(delivery.id, "Delivery message or transport link not found", null, true, now)
+          this.repo.markDeliveryRetry(delivery.id, "Delivery message or transport link not found", null, true, now, owner)
           continue
         }
         const [result] = await this.router.deliver(message, [link])
         if (result?.ok) {
-          this.repo.markDeliveryDelivered(delivery.id, result.externalMessageId ?? null, this.now())
+          this.repo.markDeliveryDelivered(delivery.id, result.externalMessageId ?? null, this.now(), owner)
           continue
         }
         const attempt = delivery.attempts + 1
@@ -85,12 +87,12 @@ export class DeliveryWorker {
         const exhausted = !retryable || attempt >= this.maxAttempts
         const error = result?.error ?? "Surface adapter returned no delivery result"
         const delay = Math.min(60_000, 1_000 * 2 ** (attempt - 1)) + Math.max(0, Math.min(250, Math.trunc(this.jitter())))
-        this.repo.markDeliveryRetry(delivery.id, error, exhausted ? null : this.now() + delay, exhausted, this.now())
+        this.repo.markDeliveryRetry(delivery.id, error, exhausted ? null : this.now() + delay, exhausted, this.now(), owner)
       } catch (error) {
         const attempt = delivery.attempts + 1
         const exhausted = attempt >= this.maxAttempts
         const delay = Math.min(60_000, 1_000 * 2 ** (attempt - 1)) + Math.max(0, Math.min(250, Math.trunc(this.jitter())))
-        this.repo.markDeliveryRetry(delivery.id, error instanceof Error ? error.message : String(error), exhausted ? null : this.now() + delay, exhausted, this.now())
+        this.repo.markDeliveryRetry(delivery.id, error instanceof Error ? error.message : String(error), exhausted ? null : this.now() + delay, exhausted, this.now(), owner)
       }
     }
   }

@@ -190,6 +190,7 @@ test("Gateway sendText chunks text and returns the first Discord message id", as
   expect(payloads[0].reply.messageReference).toBe("parent")
   expect(payloads[1].reply).toBeUndefined()
   expect(payloads.every(payload => payload.enforceNonce === true)).toBe(true)
+  expect(payloads.every(payload => JSON.stringify(payload.allowedMentions) === JSON.stringify({ parse: [] }))).toBe(true)
   expect(payloads.every(payload => payload.nonce.length <= 25)).toBe(true)
   expect(payloads[0].nonce).not.toBe(payloads[1].nonce)
 })

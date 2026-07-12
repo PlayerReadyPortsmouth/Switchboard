@@ -7,12 +7,13 @@ function fixture(results: Array<{ ok: boolean; externalMessageId?: string; error
   let now = 1_000
   const message: Message = { id: "m", conversationId: "c", sequence: 1, author: "agent", origin: "agent", content: "hi", replyTo: null, state: "completed", clientKey: null, createdAt: 1 }
   const link: TransportLink = { id: "l", conversationId: "c", adapter: "discord", externalLocationId: "room", label: null, syncMode: "two_way", enabled: true, createdAt: 1, updatedAt: 1 }
-  const delivery: Delivery = { id: "m:l", messageId: "m", linkId: "l", eventKind: "message", state: "pending", attempts: 0, nextAttemptAt: null, externalMessageId: null, error: null, createdAt: 1, updatedAt: 1 }
+  const delivery: Delivery = { id: "m:l", messageId: "m", linkId: "l", eventKind: "message", state: "pending", attempts: 0, nextAttemptAt: null, externalMessageId: null, error: null, leaseOwner: null, leaseExpiresAt: null, createdAt: 1, updatedAt: 1 }
   const due: Delivery[] = [delivery]
   const writes: unknown[][] = []
   let sends = 0
   const repo = {
     listDueDeliveries: (_now: number, limit?: number) => due.splice(0, limit),
+    claimDueDeliveries: (_owner: string, _now: number, _expires: number, limit?: number) => due.splice(0, limit),
     getMessage: () => message,
     listTransportLinks: () => [link],
     markDeliveryDelivered: (...args: unknown[]) => { writes.push(["delivered", ...args]); return delivery },
@@ -26,32 +27,32 @@ function fixture(results: Array<{ ok: boolean; externalMessageId?: string; error
 test("persists successful pending delivery", async () => {
   const f = fixture([{ ok: true, externalMessageId: "external" }])
   await f.worker.tick()
-  expect(f.writes).toEqual([["delivered", "m:l", "external", 1_000]])
+  expect(f.writes[0]?.slice(0, 4)).toEqual(["delivered", "m:l", "external", 1_000])
 })
 
 test("schedules retryable failures with bounded exponential backoff and injected jitter", async () => {
   const f = fixture([{ ok: false, error: "down", retryable: true }])
   f.delivery.attempts = 3
   await f.worker.tick()
-  expect(f.writes).toEqual([["retry", "m:l", "down", 9_025, false, 1_000]])
+  expect(f.writes[0]?.slice(0, 6)).toEqual(["retry", "m:l", "down", 9_025, false, 1_000])
 })
 
 test("exhausts at maximum attempts and immediately exhausts non-retryable failures", async () => {
   const exhausted = fixture([{ ok: false, error: "down", retryable: true }])
   exhausted.delivery.attempts = 4
   await exhausted.worker.tick()
-  expect(exhausted.writes[0]).toEqual(["retry", "m:l", "down", null, true, 1_000])
+  expect(exhausted.writes[0]?.slice(0, 6)).toEqual(["retry", "m:l", "down", null, true, 1_000])
   const permanent = fixture([{ ok: false, error: "bad", retryable: false }])
   await permanent.worker.tick()
-  expect(permanent.writes[0]).toEqual(["retry", "m:l", "bad", null, true, 1_000])
+  expect(permanent.writes[0]?.slice(0, 6)).toEqual(["retry", "m:l", "bad", null, true, 1_000])
 })
 
 test("requests only due work in batches of 100", async () => {
   const f = fixture([{ ok: true }])
   let query: unknown[] = []
-  ;(f.worker as any).repo.listDueDeliveries = (...args: unknown[]) => { query = args; return [] }
+  ;(f.worker as any).repo.claimDueDeliveries = (...args: unknown[]) => { query = args; return [] }
   await f.worker.tick()
-  expect(query).toEqual([1_000, 100])
+  expect(query.slice(1)).toEqual([1_000, 31_000, 100])
   expect(f.sends()).toBe(0)
 })
 
@@ -82,7 +83,7 @@ test("real router marks an unknown adapter non-retryable and worker exhausts it 
   const f = fixture([])
   const worker = new DeliveryWorker((f.worker as any).repo, new SurfaceRouter([]), { now: () => 1_000, jitter: () => 0 })
   await worker.tick()
-  expect(f.writes).toEqual([["retry", "m:l", "Unknown surface adapter: discord", null, true, 1_000]])
+  expect(f.writes[0]?.slice(0, 6)).toEqual(["retry", "m:l", "Unknown surface adapter: discord", null, true, 1_000])
   expect(f.delivery.attempts).toBe(0)
 })
 
@@ -90,7 +91,7 @@ test("timer reports a repository failure without an unhandled rejection", async 
   const reported: unknown[] = []; const unhandled: unknown[] = []
   const listener = (error: unknown) => { unhandled.push(error) }
   process.on("unhandledRejection", listener)
-  const worker = new DeliveryWorker({ listDueDeliveries() { throw new Error("db down") } } as any, new SurfaceRouter([]), {
+  const worker = new DeliveryWorker({ claimDueDeliveries() { throw new Error("db down") } } as any, new SurfaceRouter([]), {
     intervalMs: 1, reportError: error => reported.push(error),
   })
   worker.start()
