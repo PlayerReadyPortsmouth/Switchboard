@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto"
 import type { CachedMsg } from "../messageCache"
 import type { NormalizedSurfaceEvent } from "../surfaces"
-import { RepositoryConflictError, type ConversationRepository } from "./repository"
+import type { ConversationRepository } from "./repository"
 import type { Conversation } from "./types"
 
 export type DiscordMigrationEvent = NormalizedSurfaceEvent & { locationName?: string }
 export interface DiscordConversationMigrationDeps {
-  repo: Pick<ConversationRepository, "resolveTransportLink" | "getConversation" | "createConversationWithOwner" | "createTransportLink" | "getParticipant" | "addParticipant" | "appendMessage">
+  repo: Pick<ConversationRepository, "ensureConversationForTransport" | "getParticipant" | "addParticipant" | "appendMessage">
   now: () => number
   id: () => string
   cachedHistory?: (channelId: string) => CachedMsg[]
@@ -16,34 +16,18 @@ export interface DiscordConversationMigrationDeps {
 /** Build the stateful channel migration boundary used by the Discord adapter. */
 export function createDiscordConversationMigrator(deps: DiscordConversationMigrationDeps) {
   return function ensureDiscordConversation(event: DiscordMigrationEvent, configuredAgent: string): Conversation {
-    const existing = deps.repo.resolveTransportLink("discord", event.externalLocationId)
-    if (existing) {
-      const conversation = deps.repo.getConversation(existing.conversationId)!
-      ensureExternalParticipant(deps, conversation.id, event.authorId)
-      return conversation
-    }
-
     const createdAt = deps.now()
     const conversationId = deps.id()
     const creator = "system:discord-migration"
-    const candidate = deps.repo.createConversationWithOwner(
-      { id: conversationId, title: event.locationName?.trim() || `Discord ${event.externalLocationId}`, primaryAgent: configuredAgent, createdBy: creator, createdAt },
-      { conversationId, identity: creator, kind: "user", role: "owner", createdAt },
-    )
-    try {
-      deps.repo.createTransportLink({ id: deps.id(), conversationId, adapter: "discord", externalLocationId: event.externalLocationId, label: event.locationName?.trim() || null, syncMode: "two_way", enabled: true }, createdAt)
-    } catch (error) {
-      if (!(error instanceof RepositoryConflictError)) throw error
-      const winner = deps.repo.resolveTransportLink("discord", event.externalLocationId)
-      if (!winner) throw error
-      const conversation = deps.repo.getConversation(winner.conversationId)!
-      ensureExternalParticipant(deps, conversation.id, event.authorId)
-      return conversation
-    }
-
-    ensureExternalParticipant(deps, candidate.id, event.authorId)
-    importReliableHistory(deps, candidate.id, event.externalLocationId)
-    return candidate
+    const ensured = deps.repo.ensureConversationForTransport({
+      conversation: { id: conversationId, title: event.locationName?.trim() || `Discord ${event.externalLocationId}`, primaryAgent: configuredAgent, createdBy: creator, createdAt },
+      owner: { conversationId, identity: creator, kind: "user", role: "owner", createdAt },
+      link: { id: deps.id(), conversationId, adapter: "discord", externalLocationId: event.externalLocationId, label: event.locationName?.trim() || null, syncMode: "two_way", enabled: true },
+      now: createdAt,
+    })
+    ensureExternalParticipant(deps, ensured.conversation.id, event.authorId)
+    importReliableHistory(deps, ensured.conversation.id, event.externalLocationId)
+    return ensured.conversation
   }
 }
 
@@ -60,6 +44,7 @@ function importReliableHistory(deps: DiscordConversationMigrationDeps, conversat
   cached.forEach((entry, ordinal) => {
     const author = entry.role === "user" ? entry.userId && `discord:${entry.userId}` : entry.agent
     if (!author || !Number.isFinite(entry.ts) || typeof entry.text !== "string") { skipped++; return }
+    if (entry.role === "user") ensureExternalParticipant(deps, conversationId, entry.userId!)
     const key = createHash("sha256").update(`${channelId}\0${entry.ts}\0${entry.role}\0${ordinal}`).digest("hex")
     const result = deps.repo.appendMessage({ id: deps.id(), conversationId, author, origin: entry.role === "user" ? "transport" : "agent", content: entry.text, state: "committed", clientKey: `discord-import:${key}`, createdAt: entry.ts })
     if (result.inserted) imported++

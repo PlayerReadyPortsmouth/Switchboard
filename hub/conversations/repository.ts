@@ -10,6 +10,12 @@ export class RepositoryNotFoundError extends Error {
 
 export interface AppendMessageResult { message: Message; inserted: boolean }
 export interface ExternalMessageLink { linkId: string; externalMessageId: string }
+export interface EnsureTransportConversationInput {
+  conversation: NewConversation
+  owner: Participant
+  link: Omit<TransportLink, "createdAt" | "updatedAt">
+  now: number
+}
 
 export interface ConversationRepository {
   createConversation(input: NewConversation): Conversation
@@ -25,6 +31,7 @@ export interface ConversationRepository {
   createTransportLink(input: Omit<TransportLink, "createdAt" | "updatedAt">, now: number): TransportLink
   listTransportLinks(conversationId: string): TransportLink[]
   resolveTransportLink(adapter: string, externalLocationId: string): TransportLink | null
+  ensureConversationForTransport(input: EnsureTransportConversationInput): { conversation: Conversation; link: TransportLink; created: boolean }
   appendAgentMessage(input: AppendMessageInput, links: TransportLink[], now: number): { message: Message; deliveries: Delivery[]; inserted: boolean }
   createDeliveries(messageId: string, links: TransportLink[], eventKind: string, now: number): Delivery[]
   markDeliveryDelivered(id: string, externalMessageId: string | null, now: number): Delivery

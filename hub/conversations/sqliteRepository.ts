@@ -1,7 +1,7 @@
 import type { Database } from "bun:sqlite"
 import { randomUUID } from "node:crypto"
 import { runConversationMigrations } from "./migrations"
-import { RepositoryConflictError, RepositoryNotFoundError, type AppendMessageResult, type ConversationRepository } from "./repository"
+import { RepositoryConflictError, RepositoryNotFoundError, type AppendMessageResult, type ConversationRepository, type EnsureTransportConversationInput } from "./repository"
 import type { AppendMessageInput, Conversation, Delivery, Message, NewConversation, Participant, TransportLink } from "./types"
 
 type Row = Record<string, unknown>
@@ -73,6 +73,18 @@ export class SqliteConversationRepository implements ConversationRepository {
   resolveTransportLink(adapter: string, externalLocationId: string): TransportLink | null {
     const row = this.db.query<Row, [string, string]>("SELECT * FROM transport_links WHERE adapter=? AND external_location_id=?").get(adapter, externalLocationId)
     return row ? link(row) : null
+  }
+  ensureConversationForTransport(input: EnsureTransportConversationInput): { conversation: Conversation; link: TransportLink; created: boolean } {
+    return this.db.transaction(() => {
+      const existing = this.resolveTransportLink(input.link.adapter, input.link.externalLocationId)
+      if (existing) return { conversation: this.getConversation(existing.conversationId)!, link: existing, created: false }
+      const { conversation: c, owner, link: transportLink, now } = input
+      if (owner.conversationId !== c.id || owner.identity !== c.createdBy || owner.role !== "owner") throw new RepositoryConflictError("Conversation owner must match the conversation creator")
+      this.db.query("INSERT INTO conversations(id,title,primary_agent,created_by,created_at,updated_at) VALUES (?,?,?,?,?,?)").run(c.id, c.title, c.primaryAgent, c.createdBy, c.createdAt, c.createdAt)
+      this.db.query("INSERT INTO participants(conversation_id,identity,kind,role,created_at) VALUES (?,?,?,?,?)").run(owner.conversationId, owner.identity, owner.kind, owner.role, owner.createdAt)
+      this.db.query("INSERT INTO transport_links(id,conversation_id,adapter,external_location_id,label,sync_mode,enabled,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)").run(transportLink.id,transportLink.conversationId,transportLink.adapter,transportLink.externalLocationId,transportLink.label,transportLink.syncMode,transportLink.enabled ? 1 : 0,now,now)
+      return { conversation: this.getConversation(c.id)!, link: this.resolveTransportLink(transportLink.adapter, transportLink.externalLocationId)!, created: true }
+    }).immediate()
   }
   appendAgentMessage(input: AppendMessageInput, links: TransportLink[], now: number): { message: Message; deliveries: Delivery[]; inserted: boolean } {
     return this.db.transaction(() => {
