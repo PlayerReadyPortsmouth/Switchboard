@@ -26,7 +26,7 @@ export function inboundLinkRoute(link: TransportLink | null | undefined): "canon
 export class TurnCoordinator {
   constructor(
     private readonly service: Pick<ConversationService, "appendUserMessage" | "appendExternalMessage" | "appendAgentMessage">,
-    private readonly repo: Pick<ConversationRepository, "getConversation" | "resolveTransportLink" | "listTransportLinks" | "resolveDeliveredExternalMessageId" | "createDeliveries">,
+    private readonly repo: Pick<ConversationRepository, "getConversation" | "resolveTransportLink" | "listTransportLinks" | "resolveDeliveredExternalMessageId" | "createDeliveries" | "markDeliveryDelivered" | "markDeliveryRetry">,
     private readonly dispatcher: TurnDispatcher,
     private readonly events: TurnEventPublisher,
     private readonly router: TurnSurfaceRouter,
@@ -39,8 +39,8 @@ export class TurnCoordinator {
     if (result.inserted) {
       const links = this.repo.listTransportLinks(conversationId).filter(link => link.enabled && link.syncMode !== "inbound_only" && link.syncMode !== "notifications_only")
       if (links.length) {
-        this.repo.createDeliveries(result.message.id, links, "message", this.now())
-        await this.router.deliver(result.message, links, "transcript")
+        const deliveries = this.repo.createDeliveries(result.message.id, links, "message", this.now())
+        this.persistDeliveryResults(deliveries, await this.router.deliver(result.message, links, "transcript"))
       }
       this.dispatch(conversationId, result.message, `web:${identity}`, identity)
     }
@@ -79,7 +79,7 @@ export class TurnCoordinator {
         const externalId = this.repo.resolveDeliveredExternalMessageId(result.message.replyTo, link.id)
         if (externalId) replyIds.set(link.id, externalId)
       }
-      await this.router.deliver(result.message, links, "transcript", replyIds)
+      this.persistDeliveryResults(result.deliveries, await this.router.deliver(result.message, links, "transcript", replyIds))
     }
     return result
   }
@@ -95,6 +95,16 @@ export class TurnCoordinator {
     } catch (error) {
       this.turnState(message, "failed")
       throw error
+    }
+  }
+
+  private persistDeliveryResults(deliveries: Delivery[], results: SurfaceDeliveryResult[]): void {
+    for (const [index, result] of results.entries()) {
+      const delivery = deliveries[index]
+      if (!delivery) continue
+      const now = this.now()
+      if (result.ok) this.repo.markDeliveryDelivered(delivery.id, result.externalMessageId ?? null, now)
+      else this.repo.markDeliveryRetry(delivery.id, result.error ?? "Surface adapter returned no delivery result", result.retryable === false ? null : now + 1_000, result.retryable === false, now)
     }
   }
 

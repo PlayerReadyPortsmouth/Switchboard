@@ -67,3 +67,41 @@ Fake-Discord inbound/web mirror/dedup scenario (no network):
 - The web stop split is included because stopping acceptance before adapter drain cannot be represented by the previous single `stop()` method.
 
 No known Task 7 concern remains.
+
+## Review remediation
+
+- Unknown adapters now return `retryable: false`. A real `SurfaceRouter([])` plus `DeliveryWorker` integration regression proves the row exhausts after one attempt instead of entering `retry_wait`.
+- Ordered shutdown now captures every lifecycle error while still awaiting web-ingress stop, worker, adapters, web drain, and database close in that order. It throws an `AggregateError` only after cleanup and preserves the same promise for repeated callers. Parameterized tests inject failure at every step, plus a multi-error case.
+- Worker timer and initial ticks attach explicit rejection handlers through injected `reportError`. Active-state cleanup uses handled `then` branches rather than creating an ignored rejecting `finally` promise. The regression installs an `unhandledRejection` sentinel and forces `listDueDeliveries` to throw.
+- Immediate canonical delivery outcomes are now persisted by `TurnCoordinator`; this prevents the recovery worker from resending an already successful adapter delivery.
+- Added production-boundary, temporary-SQLite smoke tests. The web-only composition exercises HTTP create/submit, fake dispatch/reply, SSE replay, close/reopen, and persisted canonical history. The fake-Discord composition exercises the real adapter/router/coordinator/worker, duplicate inbound receipt, canonical agent reply, one eligible external send, terminal delivery state, ordered cleanup, and temporary-state removal without network.
+
+Review RED evidence:
+
+- Router/worker integration initially entered `retry_wait` at `2000` rather than exhausting.
+- Worker exception test produced Bun unhandled errors from both the initial and interval tick.
+- Shutdown failure-injection tests showed later steps were skipped after the first rejection.
+- The integrated Discord smoke initially observed two external sends because an immediate success remained `pending` for the worker.
+
+Review focused verification:
+
+`bun test tests/phase2CompositionSmoke.test.ts tests/turnCoordinator.test.ts tests/transportMirror.test.ts tests/deliveryWorker.test.ts tests/shutdown.test.ts tests/surfaceRouter.test.ts`
+
+- Exit 0: 39 pass, 0 fail, 104 expectations.
+
+Review completion gate:
+
+`git diff --check; bun run typecheck; bun test`
+
+- Exit 0.
+- Diff check: no whitespace errors (line-ending notices only).
+- TypeScript: exit 0.
+- Full suite: 811 pass, 0 fail, 1983 expectations across 111 files.
+
+Review smoke command:
+
+`bun test tests/phase2CompositionSmoke.test.ts`
+
+- Included in both focused and full verification: 2 pass, 0 fail, 7 expectations.
+
+No remaining review concern identified.

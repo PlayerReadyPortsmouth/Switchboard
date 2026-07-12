@@ -62,7 +62,7 @@ describe("SurfaceRouter", () => {
 
   test("returns a typed failure for an unknown adapter", async () => {
     const [result] = await new SurfaceRouter([]).deliver(message(), [link("unknown", "two_way")])
-    expect(result).toEqual({ deliveryId: "m1:link-unknown", adapter: "unknown", ok: false, error: "Unknown surface adapter: unknown" })
+    expect(result).toEqual({ deliveryId: "m1:link-unknown", adapter: "unknown", ok: false, error: "Unknown surface adapter: unknown", retryable: false })
   })
 
   test("rejects duplicate adapter names", () => {

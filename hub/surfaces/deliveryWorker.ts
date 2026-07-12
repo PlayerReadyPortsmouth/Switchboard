@@ -13,6 +13,7 @@ export interface DeliveryWorkerOptions {
   jitter?: () => number
   maxAttempts?: number
   intervalMs?: number
+  reportError?: (error: unknown) => void
 }
 
 export class DeliveryWorker {
@@ -23,6 +24,7 @@ export class DeliveryWorker {
   private readonly jitter: () => number
   private readonly maxAttempts: number
   private readonly intervalMs: number
+  private readonly reportError: (error: unknown) => void
 
   constructor(
     private readonly repo: DeliveryRepository,
@@ -33,20 +35,24 @@ export class DeliveryWorker {
     this.jitter = options.jitter ?? (() => Math.floor(Math.random() * 251))
     this.maxAttempts = options.maxAttempts ?? 5
     this.intervalMs = options.intervalMs ?? 1_000
+    this.reportError = options.reportError ?? (error => process.stderr.write(`delivery worker tick failed: ${error}\n`))
   }
 
   start(): void {
     if (this.timer || this.stopped) return
-    this.timer = setInterval(() => { void this.tick() }, this.intervalMs)
+    this.timer = setInterval(() => { void this.tick().catch(this.reportError) }, this.intervalMs)
     this.timer.unref?.()
-    void this.tick()
+    void this.tick().catch(this.reportError)
   }
 
   tick(): Promise<void> {
     if (this.stopped || this.active) return Promise.resolve()
     const run = this.processDue()
     this.active = run
-    void run.finally(() => { if (this.active === run) this.active = undefined })
+    void run.then(
+      () => { if (this.active === run) this.active = undefined },
+      () => { if (this.active === run) this.active = undefined },
+    )
     return run
   }
 

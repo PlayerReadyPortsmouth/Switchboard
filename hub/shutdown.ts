@@ -15,13 +15,15 @@ export function createAsyncShutdown(stepsOrStop: ShutdownSteps | (() => Promise<
       try { await stepsOrStop() } finally { legacyClose!() }
       return
     }
-    try {
-      await stepsOrStop.stopAcceptingWeb()
-      await stepsOrStop.stopRetryWorker()
-      await stepsOrStop.stopAdapters()
-      await stepsOrStop.stopWeb()
-    } finally {
-      stepsOrStop.closeDatabase()
+    const errors: unknown[] = []
+    const attempt = async (step: () => void | Promise<void>) => {
+      try { await step() } catch (error) { errors.push(error) }
     }
+    await attempt(stepsOrStop.stopAcceptingWeb)
+    await attempt(stepsOrStop.stopRetryWorker)
+    await attempt(stepsOrStop.stopAdapters)
+    await attempt(stepsOrStop.stopWeb)
+    await attempt(stepsOrStop.closeDatabase)
+    if (errors.length) throw new AggregateError(errors, errors.map(error => error instanceof Error ? error.message : String(error)).join("; "))
   })()
 }

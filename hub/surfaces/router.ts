@@ -30,7 +30,7 @@ export class SurfaceRouter {
     return Promise.all(eligible.map(async (link): Promise<SurfaceDeliveryResult> => {
       const deliveryId = `${message.id}:${link.id}`
       const adapter = this.adapters.get(link.adapter)
-      if (!adapter) return { deliveryId, adapter: link.adapter, ok: false, error: `Unknown surface adapter: ${link.adapter}` }
+      if (!adapter) return { deliveryId, adapter: link.adapter, ok: false, error: `Unknown surface adapter: ${link.adapter}`, retryable: false }
 
       try {
         return await adapter.send({ deliveryId, conversationId: message.conversationId, link, message, replyToExternalId: replyToExternalIds?.get(link.id) })

@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test"
 import { DeliveryWorker } from "../hub/surfaces/deliveryWorker"
+import { SurfaceRouter } from "../hub/surfaces"
 import type { Delivery, Message, TransportLink } from "../hub/conversations/types"
 
 function fixture(results: Array<{ ok: boolean; externalMessageId?: string; error?: string; retryable?: boolean }>) {
@@ -75,4 +76,29 @@ test("unknown or failed delivery does not block the next due row", async () => {
   ;(f.worker as any).repo.listTransportLinks = () => [f.link, link2]
   await f.worker.tick()
   expect(f.writes.map(row => row[0])).toEqual(["retry", "delivered"])
+})
+
+test("real router marks an unknown adapter non-retryable and worker exhausts it once", async () => {
+  const f = fixture([])
+  const worker = new DeliveryWorker((f.worker as any).repo, new SurfaceRouter([]), { now: () => 1_000, jitter: () => 0 })
+  await worker.tick()
+  expect(f.writes).toEqual([["retry", "m:l", "Unknown surface adapter: discord", null, true, 1_000]])
+  expect(f.delivery.attempts).toBe(0)
+})
+
+test("timer reports a repository failure without an unhandled rejection", async () => {
+  const reported: unknown[] = []; const unhandled: unknown[] = []
+  const listener = (error: unknown) => { unhandled.push(error) }
+  process.on("unhandledRejection", listener)
+  const worker = new DeliveryWorker({ listDueDeliveries() { throw new Error("db down") } } as any, new SurfaceRouter([]), {
+    intervalMs: 1, reportError: error => reported.push(error),
+  })
+  worker.start()
+  await new Promise(resolve => setTimeout(resolve, 20))
+  await worker.stop()
+  await new Promise(resolve => setTimeout(resolve, 0))
+  process.off("unhandledRejection", listener)
+  expect(reported.length).toBeGreaterThan(0)
+  expect((reported[0] as Error).message).toBe("db down")
+  expect(unhandled).toEqual([])
 })
