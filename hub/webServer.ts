@@ -276,11 +276,11 @@ export async function handleWebRequest(req: Request, deps: WebDeps): Promise<Res
   return new Response("not found", { status: 404 })
 }
 
-/** Start the dashboard/API listener on `port`; returns a stop fn, or null (no-op)
+/** Start the dashboard/API listener on `port`; returns an async stop fn, or null (no-op)
  *  when `port` is unset — off by default. Binds `host` (default 127.0.0.1 —
  *  loopback-only unless an operator opts in). */
-export function startWebServer(port: number, deps: WebDeps, host = "127.0.0.1"): { stop: () => void } | null {
+export function startWebServer(port: number, deps: WebDeps, host = "127.0.0.1"): { stop: () => Promise<void> } | null {
   if (!port) return null
   const server = Bun.serve({ port, hostname: host, fetch: (req) => handleWebRequest(req, deps) })
-  return { stop: () => server.stop(true) }
+  return { stop: async () => { await server.stop(true) } }
 }

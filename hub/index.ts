@@ -80,6 +80,7 @@ import { selectExpired } from "./publishCleanup"
 import { randomBytes, randomUUID } from "crypto"
 import { Database } from "bun:sqlite"
 import { ConversationEventStream, ConversationService, SqliteConversationRepository } from "./conversations"
+import { createAsyncShutdown } from "./shutdown"
 import { MemoryBrowse } from "./memoryBrowse"
 import { BrowseSessions } from "./memoryBrowseSessions"
 import { renderListCard, renderDetailCard, renderConfirmCard, parseMemArg, type NoteSummary } from "./memoryCard"
@@ -2310,16 +2311,24 @@ const webDeps: WebDeps = {
 const webServer = startWebServer(hub.webPort ?? 0, webDeps, hub.webHost)
 if (webServer) console.error(`switchboard hub: web dashboard on ${hub.webHost ?? "127.0.0.1"}:${hub.webPort}`)
 
+const cleanupConversations = createAsyncShutdown(
+  () => webServer?.stop() ?? Promise.resolve(),
+  () => conversationDb.close(),
+)
 let shuttingDown = false
-const shutdownConversations = () => {
+const shutdownConversations = async () => {
   if (shuttingDown) return
   shuttingDown = true
-  webServer?.stop()
-  conversationDb.close()
-  process.exit(0)
+  try {
+    await cleanupConversations()
+    process.exit(0)
+  } catch (error) {
+    process.stderr.write(`switchboard hub: shutdown failed: ${error}\n`)
+    process.exit(1)
+  }
 }
-process.once("SIGINT", shutdownConversations)
-process.once("SIGTERM", shutdownConversations)
+process.once("SIGINT", () => { void shutdownConversations() })
+process.once("SIGTERM", () => { void shutdownConversations() })
 
 // Auto-deny pending approvals past their TTL: edit the card to "Expired" and
 // audit the lapse. The held effect never fires (fail-closed).
