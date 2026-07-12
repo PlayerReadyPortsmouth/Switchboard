@@ -1,4 +1,4 @@
-import { RepositoryConflictError, RepositoryNotFoundError, type AppendMessageResult, type ConversationRepository } from "./repository"
+import { RepositoryConflictError, RepositoryNotFoundError, type AppendMessageResult, type ConversationRepository, type ExternalMessageLink } from "./repository"
 import type { AppendMessageInput, Conversation, Delivery, Message, SyncMode, TransportLink } from "./types"
 import type { ConversationEventStream } from "./events"
 
@@ -69,8 +69,8 @@ export class ConversationService {
     }
   }
 
-  appendExternalMessage(adapter: string, externalEventId: string, input: AppendMessageInput): AppendMessageResult {
-    const message = this.repo.recordExternalMessage(adapter, externalEventId, input)
+  appendExternalMessage(adapter: string, externalEventId: string, input: AppendMessageInput, external?: ExternalMessageLink): AppendMessageResult {
+    const message = this.repo.recordExternalMessage(adapter, externalEventId, input, external)
     const inserted = message.id === input.id
     if (inserted) this.events?.publish({ kind: "message_committed", conversationId: message.conversationId, sequence: message.sequence, ts: message.createdAt, message })
     return { message, inserted }

@@ -99,6 +99,18 @@ test("rejects duplicate external transport locations", () => {
   expect(() => repo.createTransportLink({ ...link, id: "l2", conversationId: "c2" }, 13)).toThrow(RepositoryConflictError)
 })
 
+test("records inbound external message ids per link without cross-link leakage", () => {
+  const repo = makeRepo()
+  repo.createConversation({ id: "c1", title: "Mirror", primaryAgent: "architect", createdBy: "owner", createdAt: 1 })
+  const first = repo.createTransportLink({ id: "l1", conversationId: "c1", adapter: "discord", externalLocationId: "one", label: null, syncMode: "two_way", enabled: true }, 2)
+  const second = repo.createTransportLink({ id: "l2", conversationId: "c1", adapter: "discord", externalLocationId: "two", label: null, syncMode: "two_way", enabled: true }, 2)
+  const input = { id: "m1", conversationId: "c1", author: "discord:u", origin: "transport" as const, content: "hello", createdAt: 3 }
+  expect(repo.recordExternalMessage("discord", "evt", input, { linkId: first.id, externalMessageId: "discord-1" }).id).toBe("m1")
+  expect(repo.recordExternalMessage("discord", "evt", { ...input, id: "duplicate" }, { linkId: first.id, externalMessageId: "discord-1" }).id).toBe("m1")
+  expect(repo.resolveDeliveredExternalMessageId("m1", first.id)).toBe("discord-1")
+  expect(repo.resolveDeliveredExternalMessageId("m1", second.id)).toBeNull()
+})
+
 test("resolves a delivered external message id for a canonical message and link", () => {
   const repo = makeRepo()
   repo.createConversation({ id: "c1", title: "Thread", primaryAgent: "architect", createdBy: "owner", createdAt: 1 })

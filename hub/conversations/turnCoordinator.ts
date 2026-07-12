@@ -40,7 +40,7 @@ export class TurnCoordinator {
       author: `${event.adapter}:${event.authorId}`, origin: "transport", content: event.content,
       state: "committed", clientKey: `${event.adapter}:${event.eventId}`, createdAt: event.createdAt,
     }
-    const result = this.service.appendExternalMessage(event.adapter, event.eventId, input)
+    const result = this.service.appendExternalMessage(event.adapter, event.eventId, input, { linkId: link.id, externalMessageId: event.externalMessageId })
     if (result.inserted) this.dispatch(link.conversationId, result.message, `${event.adapter}:${event.authorId}`, `${event.adapter}:${event.authorName}`)
     return result
   }

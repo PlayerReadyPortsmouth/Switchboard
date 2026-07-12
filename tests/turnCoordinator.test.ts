@@ -99,14 +99,13 @@ describe("TurnCoordinator", () => {
     const service = new ConversationService(repo, () => ++now, () => `id-${now}`, stream)
     const conversation = service.create("owner", { title: "Thread", primaryAgent: "architect" })
     const link = repo.createTransportLink({ id: "discord-link", conversationId: conversation.id, adapter: "discord", externalLocationId: "room", label: null, syncMode: "two_way", enabled: true }, ++now)
-    const parent = service.appendUserMessage("owner", conversation.id, { content: "question", clientKey: "parent" }).message
-    const [parentDelivery] = repo.createDeliveries(parent.id, [link], "message", ++now)
-    repo.markDeliveryDelivered(parentDelivery!.id, "discord-parent", ++now)
+    const inbound: NormalizedSurfaceEvent = { adapter: "discord", eventId: "event-parent", externalLocationId: "room", externalMessageId: "discord-parent", authorId: "user", authorName: "User", content: "question", createdAt: ++now }
     let replyId: string | undefined
     const gateway: DiscordGatewayPort = { handleInbound() {}, async start() {}, async stop() {}, async sendText(_chat, _text, reply) { replyId = reply; return "discord-child" } }
     const router = new SurfaceRouter([new DiscordAdapter(gateway, "token")])
     const coordinator = new TurnCoordinator(service, repo, { dispatch: () => true }, stream, router, () => ++now, () => `turn-${now}`)
-    await coordinator.acceptAgentReply({ agent: "architect", kind: "reply", chatId: conversation.id, text: "answer", correlationId: "reply", replyTo: parent.id })
+    const parent = await coordinator.acceptSurfaceEvent(inbound)
+    await coordinator.acceptAgentReply({ agent: "architect", kind: "reply", chatId: conversation.id, text: "answer", correlationId: "reply", replyTo: parent!.message.id })
     expect(replyId).toBe("discord-parent")
   })
 

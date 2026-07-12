@@ -11,12 +11,21 @@ test("creates the canonical conversation schema idempotently", () => {
   ).all().map((row) => row.name)
   expect(names).toEqual(expect.arrayContaining([
     "conversations", "participants", "messages", "transport_links",
-    "deliveries", "external_event_receipts", "conversation_schema_migrations",
+    "deliveries", "external_event_receipts", "external_message_links", "conversation_schema_migrations",
   ]))
-  expect(db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(1)
+  expect(db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(2)
 })
 
-test("v1 schema rejects values outside domain enums", () => {
+test("upgrades an existing v1 database with link-scoped external message mappings", () => {
+  const db = new Database(":memory:")
+  runConversationMigrations(db)
+  db.exec("DROP TABLE external_message_links; DELETE FROM conversation_schema_migrations WHERE version=2; PRAGMA user_version=1")
+  runConversationMigrations(db)
+  expect(db.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type='table' AND name='external_message_links'").get()?.name).toBe("external_message_links")
+  expect(db.query<{ user_version: number }, []>("PRAGMA user_version").get()?.user_version).toBe(2)
+})
+
+test("schema rejects values outside domain enums", () => {
   const db = new Database(":memory:")
   runConversationMigrations(db)
   db.exec("INSERT INTO conversations VALUES ('c','t','a','u',1,1,NULL)")

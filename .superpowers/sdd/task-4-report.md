@@ -91,3 +91,22 @@ Review r2 self-check:
 - Missing, pending, failed, or null-ID parent deliveries omit reply metadata and still deliver plain text.
 - Successful compensation reports a normal retryable failure; failed compensation is the only path that sets `retryable: false`.
 - Legacy `sendReply` is unchanged.
+
+## Final reply-path follow-up
+
+- Added schema migration v2 with `external_message_links`, keyed by canonical message and link and uniquely constraining external IDs within each link.
+- Migration execution now applies v2 both to fresh databases and databases already carrying migration v1, and sets `user_version` to 2.
+- Inbound receipt recording atomically persists the canonical message receipt and its link-scoped external message ID. Duplicate receipt processing reuses the canonical message and mapping.
+- Repository reply resolution now checks link-scoped inbound mappings as well as delivered outbound rows, without cross-link fallback.
+- `acceptSurfaceEvent` passes its resolved link ID and normalized external message ID into persistence.
+- Replaced the coordinator threading integration setup with a true inbound normalized Discord event → persisted canonical parent → agent canonical reply → router → Discord adapter test.
+
+Final reply-path RED evidence:
+
+- `bun test tests/conversationMigrations.test.ts tests/conversationRepository.test.ts tests/turnCoordinator.test.ts`
+- Result: 31 pass, 4 fail. Failures reproduced the absent v2 schema, missing inbound mapping, and missing end-to-end external reply resolution.
+
+Final reply-path GREEN / final verification:
+
+- `bun test tests/conversationMigrations.test.ts tests/conversationRepository.test.ts tests/turnCoordinator.test.ts tests/surfaceRouter.test.ts tests/discordAdapter.test.ts hub/gateway.test.ts; if ($LASTEXITCODE -eq 0) { bun run typecheck }`
+- Result: exit 0; 68 pass, 0 fail, 176 assertions; `tsc --noEmit` exited 0.

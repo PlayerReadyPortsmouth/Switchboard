@@ -67,6 +67,17 @@ const migrationOne = `
   );
 `
 
+const migrationTwo = `
+  CREATE TABLE external_message_links (
+    message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    link_id TEXT NOT NULL REFERENCES transport_links(id) ON DELETE CASCADE,
+    external_message_id TEXT NOT NULL,
+    received_at INTEGER NOT NULL,
+    PRIMARY KEY (message_id, link_id),
+    UNIQUE (link_id, external_message_id)
+  );
+`
+
 export function runConversationMigrations(db: Database): void {
   db.exec("PRAGMA foreign_keys = ON")
   db.exec("PRAGMA busy_timeout = 5000")
@@ -80,13 +91,18 @@ export function runConversationMigrations(db: Database): void {
   `)
 
   db.transaction(() => {
-    const applied = db.query<{ version: number }, [number]>(
+    const v1 = db.query<{ version: number }, [number]>(
       "SELECT version FROM conversation_schema_migrations WHERE version = ?",
     ).get(1)
-    if (applied) return
-
-    db.exec(migrationOne)
-    db.query("INSERT INTO conversation_schema_migrations(version, applied_at) VALUES (?, ?)").run(1, Date.now())
-    db.exec("PRAGMA user_version = 1")
+    if (!v1) {
+      db.exec(migrationOne)
+      db.query("INSERT INTO conversation_schema_migrations(version, applied_at) VALUES (?, ?)").run(1, Date.now())
+    }
+    const v2 = db.query<{ version: number }, [number]>("SELECT version FROM conversation_schema_migrations WHERE version = ?").get(2)
+    if (!v2) {
+      db.exec(migrationTwo)
+      db.query("INSERT INTO conversation_schema_migrations(version, applied_at) VALUES (?, ?)").run(2, Date.now())
+    }
+    db.exec("PRAGMA user_version = 2")
   })()
 }

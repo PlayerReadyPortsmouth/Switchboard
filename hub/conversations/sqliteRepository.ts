@@ -108,6 +108,8 @@ export class SqliteConversationRepository implements ConversationRepository {
     return this.getDelivery(id)!
   }
   resolveDeliveredExternalMessageId(messageId: string, linkId: string): string | null {
+    const inbound = this.db.query<{ external_message_id: string }, [string, string]>("SELECT external_message_id FROM external_message_links WHERE message_id=? AND link_id=?").get(messageId, linkId)
+    if (inbound) return inbound.external_message_id
     const row = this.db.query<{ external_message_id: string | null }, [string, string]>("SELECT external_message_id FROM deliveries WHERE message_id=? AND link_id=? AND state='delivered' AND external_message_id IS NOT NULL ORDER BY updated_at DESC LIMIT 1").get(messageId, linkId)
     return row?.external_message_id ?? null
   }
@@ -129,12 +131,18 @@ export class SqliteConversationRepository implements ConversationRepository {
     if (!this.getDelivery(id)) throw new RepositoryNotFoundError(`Delivery ${id} not found`)
     throw new RepositoryConflictError(`Delivery ${id} is already terminal`)
   }
-  recordExternalMessage(adapter: string, externalEventId: string, input: AppendMessageInput): Message {
+  recordExternalMessage(adapter: string, externalEventId: string, input: AppendMessageInput, external?: { linkId: string; externalMessageId: string }): Message {
     return this.db.transaction(() => {
       const receipt = this.db.query<{ message_id: string }, [string,string]>("SELECT message_id FROM external_event_receipts WHERE adapter=? AND external_event_id=?").get(adapter, externalEventId)
-      if (receipt) return this.getMessage(receipt.message_id)!
-      const saved = this.appendWithinTransaction(input).message
-      this.db.query("INSERT INTO external_event_receipts(adapter,external_event_id,message_id,received_at) VALUES (?,?,?,?)").run(adapter, externalEventId, saved.id, input.createdAt)
+      const saved = receipt ? this.getMessage(receipt.message_id)! : this.appendWithinTransaction(input).message
+      if (!receipt) this.db.query("INSERT INTO external_event_receipts(adapter,external_event_id,message_id,received_at) VALUES (?,?,?,?)").run(adapter, externalEventId, saved.id, input.createdAt)
+      if (external) {
+        const linkRow = this.db.query<{ conversation_id: string; adapter: string }, [string]>("SELECT conversation_id,adapter FROM transport_links WHERE id=?").get(external.linkId)
+        if (!linkRow || linkRow.conversation_id !== saved.conversationId || linkRow.adapter !== adapter) throw new RepositoryConflictError(`External message link ${external.linkId} does not match ${adapter}:${saved.conversationId}`)
+        this.db.query("INSERT OR IGNORE INTO external_message_links(message_id,link_id,external_message_id,received_at) VALUES (?,?,?,?)").run(saved.id, external.linkId, external.externalMessageId, input.createdAt)
+        const mapping = this.db.query<{ external_message_id: string }, [string,string]>("SELECT external_message_id FROM external_message_links WHERE message_id=? AND link_id=?").get(saved.id, external.linkId)
+        if (mapping?.external_message_id !== external.externalMessageId) throw new RepositoryConflictError(`External message mapping conflicts for ${external.linkId}:${external.externalMessageId}`)
+      }
       return saved
     }).immediate()
   }

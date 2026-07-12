@@ -9,6 +9,7 @@ export class RepositoryNotFoundError extends Error {
 }
 
 export interface AppendMessageResult { message: Message; inserted: boolean }
+export interface ExternalMessageLink { linkId: string; externalMessageId: string }
 
 export interface ConversationRepository {
   createConversation(input: NewConversation): Conversation
@@ -30,5 +31,5 @@ export interface ConversationRepository {
   resolveDeliveredExternalMessageId(messageId: string, linkId: string): string | null
   markDeliveryRetry(id: string, error: string, nextAttemptAt: number | null, exhausted: boolean, now: number): Delivery
   listDueDeliveries(now: number, limit?: number): Delivery[]
-  recordExternalMessage(adapter: string, externalEventId: string, input: AppendMessageInput): Message
+  recordExternalMessage(adapter: string, externalEventId: string, input: AppendMessageInput, external?: ExternalMessageLink): Message
 }
