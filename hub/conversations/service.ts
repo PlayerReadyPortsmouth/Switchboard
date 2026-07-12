@@ -1,5 +1,5 @@
 import { RepositoryConflictError, RepositoryNotFoundError, type AppendMessageResult, type ConversationRepository } from "./repository"
-import type { Conversation, Message, SyncMode, TransportLink } from "./types"
+import type { AppendMessageInput, Conversation, Delivery, Message, SyncMode, TransportLink } from "./types"
 import type { ConversationEventStream } from "./events"
 
 export class ConversationForbiddenError extends Error {
@@ -67,6 +67,19 @@ export class ConversationService {
       if (error instanceof RepositoryConflictError) throw new ConversationValidationError(error.message)
       throw error
     }
+  }
+
+  appendExternalMessage(adapter: string, externalEventId: string, input: AppendMessageInput): AppendMessageResult {
+    const message = this.repo.recordExternalMessage(adapter, externalEventId, input)
+    const inserted = message.id === input.id
+    if (inserted) this.events?.publish({ kind: "message_committed", conversationId: message.conversationId, sequence: message.sequence, ts: message.createdAt, message })
+    return { message, inserted }
+  }
+
+  appendAgentMessage(input: AppendMessageInput, links: TransportLink[]): { message: Message; deliveries: Delivery[]; inserted: boolean } {
+    const result = this.repo.appendAgentMessage(input, links, this.now())
+    if (result.inserted) this.events?.publish({ kind: "message_committed", conversationId: result.message.conversationId, sequence: result.message.sequence, ts: result.message.createdAt, message: result.message })
+    return result
   }
 
   history(identity: string, conversationId: string, afterSequence = 0, limit = 100): Message[] {
