@@ -175,8 +175,37 @@ test("Gateway sendText chunks text and returns the first Discord message id", as
   const gateway = Object.create(Gateway.prototype) as Gateway
   const payloads: any[] = []
   ;(gateway as any).client = { channels: { fetch: async () => ({ send: async (payload: any) => { payloads.push(payload); return { id: `posted-${payloads.length}` } } }) } }
-  expect(await gateway.sendText("channel", "x".repeat(2500), "parent")).toBe("posted-1")
+  expect(await gateway.sendText("channel", "x".repeat(2500), "parent", "delivery-1")).toBe("posted-1")
   expect(payloads.map(payload => payload.content.length)).toEqual([2000, 500])
   expect(payloads[0].reply.messageReference).toBe("parent")
   expect(payloads[1].reply).toBeUndefined()
+  expect(payloads.every(payload => payload.enforceNonce === true)).toBe(true)
+  expect(payloads.every(payload => payload.nonce.length <= 25)).toBe(true)
+  expect(payloads[0].nonce).not.toBe(payloads[1].nonce)
+})
+
+test("Gateway sendText retry reuses chunk nonces so a completed first chunk is not duplicated", async () => {
+  const gateway = Object.create(Gateway.prototype) as Gateway
+  const posted = new Map<string, { id: string }>()
+  let failSecond = true
+  ;(gateway as any).client = { channels: { fetch: async () => ({ send: async (payload: any) => {
+    if (payload.content.length === 500 && failSecond) { failSecond = false; throw new Error("second chunk failed") }
+    const prior = posted.get(payload.nonce)
+    if (prior) return prior
+    const message = { id: `posted-${posted.size + 1}` }
+    posted.set(payload.nonce, message)
+    return message
+  } }) } }
+  await expect(gateway.sendText("channel", "x".repeat(2500), undefined, "delivery-1")).rejects.toThrow("second chunk failed")
+  expect(await gateway.sendText("channel", "x".repeat(2500), undefined, "delivery-1")).toBe("posted-1")
+  expect(posted.size).toBe(2)
+})
+
+test("buildInboundFromMessage excludes forwards from reply normalization", () => {
+  const msg = {
+    channelId: "chan", id: "forward", author: { id: "u", username: "alice" }, content: "",
+    createdAt: new Date(0), channel: { type: ChannelType.GuildText, isThread: () => false }, attachments: new Map(),
+    reference: { messageId: "source", type: 1 },
+  } as any
+  expect(buildInboundFromMessage(msg, []).replyToMessageId).toBeUndefined()
 })

@@ -3,12 +3,13 @@ import { DiscordAdapter, type DiscordGatewayPort } from "../hub/surfaces/discord
 import type { InboundMessage } from "../hub/types"
 import type { SurfaceDelivery } from "../hub/surfaces"
 
-function delivery(content = "hello", replyTo: string | null = null): SurfaceDelivery {
+function delivery(content = "hello", replyToExternalId?: string): SurfaceDelivery {
   return {
     deliveryId: "delivery-1",
     conversationId: "conversation-1",
     link: { id: "link-1", conversationId: "conversation-1", adapter: "discord", externalLocationId: "channel-1", label: null, syncMode: "two_way", enabled: true, createdAt: 1, updatedAt: 1 },
-    message: { id: "message-1", conversationId: "conversation-1", sequence: 1, author: "alice", origin: "web", content, replyTo, state: "committed", clientKey: null, createdAt: 1 },
+    message: { id: "message-1", conversationId: "conversation-1", sequence: 1, author: "alice", origin: "web", content, replyTo: "canonical-parent", state: "committed", clientKey: null, createdAt: 1 },
+    replyToExternalId,
   }
 }
 
@@ -31,7 +32,7 @@ describe("DiscordAdapter", () => {
     const calls: string[] = []
     const adapter = new DiscordAdapter(port({ async start(token) { calls.push(`start:${token}`) }, async stop() { calls.push("stop") } }), "secret")
     expect(adapter.name).toBe("discord")
-    expect(adapter.capabilities).toEqual({ text: true, replies: true, cards: true, attachments: true, edits: true, deletes: false })
+    expect(adapter.capabilities).toEqual({ text: true, replies: true, cards: false, attachments: false, edits: false, deletes: false })
     await adapter.start(async () => {})
     await adapter.stop()
     expect(calls).toEqual(["start:secret", "stop"])
@@ -41,8 +42,25 @@ describe("DiscordAdapter", () => {
     let args: unknown[] = []
     const adapter = new DiscordAdapter(port({ async sendText(...values) { args = values; return "discord-9" } }), "token")
     const result = await adapter.send(delivery("hello", "discord-parent"))
-    expect(args).toEqual(["channel-1", "**alice** · hello", "discord-parent"])
+    expect(args).toEqual(["channel-1", "**alice** · hello", "discord-parent", "delivery-1"])
     expect(result).toEqual({ deliveryId: "delivery-1", adapter: "discord", ok: true, externalMessageId: "discord-9" })
+  })
+
+  test("does not leak canonical reply ids when no external reply id was resolved", async () => {
+    let args: unknown[] = []
+    const adapter = new DiscordAdapter(port({ async sendText(...values) { args = values; return "discord-9" } }), "token")
+    await adapter.send(delivery())
+    expect(args[2]).toBeUndefined()
+  })
+
+  test("reports rejected inbound handlers without an unhandled rejection", async () => {
+    let inbound!: (message: InboundMessage) => void
+    const errors: unknown[] = []
+    const adapter = new DiscordAdapter(port({ handleInbound(cb) { inbound = cb } }), "token", error => errors.push(error))
+    await adapter.start(async () => { throw new Error("coordinator failed") })
+    inbound({ chatId: "c", messageId: "m", userId: "u", user: "U", content: "x", ts: new Date(0).toISOString(), isDM: false })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect((errors[0] as Error).message).toBe("coordinator failed")
   })
 
   test("converts gateway send failures into delivery failures", async () => {

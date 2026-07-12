@@ -17,6 +17,7 @@ export interface SurfaceDelivery {
   conversationId: string
   link: TransportLink
   message: Message
+  replyToExternalId?: string
 }
 
 export interface SurfaceDeliveryResult {

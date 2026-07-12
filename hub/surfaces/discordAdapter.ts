@@ -6,18 +6,22 @@ export interface DiscordGatewayPort {
   handleInbound(cb: (message: InboundMessage) => void): void
   start(token: string): Promise<void>
   stop(): Promise<void>
-  sendText(chatId: string, text: string, replyTo?: string): Promise<string | undefined>
+  sendText(chatId: string, text: string, replyTo: string | undefined, deliveryId: string): Promise<string | undefined>
 }
 
 export class DiscordAdapter implements SurfaceAdapter {
   readonly name = "discord"
-  readonly capabilities = { text: true, replies: true, cards: true, attachments: true, edits: true, deletes: false }
+  readonly capabilities = { text: true, replies: true, cards: false, attachments: false, edits: false, deletes: false }
 
-  constructor(private readonly gateway: DiscordGatewayPort, private readonly token: string) {}
+  constructor(
+    private readonly gateway: DiscordGatewayPort,
+    private readonly token: string,
+    private readonly reportError: (error: unknown) => void = error => process.stderr.write(`discord adapter inbound handler failed: ${error}\n`),
+  ) {}
 
   async start(onEvent: (event: NormalizedSurfaceEvent) => Promise<void>): Promise<void> {
     this.gateway.handleInbound(message => {
-      void onEvent({
+      const event = {
         adapter: this.name,
         eventId: message.messageId,
         externalLocationId: message.chatId,
@@ -27,7 +31,8 @@ export class DiscordAdapter implements SurfaceAdapter {
         content: message.content,
         createdAt: Date.parse(message.ts),
         replyToExternalId: message.replyToMessageId,
-      })
+      }
+      void Promise.resolve().then(() => onEvent(event)).catch(this.reportError)
     })
     await this.gateway.start(this.token)
   }
@@ -39,7 +44,8 @@ export class DiscordAdapter implements SurfaceAdapter {
       const externalMessageId = await this.gateway.sendText(
         delivery.link.externalLocationId,
         `**${delivery.message.author}** · ${delivery.message.content}`,
-        delivery.message.replyTo ?? undefined,
+        delivery.replyToExternalId,
+        delivery.deliveryId,
       )
       if (!externalMessageId) return { deliveryId: delivery.deliveryId, adapter: this.name, ok: false, error: "Discord channel unavailable" }
       return { deliveryId: delivery.deliveryId, adapter: this.name, ok: true, externalMessageId }

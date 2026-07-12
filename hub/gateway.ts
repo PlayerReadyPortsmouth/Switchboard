@@ -3,6 +3,7 @@ import {
   ButtonBuilder, ButtonStyle, ActionRowBuilder, EmbedBuilder, AttachmentBuilder,
   type Message, type Interaction,
 } from "discord.js"
+import { createHash } from "node:crypto"
 import type { AgentRegistry, InboundMessage, AgentReply, AgentConfig, HubConfig, CardSpec, CardModal } from "./types"
 import { chunk, formatOutbound } from "./format"
 import { buildModal } from "./modal"
@@ -166,7 +167,7 @@ export function buildInboundFromMessage(
       ...forwards.flatMap(f => f.attachments),
     ],
     quote,
-    replyToMessageId: msg.reference?.messageId ?? undefined,
+    replyToMessageId: msg.reference?.type !== MessageReferenceType.Forward ? (msg.reference?.messageId ?? undefined) : undefined,
     forwards: forwards.length ? forwards.map(f => ({ content: f.content })) : undefined,
   }
 }
@@ -347,7 +348,7 @@ export class Gateway {
   }
 
   /** Adapter-facing text primitive. Returns the first posted Discord id. */
-  async sendText(chatId: string, text: string, replyTo?: string): Promise<string | undefined> {
+  async sendText(chatId: string, text: string, replyTo: string | undefined, deliveryId: string): Promise<string | undefined> {
     const ch = await this.client.channels.fetch(chatId)
     if (!ch || !("send" in ch)) return undefined
     const chunks = chunk(text, 2000, "newline")
@@ -355,6 +356,8 @@ export class Gateway {
     for (let i = 0; i < chunks.length; i++) {
       const msg = await (ch as any).send({
         content: chunks[i],
+        nonce: createHash("sha256").update(`${deliveryId}:${i}`).digest("hex").slice(0, 25),
+        enforceNonce: true,
         ...(i === 0 && replyTo ? { reply: { messageReference: replyTo, failIfNotExists: false } } : {}),
       })
       firstId ??= msg?.id

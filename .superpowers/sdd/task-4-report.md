@@ -39,3 +39,28 @@ Implemented and verified.
 ## Concerns
 
 - Discord creates one external message per chunk while `SurfaceDeliveryResult` carries one ID. Only the first ID can be retained by the current contract.
+
+## Review follow-up
+
+- Added `SurfaceDelivery.replyToExternalId`; the adapter no longer passes canonical `Message.replyTo` values to Discord.
+- Added deterministic SHA-256-derived, 25-character per-delivery/per-chunk Discord nonces with `enforceNonce: true`. A retry reuses each nonce, allowing Discord to deduplicate chunks already accepted before a later chunk failed.
+- Narrowed advertised canonical capabilities to text and replies. Cards, attachments, edits, and deletes are false.
+- Forward references no longer normalize as replies.
+- Rejected asynchronous inbound handlers are caught and routed to an injectable error reporter.
+
+Review RED evidence:
+
+- `bun test tests/discordAdapter.test.ts hub/gateway.test.ts`
+- Result: 18 pass, 7 fail. Failures directly reproduced all five review findings, including a second-chunk failure/retry leaving only one nonce entry without the fix.
+
+Review GREEN / final verification:
+
+- `bun test tests/discordAdapter.test.ts hub/gateway.test.ts tests/surfaceRouter.test.ts; if ($LASTEXITCODE -eq 0) { bun run typecheck }`
+- Result: exit 0; 31 pass, 0 fail, 64 assertions; `tsc --noEmit` exited 0.
+
+Review self-check:
+
+- Existing `sendReply` remains unchanged and does not opt into adapter nonce semantics.
+- Nonces contain lowercase hexadecimal characters only and are exactly 25 characters, within Discord's limit.
+- The delivery ID is stable across queue retries and the chunk index is stable for immutable canonical message content, so nonce reuse is deterministic.
+- The gateway still returns the first chunk's external ID; the delivery result schema cannot represent every chunk ID.
