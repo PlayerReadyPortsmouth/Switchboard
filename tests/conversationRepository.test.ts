@@ -45,6 +45,9 @@ test("accepts replies only to messages in the same conversation", () => {
   expect(repo.appendMessage({ id: "reply", conversationId: "c1", author: "owner", origin: "web", content: "reply", replyTo: "parent", createdAt: 12 }).message.replyTo).toBe("parent")
   expect(() => repo.appendMessage({ id: "missing-reply", conversationId: "c1", author: "owner", origin: "web", content: "reply", replyTo: "missing", createdAt: 13 })).toThrow(RepositoryConflictError)
   expect(() => repo.appendMessage({ id: "cross-reply", conversationId: "c2", author: "owner", origin: "web", content: "reply", replyTo: "parent", createdAt: 14 })).toThrow(RepositoryConflictError)
+  for (const replyTo of ["", "   "]) {
+    expect(() => repo.appendMessage({ id: `blank-${replyTo.length}`, conversationId: "c1", author: "owner", origin: "web", content: "reply", replyTo, createdAt: 15 })).toThrow(RepositoryConflictError)
+  }
   expect(repo.listMessages("c2")).toEqual([])
 })
 

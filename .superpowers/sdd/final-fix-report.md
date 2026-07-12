@@ -43,3 +43,29 @@ Result: exit 0; 33 pass, 0 fail, 113 assertions.
 ## Concerns
 
 The checks are part of the v1 creation schema as requested. A database that already recorded migration version 1 before this branch's schema ships would not be rebuilt automatically; this feature is still in its pre-release migration phase, so no version-2 table-rebuild migration was added.
+
+## Final re-review: blank reply IDs
+
+- Repository appends now treat a provided empty or whitespace-only `replyTo` as `RepositoryConflictError`, so no raw SQLite foreign-key exception can escape.
+- The service rejects blank reply IDs as `ConversationValidationError` before repository access and trims padded valid IDs to their canonical value.
+- Repository, service, and real HTTP tests cover empty and whitespace-only values; the service and HTTP tests also preserve padded valid same-conversation reply behavior.
+
+RED command:
+
+`bun test tests/conversationRepository.test.ts tests/conversationService.test.ts tests/conversationWeb.test.ts`
+
+Result: exit 1; 29 pass, 3 fail, 102 assertions. The failures reproduced the raw SQLite error for `replyTo: ""`, rejection rather than normalization of a padded valid ID, and the HTTP 500 path.
+
+Final focused command:
+
+`bun test tests/conversationMigrations.test.ts tests/conversationRepository.test.ts tests/conversationService.test.ts tests/conversationWeb.test.ts tests/conversationEvents.test.ts tests/webServer.test.ts tests/web.test.ts`
+
+Result: exit 0; 73 pass, 0 fail, 210 assertions.
+
+Additional verification:
+
+- `bun run typecheck` — exit 0; `tsc --noEmit` completed successfully.
+- `bun test` — exit 0; 736 pass, 0 fail, 1785 assertions across 103 files.
+- `git diff --check` — exit 0; no whitespace errors.
+
+Re-review self-check: blank inputs cannot reach the insert, padded valid IDs are stored trimmed, missing/cross-conversation checks still use the same transaction, and valid same-conversation replies still return 201 over HTTP.

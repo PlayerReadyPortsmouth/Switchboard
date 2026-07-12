@@ -52,8 +52,10 @@ test("validates reply targets and bounds message history pages", () => {
   const second = service.create("owner", { title: "Second", primaryAgent: "architect" })
   const parent = service.appendUserMessage("owner", first.id, { content: "parent", clientKey: "p" }).message
   expect(service.appendUserMessage("owner", first.id, { content: "reply", clientKey: "r", replyTo: parent.id }).message.replyTo).toBe(parent.id)
+  expect(service.appendUserMessage("owner", first.id, { content: "trimmed", clientKey: "trimmed", replyTo: `  ${parent.id}  ` }).message.replyTo).toBe(parent.id)
   expect(() => service.appendUserMessage("owner", first.id, { content: "bad", clientKey: "missing", replyTo: "missing" })).toThrow(ConversationValidationError)
   expect(() => service.appendUserMessage("owner", second.id, { content: "bad", clientKey: "cross", replyTo: parent.id })).toThrow(ConversationValidationError)
+  for (const replyTo of ["", "   "]) expect(() => service.appendUserMessage("owner", first.id, { content: "bad", clientKey: `blank-${replyTo.length}`, replyTo })).toThrow(ConversationValidationError)
   expect(() => service.history("owner", first.id, 0, 201)).toThrow(ConversationValidationError)
 })
 

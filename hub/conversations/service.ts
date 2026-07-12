@@ -54,9 +54,11 @@ export class ConversationService {
   appendUserMessage(identity: string, conversationId: string, input: UserMessageInput): AppendMessageResult {
     if (!input.content.trim()) throw new ConversationValidationError("Message content is required")
     if (!input.clientKey?.trim()) throw new ConversationValidationError("Client key is required")
+    const replyTo = input.replyTo?.trim()
+    if (input.replyTo !== undefined && !replyTo) throw new ConversationValidationError("Reply target is required when replyTo is provided")
     this.requireRole(identity, conversationId, ["owner", "member"])
     try {
-      const result = this.repo.appendMessage({ id: this.id(), conversationId, author: identity, origin: "web", content: input.content, replyTo: input.replyTo, state: "committed", clientKey: input.clientKey, createdAt: this.now() })
+      const result = this.repo.appendMessage({ id: this.id(), conversationId, author: identity, origin: "web", content: input.content, ...(replyTo === undefined ? {} : { replyTo }), state: "committed", clientKey: input.clientKey, createdAt: this.now() })
       if (result.inserted) {
         this.events?.publish({ kind: "message_committed", conversationId, sequence: result.message.sequence, ts: result.message.createdAt, message: result.message })
       }
