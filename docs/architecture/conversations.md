@@ -38,11 +38,11 @@ All IDs in route paths are URL encoded. JSON routes return `400` for invalid inp
 | `POST` | `/api/conversations` | Create a conversation from `{ title, primaryAgent }`; caller becomes owner. |
 | `GET` | `/api/conversations/:id` | Fetch one visible conversation. |
 | `DELETE` | `/api/conversations/:id` | Archive a conversation; owner only. |
-| `GET` | `/api/conversations/:id/messages?after=0&limit=100` | Fetch messages after a sequence. |
+| `GET` | `/api/conversations/:id/messages?after=0&limit=100` | Fetch messages after a sequence. `limit` must be 1–200. |
 | `POST` | `/api/conversations/:id/messages` | Commit `{ content, replyTo? }`; owner/member only. Supply `Idempotency-Key` (a `clientKey` body field is also accepted). A new message returns `201`; a duplicate key returns the original message with `200`. |
 | `GET` | `/api/conversations/:id/events?after=<sequence>` | Subscribe to resumable server-sent events. |
 | `GET` | `/api/conversations/:id/links` | List transport links. |
-| `POST` | `/api/conversations/:id/links` | Add a transport link; owner only. |
+| `POST` | `/api/conversations/:id/links` | Add a transport link; owner only. Adapter and external-location IDs are trimmed and must be nonblank. |
 
 ## SSE resume semantics
 

@@ -6,7 +6,7 @@ import type { AgentChangeClassification } from "./agentConfigDraft"
 import type { HubChangeClassification } from "./hubConfigDraft"
 import type { Conversation, Message, SyncMode, TransportLink } from "./conversations/types"
 import type { ConversationEvent } from "./conversations/events"
-import { ConversationForbiddenError, ConversationValidationError } from "./conversations/service"
+import { ConversationForbiddenError, ConversationValidationError, MAX_MESSAGES_PAGE_SIZE } from "./conversations/service"
 import { RepositoryConflictError, RepositoryNotFoundError, type AppendMessageResult } from "./conversations/repository"
 
 export interface ChannelInfo { channelId: string; name?: string; agent: string }
@@ -161,7 +161,7 @@ export async function handleWebRequest(req: Request, deps: WebDeps): Promise<Res
       if (conversationMessagesMatch && method === "GET") {
         const after = nonNegativeInteger(url.searchParams.get("after"), 0)
         const limit = nonNegativeInteger(url.searchParams.get("limit"), 100)
-        if (after === null || limit === null || limit < 1) return json({ error: "invalid_cursor" }, 400)
+        if (after === null || limit === null || limit < 1 || limit > MAX_MESSAGES_PAGE_SIZE) return json({ error: "invalid_cursor" }, 400)
         return json(deps.listConversationMessages!(email, decodeId(conversationMessagesMatch), after, limit))
       }
       if (conversationMessagesMatch && method === "POST") {
@@ -176,12 +176,12 @@ export async function handleWebRequest(req: Request, deps: WebDeps): Promise<Res
       if (conversationLinksMatch && method === "GET") return json(deps.listConversationLinks!(email, decodeId(conversationLinksMatch)))
       if (conversationLinksMatch && method === "POST") {
         const body = await bodyJson(req)
-        if (typeof body?.adapter !== "string" || typeof body?.externalLocationId !== "string") return json({ error: "missing_fields" }, 400)
+        if (typeof body?.adapter !== "string" || typeof body?.externalLocationId !== "string" || !body.adapter.trim() || !body.externalLocationId.trim()) return json({ error: "missing_fields" }, 400)
         const syncModes = ["two_way", "inbound_only", "outbound_only", "notifications_only"]
         if (body.syncMode !== undefined && (typeof body.syncMode !== "string" || !syncModes.includes(body.syncMode))) return json({ error: "invalid_syncMode" }, 400)
         if (body.label !== undefined && body.label !== null && typeof body.label !== "string") return json({ error: "invalid_label" }, 400)
         if (body.enabled !== undefined && typeof body.enabled !== "boolean") return json({ error: "invalid_enabled" }, 400)
-        return json(deps.addConversationLink!(email, decodeId(conversationLinksMatch), body as { adapter: string; externalLocationId: string; label?: string | null; syncMode?: SyncMode; enabled?: boolean }), 201)
+        return json(deps.addConversationLink!(email, decodeId(conversationLinksMatch), { ...(body as { adapter: string; externalLocationId: string; label?: string | null; syncMode?: SyncMode; enabled?: boolean }), adapter: body.adapter.trim(), externalLocationId: body.externalLocationId.trim() }), 201)
       }
 
       if (conversationEventsMatch && method === "GET") {

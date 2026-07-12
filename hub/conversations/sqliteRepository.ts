@@ -47,6 +47,12 @@ export class SqliteConversationRepository implements ConversationRepository {
     const c = this.getConversation(input.conversationId)
     if (!c) throw new RepositoryNotFoundError(`Conversation ${input.conversationId} not found`)
     if (c.archivedAt !== null) throw new RepositoryConflictError(`Conversation ${input.conversationId} is archived`)
+    if (input.replyTo) {
+      const target = this.db.query<{ conversation_id: string }, [string]>("SELECT conversation_id FROM messages WHERE id=?").get(input.replyTo)
+      if (!target || target.conversation_id !== input.conversationId) {
+        throw new RepositoryConflictError(`Reply target ${input.replyTo} must belong to conversation ${input.conversationId}`)
+      }
+    }
     const next = this.db.query<{ sequence: number }, [string]>("SELECT COALESCE(MAX(sequence),0)+1 AS sequence FROM messages WHERE conversation_id=?").get(input.conversationId)!.sequence
     this.db.query("INSERT INTO messages(id,conversation_id,sequence,author,origin,content,reply_to,state,client_key,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)").run(input.id, input.conversationId, next, input.author, input.origin, input.content, input.replyTo ?? null, input.state ?? "committed", input.clientKey ?? null, input.createdAt)
     this.db.query("UPDATE conversations SET updated_at=? WHERE id=?").run(input.createdAt, input.conversationId)

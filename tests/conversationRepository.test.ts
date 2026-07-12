@@ -38,6 +38,16 @@ test("assigns ordered message sequences and returns a duplicate client key once"
   expect([first.message.sequence, first.inserted, duplicate.message.id, duplicate.inserted, second.message.sequence]).toEqual([1, true, "m1", false, 2])
 })
 
+test("accepts replies only to messages in the same conversation", () => {
+  const repo = makeRepo()
+  for (const id of ["c1", "c2"]) repo.createConversation({ id, title: id, primaryAgent: "architect", createdBy: "owner", createdAt: 10 })
+  repo.appendMessage({ id: "parent", conversationId: "c1", author: "owner", origin: "web", content: "parent", createdAt: 11 })
+  expect(repo.appendMessage({ id: "reply", conversationId: "c1", author: "owner", origin: "web", content: "reply", replyTo: "parent", createdAt: 12 }).message.replyTo).toBe("parent")
+  expect(() => repo.appendMessage({ id: "missing-reply", conversationId: "c1", author: "owner", origin: "web", content: "reply", replyTo: "missing", createdAt: 13 })).toThrow(RepositoryConflictError)
+  expect(() => repo.appendMessage({ id: "cross-reply", conversationId: "c2", author: "owner", origin: "web", content: "reply", replyTo: "parent", createdAt: 14 })).toThrow(RepositoryConflictError)
+  expect(repo.listMessages("c2")).toEqual([])
+})
+
 test("deduplicates an external event and returns its canonical message", () => {
   const repo = makeRepo()
   repo.createConversation({ id: "c1", title: "Mirror", primaryAgent: "architect", createdBy: "owner", createdAt: 10 })

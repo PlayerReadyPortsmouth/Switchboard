@@ -1,6 +1,8 @@
 import { expect, test } from "bun:test"
+import { Database } from "bun:sqlite"
 import { handleWebRequest, type WebDeps } from "../hub/webServer"
-import { ConversationForbiddenError, ConversationValidationError } from "../hub/conversations/service"
+import { ConversationForbiddenError, ConversationService, ConversationValidationError } from "../hub/conversations/service"
+import { SqliteConversationRepository } from "../hub/conversations/sqliteRepository"
 import { RepositoryConflictError, RepositoryNotFoundError } from "../hub/conversations/repository"
 import type { ConversationEvent } from "../hub/conversations/events"
 import type { Conversation, Message, TransportLink } from "../hub/conversations/types"
@@ -122,4 +124,37 @@ test("conversation query and link option shapes are validated", async () => {
     { adapter: "discord", externalLocationId: "room", label: 3 },
     { adapter: "discord", externalLocationId: "room", enabled: "yes" },
   ]) expect((await handleWebRequest(req("/api/conversations/c1/links", "POST", input), deps())).status).toBe(400)
+  expect((await handleWebRequest(req("/api/conversations/c1/links", "POST", { adapter: " ", externalLocationId: "room" }), deps())).status).toBe(400)
+  expect((await handleWebRequest(req("/api/conversations/c1/links", "POST", { adapter: "discord", externalLocationId: " " }), deps())).status).toBe(400)
+})
+
+test("message routes reject invalid reply targets and oversized pages without leaking errors", async () => {
+  for (const replyTo of ["missing", "message-from-another-conversation"]) {
+    const response = await handleWebRequest(req("/api/conversations/c1/messages", "POST", { content: "reply", replyTo }, { "idempotency-key": replyTo }), deps({
+      appendConversationMessage: () => { throw new ConversationValidationError("Reply target must belong to conversation c1") },
+    }))
+    expect(response.status).toBe(400)
+  }
+  expect((await handleWebRequest(req("/api/conversations/c1/messages?limit=201"), deps())).status).toBe(400)
+  expect((await handleWebRequest(req("/api/conversations/c1/messages?limit=200"), deps())).status).toBe(200)
+})
+
+test("message HTTP replies are committed only within their conversation", async () => {
+  const repo = new SqliteConversationRepository(new Database(":memory:"))
+  let sequence = 0
+  const service = new ConversationService(repo, () => ++sequence, () => `generated-${++sequence}`)
+  const first = service.create("owner@example.com", { title: "First", primaryAgent: "architect" })
+  const second = service.create("owner@example.com", { title: "Second", primaryAgent: "architect" })
+  const parent = service.appendUserMessage("owner@example.com", first.id, { content: "parent", clientKey: "parent" }).message
+  const integrated = deps({
+    appendConversationMessage: (identity, conversationId, input) => service.appendUserMessage(identity, conversationId, input),
+  })
+
+  const valid = await handleWebRequest(req(`/api/conversations/${first.id}/messages`, "POST", { content: "valid", replyTo: parent.id }, { "idempotency-key": "valid" }), integrated)
+  const missing = await handleWebRequest(req(`/api/conversations/${first.id}/messages`, "POST", { content: "missing", replyTo: "absent" }, { "idempotency-key": "missing" }), integrated)
+  const cross = await handleWebRequest(req(`/api/conversations/${second.id}/messages`, "POST", { content: "cross", replyTo: parent.id }, { "idempotency-key": "cross" }), integrated)
+  expect(valid.status).toBe(201)
+  expect((await valid.json()).replyTo).toBe(parent.id)
+  expect(missing.status).toBe(400)
+  expect(cross.status).toBe(400)
 })

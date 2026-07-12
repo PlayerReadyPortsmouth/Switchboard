@@ -46,6 +46,17 @@ test("validates creation and message input", () => {
   expect(() => service.appendUserMessage("owner", c.id, { content: "ok", clientKey: "" })).toThrow(ConversationValidationError)
 })
 
+test("validates reply targets and bounds message history pages", () => {
+  const { service } = fixture()
+  const first = service.create("owner", { title: "First", primaryAgent: "architect" })
+  const second = service.create("owner", { title: "Second", primaryAgent: "architect" })
+  const parent = service.appendUserMessage("owner", first.id, { content: "parent", clientKey: "p" }).message
+  expect(service.appendUserMessage("owner", first.id, { content: "reply", clientKey: "r", replyTo: parent.id }).message.replyTo).toBe(parent.id)
+  expect(() => service.appendUserMessage("owner", first.id, { content: "bad", clientKey: "missing", replyTo: "missing" })).toThrow(ConversationValidationError)
+  expect(() => service.appendUserMessage("owner", second.id, { content: "bad", clientKey: "cross", replyTo: parent.id })).toThrow(ConversationValidationError)
+  expect(() => service.history("owner", first.id, 0, 201)).toThrow(ConversationValidationError)
+})
+
 test("transport links default to two-way and creation is owner-only", () => {
   const { service, repo } = fixture()
   const c = service.create("owner", { title: "Links", primaryAgent: "architect" })
@@ -56,6 +67,10 @@ test("transport links default to two-way and creation is owner-only", () => {
   expect(saved.syncMode).toBe("two_way")
   expect(service.listTransportLinks("member", c.id)).toEqual([saved])
   expect(() => service.listTransportLinks("stranger", c.id)).toThrow(ConversationForbiddenError)
+  expect(() => service.addTransportLink("owner", c.id, { adapter: "  ", externalLocationId: "room" })).toThrow(ConversationValidationError)
+  expect(() => service.addTransportLink("owner", c.id, { adapter: "discord", externalLocationId: "  " })).toThrow(ConversationValidationError)
+  const trimmed = service.addTransportLink("owner", c.id, { adapter: "  slack ", externalLocationId: " channel-1 " })
+  expect([trimmed.adapter, trimmed.externalLocationId]).toEqual(["slack", "channel-1"])
 })
 
 test("a duplicate client key emits one committed event", () => {

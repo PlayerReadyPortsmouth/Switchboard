@@ -13,6 +13,7 @@ export class ConversationValidationError extends Error {
 type CreateInput = { title: string; primaryAgent: string }
 type UserMessageInput = { content: string; clientKey: string; replyTo?: string }
 type LinkInput = { adapter: string; externalLocationId: string; label?: string | null; syncMode?: SyncMode; enabled?: boolean }
+export const MAX_MESSAGES_PAGE_SIZE = 200
 
 export class ConversationService {
   constructor(
@@ -67,13 +68,19 @@ export class ConversationService {
   }
 
   history(identity: string, conversationId: string, afterSequence = 0, limit = 100): Message[] {
+    if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) throw new ConversationValidationError("Message cursor must be a non-negative integer")
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_MESSAGES_PAGE_SIZE) throw new ConversationValidationError(`Message page size must be between 1 and ${MAX_MESSAGES_PAGE_SIZE}`)
     this.requireParticipant(identity, conversationId)
     return this.repo.listMessages(conversationId, afterSequence, limit)
   }
 
   addTransportLink(identity: string, conversationId: string, input: LinkInput): TransportLink {
     this.requireRole(identity, conversationId, ["owner"])
-    return this.repo.createTransportLink({ id: this.id(), conversationId, adapter: input.adapter, externalLocationId: input.externalLocationId, label: input.label ?? null, syncMode: input.syncMode ?? "two_way", enabled: input.enabled ?? true }, this.now())
+    const adapter = input.adapter.trim()
+    const externalLocationId = input.externalLocationId.trim()
+    if (!adapter) throw new ConversationValidationError("Transport adapter is required")
+    if (!externalLocationId) throw new ConversationValidationError("External location ID is required")
+    return this.repo.createTransportLink({ id: this.id(), conversationId, adapter, externalLocationId, label: input.label ?? null, syncMode: input.syncMode ?? "two_way", enabled: input.enabled ?? true }, this.now())
   }
 
   listTransportLinks(identity: string, conversationId: string): TransportLink[] {
