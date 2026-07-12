@@ -50,7 +50,11 @@ export class DiscordAdapter implements SurfaceAdapter {
       if (!externalMessageId) return { deliveryId: delivery.deliveryId, adapter: this.name, ok: false, error: "Discord channel unavailable" }
       return { deliveryId: delivery.deliveryId, adapter: this.name, ok: true, externalMessageId }
     } catch (error) {
-      return { deliveryId: delivery.deliveryId, adapter: this.name, ok: false, error: error instanceof Error ? error.message : String(error) }
+      return {
+        deliveryId: delivery.deliveryId, adapter: this.name, ok: false,
+        error: error instanceof Error ? error.message : String(error),
+        ...((error as { retryable?: boolean })?.retryable === false ? { retryable: false } : {}),
+      }
     }
   }
 }

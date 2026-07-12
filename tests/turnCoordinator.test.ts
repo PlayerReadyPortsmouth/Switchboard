@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test"
 import { ConversationEventStream, ConversationService, SqliteConversationRepository, TurnCoordinator } from "../hub/conversations"
 import type { ConversationEvent } from "../hub/conversations/events"
 import type { InboundMessage } from "../hub/types"
-import type { NormalizedSurfaceEvent, SurfaceDeliveryResult } from "../hub/surfaces"
+import { DiscordAdapter, SurfaceRouter, type DiscordGatewayPort, type NormalizedSurfaceEvent, type SurfaceDeliveryResult } from "../hub/surfaces"
 
 function fixture(options: { dispatch?: boolean; dispatchError?: Error } = {}) {
   const repo = new SqliteConversationRepository(new Database(":memory:"))
@@ -90,6 +90,24 @@ describe("TurnCoordinator", () => {
     expect(result?.deliveries).toHaveLength(1)
     expect(f.order).toContain("deliver:completed:1")
     expect(f.repo.listDueDeliveries(999)).toHaveLength(1)
+  })
+
+  test("resolves a canonical parent through the repository and router for Discord threading", async () => {
+    const repo = new SqliteConversationRepository(new Database(":memory:"))
+    let now = 10
+    const stream = new ConversationEventStream(() => [])
+    const service = new ConversationService(repo, () => ++now, () => `id-${now}`, stream)
+    const conversation = service.create("owner", { title: "Thread", primaryAgent: "architect" })
+    const link = repo.createTransportLink({ id: "discord-link", conversationId: conversation.id, adapter: "discord", externalLocationId: "room", label: null, syncMode: "two_way", enabled: true }, ++now)
+    const parent = service.appendUserMessage("owner", conversation.id, { content: "question", clientKey: "parent" }).message
+    const [parentDelivery] = repo.createDeliveries(parent.id, [link], "message", ++now)
+    repo.markDeliveryDelivered(parentDelivery!.id, "discord-parent", ++now)
+    let replyId: string | undefined
+    const gateway: DiscordGatewayPort = { handleInbound() {}, async start() {}, async stop() {}, async sendText(_chat, _text, reply) { replyId = reply; return "discord-child" } }
+    const router = new SurfaceRouter([new DiscordAdapter(gateway, "token")])
+    const coordinator = new TurnCoordinator(service, repo, { dispatch: () => true }, stream, router, () => ++now, () => `turn-${now}`)
+    await coordinator.acceptAgentReply({ agent: "architect", kind: "reply", chatId: conversation.id, text: "answer", correlationId: "reply", replyTo: parent.id })
+    expect(replyId).toBe("discord-parent")
   })
 
   test("does not duplicate agent output for a repeated callback", async () => {

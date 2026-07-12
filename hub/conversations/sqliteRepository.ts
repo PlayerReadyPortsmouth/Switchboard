@@ -107,6 +107,10 @@ export class SqliteConversationRepository implements ConversationRepository {
     if (!result.changes) this.throwDeliveryTransitionError(id)
     return this.getDelivery(id)!
   }
+  resolveDeliveredExternalMessageId(messageId: string, linkId: string): string | null {
+    const row = this.db.query<{ external_message_id: string | null }, [string, string]>("SELECT external_message_id FROM deliveries WHERE message_id=? AND link_id=? AND state='delivered' AND external_message_id IS NOT NULL ORDER BY updated_at DESC LIMIT 1").get(messageId, linkId)
+    return row?.external_message_id ?? null
+  }
   markDeliveryRetry(id: string, error: string, nextAttemptAt: number | null, exhausted: boolean, now: number): Delivery {
     if (!exhausted && nextAttemptAt === null) throw new RepositoryConflictError("A retry schedule is required unless the delivery is exhausted")
     const result = this.db.query("UPDATE deliveries SET state=?, attempts=attempts+1, next_attempt_at=?, error=?, updated_at=? WHERE id=? AND state IN ('pending','retry_wait')").run(exhausted ? "exhausted" : "retry_wait", exhausted ? null : nextAttemptAt, error.slice(0, 500), now, id)

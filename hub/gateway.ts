@@ -353,14 +353,26 @@ export class Gateway {
     if (!ch || !("send" in ch)) return undefined
     const chunks = chunk(text, 2000, "newline")
     let firstId: string | undefined
-    for (let i = 0; i < chunks.length; i++) {
-      const msg = await (ch as any).send({
-        content: chunks[i],
-        nonce: createHash("sha256").update(`${deliveryId}:${i}`).digest("hex").slice(0, 25),
-        enforceNonce: true,
-        ...(i === 0 && replyTo ? { reply: { messageReference: replyTo, failIfNotExists: false } } : {}),
-      })
-      firstId ??= msg?.id
+    const postedIds: string[] = []
+    try {
+      for (let i = 0; i < chunks.length; i++) {
+        const msg = await (ch as any).send({
+          content: chunks[i],
+          nonce: createHash("sha256").update(`${deliveryId}:${i}`).digest("hex").slice(0, 25),
+          enforceNonce: true,
+          ...(i === 0 && replyTo ? { reply: { messageReference: replyTo, failIfNotExists: false } } : {}),
+        })
+        firstId ??= msg?.id
+        if (msg?.id) postedIds.push(msg.id)
+      }
+    } catch (error) {
+      let cleanupFailed = false
+      for (const messageId of postedIds.reverse()) {
+        try { await (ch as any).messages.delete(messageId) }
+        catch { cleanupFailed = true }
+      }
+      if (cleanupFailed) throw Object.assign(new Error(error instanceof Error ? error.message : String(error)), { retryable: false, cause: error })
+      throw Object.assign(error instanceof Error ? error : new Error(String(error)), { retryable: true })
     }
     return firstId
   }

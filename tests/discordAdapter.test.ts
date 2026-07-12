@@ -67,4 +67,10 @@ describe("DiscordAdapter", () => {
     const adapter = new DiscordAdapter(port({ async sendText() { throw new Error("Discord unavailable") } }), "token")
     expect(await adapter.send(delivery())).toEqual({ deliveryId: "delivery-1", adapter: "discord", ok: false, error: "Discord unavailable" })
   })
+
+  test("preserves an explicitly non-retryable compensated send failure", async () => {
+    const failure = Object.assign(new Error("cleanup failed"), { retryable: false })
+    const adapter = new DiscordAdapter(port({ async sendText() { throw failure } }), "token")
+    expect(await adapter.send(delivery())).toEqual({ deliveryId: "delivery-1", adapter: "discord", ok: false, error: "cleanup failed", retryable: false })
+  })
 })

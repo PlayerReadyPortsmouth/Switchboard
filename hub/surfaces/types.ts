@@ -26,6 +26,7 @@ export interface SurfaceDeliveryResult {
   ok: boolean
   externalMessageId?: string
   error?: string
+  retryable?: boolean
 }
 
 export interface SurfaceCapabilities {

@@ -1,7 +1,7 @@
 import { test, expect } from "bun:test"
 import { Gateway, buildCardComponents, parseNotifyCustomId, extractForwards } from "./gateway"
 import { isDeployAuthorized } from "./deployGate"
-import { ChannelType } from "discord.js"
+import { ChannelType, MessageReferenceType } from "discord.js"
 
 test("extractForwards reads forwarded snapshots (content + attachments), no author", () => {
   const att = new Map([["a1", { id: "a1", name: "shot.png", contentType: "image/png", size: 2048, url: "http://x/shot.png" }]])
@@ -184,11 +184,12 @@ test("Gateway sendText chunks text and returns the first Discord message id", as
   expect(payloads[0].nonce).not.toBe(payloads[1].nonce)
 })
 
-test("Gateway sendText retry reuses chunk nonces so a completed first chunk is not duplicated", async () => {
+test("Gateway sendText compensates a partial multi-chunk failure and permits retry", async () => {
   const gateway = Object.create(Gateway.prototype) as Gateway
   const posted = new Map<string, { id: string }>()
   let failSecond = true
-  ;(gateway as any).client = { channels: { fetch: async () => ({ send: async (payload: any) => {
+  const deleted: string[] = []
+  ;(gateway as any).client = { channels: { fetch: async () => ({ messages: { delete: async (id: string) => { deleted.push(id); for (const [nonce, message] of posted) if (message.id === id) posted.delete(nonce) } }, send: async (payload: any) => {
     if (payload.content.length === 500 && failSecond) { failSecond = false; throw new Error("second chunk failed") }
     const prior = posted.get(payload.nonce)
     if (prior) return prior
@@ -197,15 +198,27 @@ test("Gateway sendText retry reuses chunk nonces so a completed first chunk is n
     return message
   } }) } }
   await expect(gateway.sendText("channel", "x".repeat(2500), undefined, "delivery-1")).rejects.toThrow("second chunk failed")
+  expect(deleted).toEqual(["posted-1"])
   expect(await gateway.sendText("channel", "x".repeat(2500), undefined, "delivery-1")).toBe("posted-1")
   expect(posted.size).toBe(2)
+})
+
+test("Gateway sendText marks a partial failure non-retryable when compensation fails", async () => {
+  const gateway = Object.create(Gateway.prototype) as Gateway
+  let sends = 0
+  ;(gateway as any).client = { channels: { fetch: async () => ({
+    messages: { delete: async () => { throw new Error("delete denied") } },
+    send: async () => { sends++; if (sends === 2) throw new Error("second chunk failed"); return { id: "posted-1" } },
+  }) } }
+  try { await gateway.sendText("channel", "x".repeat(2500), undefined, "delivery-1"); throw new Error("expected failure") }
+  catch (error) { expect((error as any).retryable).toBe(false) }
 })
 
 test("buildInboundFromMessage excludes forwards from reply normalization", () => {
   const msg = {
     channelId: "chan", id: "forward", author: { id: "u", username: "alice" }, content: "",
     createdAt: new Date(0), channel: { type: ChannelType.GuildText, isThread: () => false }, attachments: new Map(),
-    reference: { messageId: "source", type: 1 },
+    reference: { messageId: "source", type: MessageReferenceType.Forward },
   } as any
   expect(buildInboundFromMessage(msg, []).replyToMessageId).toBeUndefined()
 })

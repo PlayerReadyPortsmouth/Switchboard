@@ -20,7 +20,7 @@ export class SurfaceRouter {
     await Promise.all([...this.adapters.values()].map((adapter) => adapter.stop()))
   }
 
-  async deliver(message: Message, links: TransportLink[], kind: SurfaceDeliveryKind = "transcript"): Promise<SurfaceDeliveryResult[]> {
+  async deliver(message: Message, links: TransportLink[], kind: SurfaceDeliveryKind = "transcript", replyToExternalIds?: ReadonlyMap<string, string>): Promise<SurfaceDeliveryResult[]> {
     const eligible = links.filter((link) =>
       link.enabled &&
       link.syncMode !== "inbound_only" &&
@@ -33,7 +33,7 @@ export class SurfaceRouter {
       if (!adapter) return { deliveryId, adapter: link.adapter, ok: false, error: `Unknown surface adapter: ${link.adapter}` }
 
       try {
-        return await adapter.send({ deliveryId, conversationId: message.conversationId, link, message })
+        return await adapter.send({ deliveryId, conversationId: message.conversationId, link, message, replyToExternalId: replyToExternalIds?.get(link.id) })
       } catch {
         return { deliveryId, adapter: link.adapter, ok: false, error: "Surface adapter delivery failed" }
       }

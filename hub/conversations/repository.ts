@@ -27,6 +27,7 @@ export interface ConversationRepository {
   appendAgentMessage(input: AppendMessageInput, links: TransportLink[], now: number): { message: Message; deliveries: Delivery[]; inserted: boolean }
   createDeliveries(messageId: string, links: TransportLink[], eventKind: string, now: number): Delivery[]
   markDeliveryDelivered(id: string, externalMessageId: string | null, now: number): Delivery
+  resolveDeliveredExternalMessageId(messageId: string, linkId: string): string | null
   markDeliveryRetry(id: string, error: string, nextAttemptAt: number | null, exhausted: boolean, now: number): Delivery
   listDueDeliveries(now: number, limit?: number): Delivery[]
   recordExternalMessage(adapter: string, externalEventId: string, input: AppendMessageInput): Message

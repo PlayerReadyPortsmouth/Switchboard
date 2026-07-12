@@ -10,7 +10,7 @@ export interface TurnDispatcher {
 }
 
 export interface TurnEventPublisher { publish(event: ConversationEvent): void }
-export interface TurnSurfaceRouter { deliver(message: Message, links: TransportLink[]): Promise<SurfaceDeliveryResult[]> }
+export interface TurnSurfaceRouter { deliver(message: Message, links: TransportLink[], kind?: "transcript" | "notification", replyToExternalIds?: ReadonlyMap<string, string>): Promise<SurfaceDeliveryResult[]> }
 export type AgentTurnResult = { message: Message; deliveries: Delivery[]; inserted: boolean }
 
 type WebTurnInput = { content: string; clientKey: string; replyTo?: string }
@@ -18,7 +18,7 @@ type WebTurnInput = { content: string; clientKey: string; replyTo?: string }
 export class TurnCoordinator {
   constructor(
     private readonly service: Pick<ConversationService, "appendUserMessage" | "appendExternalMessage" | "appendAgentMessage">,
-    private readonly repo: Pick<ConversationRepository, "getConversation" | "resolveTransportLink" | "listTransportLinks">,
+    private readonly repo: Pick<ConversationRepository, "getConversation" | "resolveTransportLink" | "listTransportLinks" | "resolveDeliveredExternalMessageId">,
     private readonly dispatcher: TurnDispatcher,
     private readonly events: TurnEventPublisher,
     private readonly router: TurnSurfaceRouter,
@@ -56,9 +56,16 @@ export class TurnCoordinator {
     const links = this.repo.listTransportLinks(conversation.id).filter((link) => link.enabled && link.syncMode !== "inbound_only" && link.syncMode !== "notifications_only")
     const result = this.service.appendAgentMessage({
       id: this.id(), conversationId: conversation.id, author: reply.agent, origin: "agent", content: text,
-      state: "completed", clientKey: `agent:${reply.agent}:${callbackId}`, createdAt: this.now(),
+      replyTo: reply.replyTo, state: "completed", clientKey: `agent:${reply.agent}:${callbackId}`, createdAt: this.now(),
     }, links)
-    if (result.inserted) await this.router.deliver(result.message, links)
+    if (result.inserted) {
+      const replyIds = new Map<string, string>()
+      if (result.message.replyTo) for (const link of links) {
+        const externalId = this.repo.resolveDeliveredExternalMessageId(result.message.replyTo, link.id)
+        if (externalId) replyIds.set(link.id, externalId)
+      }
+      await this.router.deliver(result.message, links, "transcript", replyIds)
+    }
     return result
   }
 

@@ -64,3 +64,30 @@ Review self-check:
 - Nonces contain lowercase hexadecimal characters only and are exactly 25 characters, within Discord's limit.
 - The delivery ID is stable across queue retries and the chunk index is stable for immutable canonical message content, so nonce reuse is deterministic.
 - The gateway still returns the first chunk's external ID; the delivery result schema cannot represent every chunk ID.
+
+## Review r2 follow-up
+
+- Added repository lookup of a delivered external message ID by canonical message ID and transport link ID.
+- The coordinator persists canonical `replyTo`, resolves its delivered parent independently for each link, and supplies the resulting external IDs through the router to adapters.
+- Added a production-path integration test covering coordinator → SQLite repository → surface router → Discord adapter and proving the Discord parent ID reaches the gateway.
+- Extended delivery results with optional `retryable`; absence means retryable, while failed Discord compensation explicitly returns `retryable: false`.
+- On a partial chunk send failure, Gateway deletes every message posted in that attempt in reverse order. Successful cleanup permits retry; any cleanup failure blocks retry to prevent duplication.
+- Deterministic Discord nonces remain as immediate duplicate protection in addition to compensation.
+- Forward normalization tests now use `MessageReferenceType.Forward` rather than its numeric representation.
+
+Review r2 RED evidence:
+
+- `bun test hub/gateway.test.ts tests/discordAdapter.test.ts tests/conversationRepository.test.ts tests/turnCoordinator.test.ts`
+- Result: 53 pass, 5 fail. Failures reproduced missing repository resolution, missing production threading, absent compensation, and missing non-retryable propagation.
+
+Review r2 GREEN / final verification:
+
+- `bun test hub/gateway.test.ts tests/discordAdapter.test.ts tests/surfaceRouter.test.ts tests/turnCoordinator.test.ts tests/conversationRepository.test.ts; if ($LASTEXITCODE -eq 0) { bun run typecheck }`
+- Result: exit 0; 64 pass, 0 fail, 162 assertions; `tsc --noEmit` exited 0.
+
+Review r2 self-check:
+
+- Parent resolution is scoped to the exact link, preventing an external ID from one surface/location being used on another.
+- Missing, pending, failed, or null-ID parent deliveries omit reply metadata and still deliver plain text.
+- Successful compensation reports a normal retryable failure; failed compensation is the only path that sets `retryable: false`.
+- Legacy `sendReply` is unchanged.

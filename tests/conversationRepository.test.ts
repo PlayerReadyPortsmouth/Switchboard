@@ -99,6 +99,18 @@ test("rejects duplicate external transport locations", () => {
   expect(() => repo.createTransportLink({ ...link, id: "l2", conversationId: "c2" }, 13)).toThrow(RepositoryConflictError)
 })
 
+test("resolves a delivered external message id for a canonical message and link", () => {
+  const repo = makeRepo()
+  repo.createConversation({ id: "c1", title: "Thread", primaryAgent: "architect", createdBy: "owner", createdAt: 1 })
+  const link = repo.createTransportLink({ id: "l1", conversationId: "c1", adapter: "discord", externalLocationId: "room", label: null, syncMode: "two_way", enabled: true }, 2)
+  repo.appendMessage({ id: "parent", conversationId: "c1", author: "owner", origin: "web", content: "parent", createdAt: 3 })
+  const [delivery] = repo.createDeliveries("parent", [link], "message", 4)
+  expect(repo.resolveDeliveredExternalMessageId("parent", "l1")).toBeNull()
+  repo.markDeliveryDelivered(delivery!.id, "discord-parent", 5)
+  expect(repo.resolveDeliveredExternalMessageId("parent", "l1")).toBe("discord-parent")
+  expect(repo.resolveDeliveredExternalMessageId("parent", "missing")).toBeNull()
+})
+
 test("resolves a transport link by adapter and external location", () => {
   const repo = makeRepo()
   repo.createConversation({ id: "c1", title: "Links", primaryAgent: "architect", createdBy: "owner", createdAt: 10 })
