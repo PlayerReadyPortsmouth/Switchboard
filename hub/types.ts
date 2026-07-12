@@ -10,6 +10,7 @@ export interface InboundMessage {
   threadParentId?: string  // set when chatId is a Discord thread: the parent channel's id
   attachments?: { name: string; type: string; size: number; url?: string }[]
   quote?: { user: string; content: string }   // the message this one quote-replies to
+  replyToMessageId?: string
   forwards?: { content: string }[]             // forwarded message snapshot text (Discord forward feature; no author)
 }
 

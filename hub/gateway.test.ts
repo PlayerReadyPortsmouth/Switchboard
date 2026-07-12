@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test"
-import { buildCardComponents, parseNotifyCustomId, extractForwards } from "./gateway"
+import { Gateway, buildCardComponents, parseNotifyCustomId, extractForwards } from "./gateway"
 import { isDeployAuthorized } from "./deployGate"
 import { ChannelType } from "discord.js"
 
@@ -164,4 +164,19 @@ test("buildInboundFromMessage omits threadParentId for a non-thread message", ()
   } as any
   const inbound = buildInboundFromMessage(msg, [])
   expect(inbound.threadParentId).toBeUndefined()
+})
+
+test("Gateway exposes lifecycle and adapter send methods", () => {
+  expect(typeof Gateway.prototype.stop).toBe("function")
+  expect(typeof Gateway.prototype.sendText).toBe("function")
+})
+
+test("Gateway sendText chunks text and returns the first Discord message id", async () => {
+  const gateway = Object.create(Gateway.prototype) as Gateway
+  const payloads: any[] = []
+  ;(gateway as any).client = { channels: { fetch: async () => ({ send: async (payload: any) => { payloads.push(payload); return { id: `posted-${payloads.length}` } } }) } }
+  expect(await gateway.sendText("channel", "x".repeat(2500), "parent")).toBe("posted-1")
+  expect(payloads.map(payload => payload.content.length)).toEqual([2000, 500])
+  expect(payloads[0].reply.messageReference).toBe("parent")
+  expect(payloads[1].reply).toBeUndefined()
 })

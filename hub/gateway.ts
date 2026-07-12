@@ -4,7 +4,7 @@ import {
   type Message, type Interaction,
 } from "discord.js"
 import type { AgentRegistry, InboundMessage, AgentReply, AgentConfig, HubConfig, CardSpec, CardModal } from "./types"
-import { formatOutbound } from "./format"
+import { chunk, formatOutbound } from "./format"
 import { buildModal } from "./modal"
 
 export type Control =
@@ -166,6 +166,7 @@ export function buildInboundFromMessage(
       ...forwards.flatMap(f => f.attachments),
     ],
     quote,
+    replyToMessageId: msg.reference?.messageId ?? undefined,
     forwards: forwards.length ? forwards.map(f => ({ content: f.content })) : undefined,
   }
 }
@@ -339,6 +340,26 @@ export class Gateway {
       } catch (e) { process.stderr.write(`gateway: reaction handler: ${e}\n`) }
     })
     await this.client.login(token)
+  }
+
+  async stop(): Promise<void> {
+    this.client.destroy()
+  }
+
+  /** Adapter-facing text primitive. Returns the first posted Discord id. */
+  async sendText(chatId: string, text: string, replyTo?: string): Promise<string | undefined> {
+    const ch = await this.client.channels.fetch(chatId)
+    if (!ch || !("send" in ch)) return undefined
+    const chunks = chunk(text, 2000, "newline")
+    let firstId: string | undefined
+    for (let i = 0; i < chunks.length; i++) {
+      const msg = await (ch as any).send({
+        content: chunks[i],
+        ...(i === 0 && replyTo ? { reply: { messageReference: replyTo, failIfNotExists: false } } : {}),
+      })
+      firstId ??= msg?.id
+    }
+    return firstId
   }
 
   /** Send a tagged, chunked reply for a given agent. */
