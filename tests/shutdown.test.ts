@@ -18,3 +18,19 @@ test("shutdown waits for server cancellation before closing once", async () => {
   await first
   expect(calls).toEqual(["stop:start", "stop:end", "close"])
 })
+
+test("shutdown stops ingress, retries, adapters, web, then database and remains idempotent", async () => {
+  const calls: string[] = []
+  const shutdown = createAsyncShutdown({
+    stopAcceptingWeb: () => { calls.push("accepting") },
+    stopRetryWorker: async () => { calls.push("retry") },
+    stopAdapters: async () => { calls.push("adapters") },
+    stopWeb: async () => { calls.push("web") },
+    closeDatabase: () => { calls.push("database") },
+  })
+  const first = shutdown()
+  expect(shutdown()).toBe(first)
+  await first
+  await shutdown()
+  expect(calls).toEqual(["accepting", "retry", "adapters", "web", "database"])
+})

@@ -279,8 +279,12 @@ export async function handleWebRequest(req: Request, deps: WebDeps): Promise<Res
 /** Start the dashboard/API listener on `port`; returns an async stop fn, or null (no-op)
  *  when `port` is unset — off by default. Binds `host` (default 127.0.0.1 —
  *  loopback-only unless an operator opts in). */
-export function startWebServer(port: number, deps: WebDeps, host = "127.0.0.1"): { stop: () => Promise<void> } | null {
+export function startWebServer(port: number, deps: WebDeps, host = "127.0.0.1"): { stopAccepting: () => void; stop: () => Promise<void> } | null {
   if (!port) return null
   const server = Bun.serve({ port, hostname: host, fetch: (req) => handleWebRequest(req, deps) })
-  return { stop: async () => { await server.stop(true) } }
+  let stopping: Promise<void> | undefined
+  return {
+    stopAccepting: () => { stopping ??= server.stop(false) },
+    stop: async () => { await (stopping ??= server.stop(true)) },
+  }
 }

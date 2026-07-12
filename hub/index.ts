@@ -80,7 +80,7 @@ import { selectExpired } from "./publishCleanup"
 import { randomBytes, randomUUID } from "crypto"
 import { Database } from "bun:sqlite"
 import { ConversationEventStream, ConversationService, createDiscordConversationMigrator, inboundLinkRoute, SqliteConversationRepository, TurnCoordinator } from "./conversations"
-import { DiscordAdapter, SurfaceRouter } from "./surfaces"
+import { DeliveryWorker, DiscordAdapter, SurfaceRouter } from "./surfaces"
 import { createAsyncShutdown } from "./shutdown"
 import { MemoryBrowse } from "./memoryBrowse"
 import { BrowseSessions } from "./memoryBrowseSessions"
@@ -2107,6 +2107,7 @@ turnCoordinator = new TurnCoordinator(
   () => Date.now(),
   () => randomUUID(),
 )
+const deliveryWorker = new DeliveryWorker(conversationRepo, surfaceRouter)
 if (discordEnabled) {
   await surfaceRouter.startAll(event => {
     if (/^\s*!/.test(event.content)) return Promise.resolve()
@@ -2115,6 +2116,7 @@ if (discordEnabled) {
   })
   console.error("switchboard hub: gateway connected")
 }
+deliveryWorker.start()
 
 setInterval(() => {
   for (const { chatId } of drainApprovals(hub.stateDir)) {
@@ -2362,10 +2364,13 @@ const webDeps: WebDeps = {
 const webServer = startWebServer(hub.webPort ?? 0, webDeps, hub.webHost)
 if (webServer) console.error(`switchboard hub: web dashboard on ${hub.webHost ?? "127.0.0.1"}:${hub.webPort}`)
 
-const cleanupConversations = createAsyncShutdown(
-  async () => { await webServer?.stop(); await surfaceRouter.stopAll() },
-  () => conversationDb.close(),
-)
+const cleanupConversations = createAsyncShutdown({
+  stopAcceptingWeb: () => webServer?.stopAccepting(),
+  stopRetryWorker: () => deliveryWorker.stop(),
+  stopAdapters: () => surfaceRouter.stopAll(),
+  stopWeb: async () => { await webServer?.stop() },
+  closeDatabase: () => conversationDb.close(),
+})
 let shuttingDown = false
 const shutdownConversations = async () => {
   if (shuttingDown) return

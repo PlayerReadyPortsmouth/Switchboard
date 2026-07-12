@@ -1,6 +1,6 @@
 # Canonical conversations
 
-Phase 1 introduces a transport-neutral conversation domain for the web client and future adapters. The hub owns this domain: it assigns conversation and message IDs, allocates monotonically increasing per-conversation message sequences, enforces participation and roles, persists records, and emits resumable events. Discord channel history and the legacy dashboard channel chat are not canonical conversation storage.
+The hub owns a transport-neutral conversation domain: it assigns conversation and message IDs, allocates monotonically increasing per-conversation message sequences, enforces participation and roles, persists records, and emits resumable events. Discord and web are surfaces over that canonical history, not separate stores.
 
 ## Storage and ownership
 
@@ -50,12 +50,16 @@ Conversation events use the message sequence as the SSE `id`. A subscriber suppl
 
 The event stream registers the live subscription before reading history and buffers concurrent publications during replay. Persisted catch-up is read in bounded 500-message pages until the complete gap is exhausted. Its high-water mark advances between pages and suppresses overlap with buffered live publications, so a reconnect receives every missing sequence exactly once from this hub process, including gaps larger than one page. SSE is a notification/resume surface, not the source of truth; clients should retain their cursor and can always recover through message history.
 
-## Phase 1 boundary
+## Agent and transport pipeline
 
-Phase 1 stores web messages and streams `message_committed` events, but it does **not** submit those messages to an agent and does **not** mirror them through transport links. Transport links, delivery records, message states, and external-event receipts establish the durable boundary that Phase 2 will build on; they are not yet an active gateway pipeline.
+Web posts are committed before they are dispatched to the conversation's primary agent. Agent text replies are committed once using their callback id, published to web subscribers, and assigned one durable delivery per eligible transport link. This path works when Discord is disabled; no Discord client or token is constructed for a web-only boot.
 
-Until Phase 2 connects canonical conversations to agent turns and adapters, the dashboard's legacy channel chat remains the active path for sending work to agents. Code that appends a canonical message must not assume an agent run or an external delivery has occurred.
+Surface adapters implement `start(onEvent)`, `stop()`, and `send(delivery)`. `send` returns a `SurfaceDeliveryResult`, including an optional external message id and `retryable` failure classification. Adapter startup is optional. One adapter failure is isolated from other links.
 
-The Phase 1 restart gate exercises the production conversation repository, service, event stream, and HTTP handler by stopping the listener, closing SQLite, and rebuilding that runtime against the same temporary state. It intentionally does not start the Discord-connected `hub/index.ts`: making the full hub bootstrap Discord-optional is deferred to Phase 2.
+Links use `two_way`, `inbound_only`, `outbound_only`, or `notifications_only`. Ordinary Discord text on an unmapped channel atomically creates a canonical conversation and default `two_way` link (using a pinned agent before the hub default), then imports attributable cached text with deterministic keys. External event receipts deduplicate inbound events; external-message mappings preserve reply targets and prevent echoes.
+
+Deliveries move through `pending`, `retry_wait`, `delivered`, or `exhausted`. The bounded worker claims at most 100 due rows per tick, runs only one tick at a time, and persists every outcome. Retryable failures use exponential delay from one second, capped at 60 seconds, plus 0–250 ms jitter; five attempts are allowed by default. Non-retryable and missing-target deliveries exhaust immediately. Shutdown stops web ingress, waits for the retry worker, adapters, and web listener in order, then closes SQLite; repeated signals share the same cleanup promise.
+
+This phase mirrors ordinary text and reply relationships. Rich Discord cards, attachments, edits, deletes, interactions, reactions, and workspace UI parity remain on the legacy Discord path or are deferred; canonical rich-card parity is not implied.
 
 See the [approved standalone web-client and transport architecture](../superpowers/specs/2026-07-12-standalone-web-client-and-transport-architecture-design.md) for the broader design and deferred work.
