@@ -48,12 +48,14 @@ All IDs in route paths are URL encoded. JSON routes return `400` for invalid inp
 
 Conversation events use the message sequence as the SSE `id`. A subscriber supplies either the `after` query parameter or `Last-Event-ID`; `after` takes precedence. The cursor is exclusive: reconnecting after sequence `N` replays persisted messages with sequence greater than `N`, in sequence order, then continues with live events.
 
-The event stream registers the live subscription before reading history and buffers concurrent publications during replay. Its high-water mark suppresses overlap, so a reconnect receives each missing sequence exactly once from this hub process. SSE is a notification/resume surface, not the source of truth; clients should retain their cursor and can always recover through message history.
+The event stream registers the live subscription before reading history and buffers concurrent publications during replay. Persisted catch-up is read in bounded 500-message pages until the complete gap is exhausted. Its high-water mark advances between pages and suppresses overlap with buffered live publications, so a reconnect receives every missing sequence exactly once from this hub process, including gaps larger than one page. SSE is a notification/resume surface, not the source of truth; clients should retain their cursor and can always recover through message history.
 
 ## Phase 1 boundary
 
 Phase 1 stores web messages and streams `message_committed` events, but it does **not** submit those messages to an agent and does **not** mirror them through transport links. Transport links, delivery records, message states, and external-event receipts establish the durable boundary that Phase 2 will build on; they are not yet an active gateway pipeline.
 
 Until Phase 2 connects canonical conversations to agent turns and adapters, the dashboard's legacy channel chat remains the active path for sending work to agents. Code that appends a canonical message must not assume an agent run or an external delivery has occurred.
+
+The Phase 1 restart gate exercises the production conversation repository, service, event stream, and HTTP handler by stopping the listener, closing SQLite, and rebuilding that runtime against the same temporary state. It intentionally does not start the Discord-connected `hub/index.ts`: making the full hub bootstrap Discord-optional is deferred to Phase 2.
 
 See the [approved standalone web-client and transport architecture](../superpowers/specs/2026-07-12-standalone-web-client-and-transport-architecture-design.md) for the broader design and deferred work.

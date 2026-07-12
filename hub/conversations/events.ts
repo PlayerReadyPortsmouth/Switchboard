@@ -18,12 +18,13 @@ type Subscription = {
   pending: ConversationEvent[]
 }
 type ConversationQueue = { events: ConversationEvent[]; draining: boolean }
+const REPLAY_PAGE_SIZE = 500
 
 export class ConversationEventStream {
   private readonly subscriptions = new Map<string, Set<Subscription>>()
   private readonly queues = new Map<string, ConversationQueue>()
 
-  constructor(private readonly history: (conversationId: string, afterSequence: number) => Message[]) {}
+  constructor(private readonly history: (conversationId: string, afterSequence: number, limit: number) => Message[]) {}
 
   publish(event: ConversationEvent): void {
     const queue = this.queues.get(event.conversationId) ?? { events: [], draining: false }
@@ -53,16 +54,20 @@ export class ConversationEventStream {
     conversationSubscriptions.add(subscription)
     this.subscriptions.set(conversationId, conversationSubscriptions)
 
-    const replay = this.history(conversationId, afterSequence)
-      .sort((left, right) => left.sequence - right.sequence)
-    for (const message of replay) {
-      this.deliver(subscription, {
-        kind: "message_committed",
-        conversationId,
-        sequence: message.sequence,
-        ts: message.createdAt,
-        message,
-      })
+    while (true) {
+      const pageStart = subscription.highWaterMark
+      const replay = this.history(conversationId, pageStart, REPLAY_PAGE_SIZE)
+        .sort((left, right) => left.sequence - right.sequence)
+      for (const message of replay) {
+        this.deliver(subscription, {
+          kind: "message_committed",
+          conversationId,
+          sequence: message.sequence,
+          ts: message.createdAt,
+          message,
+        })
+      }
+      if (replay.length < REPLAY_PAGE_SIZE || subscription.highWaterMark <= pageStart) break
     }
     subscription.replaying = false
     for (const event of subscription.pending.sort((left, right) => left.sequence - right.sequence)) {

@@ -2091,7 +2091,7 @@ function collectWeb(): WebInput {
 }
 const conversationDb = new Database(hub.conversationDbFile ?? join(hub.stateDir, "switchboard.sqlite"), { create: true })
 const conversationRepo = new SqliteConversationRepository(conversationDb)
-const conversationEvents = new ConversationEventStream((id, after) => conversationRepo.listMessages(id, after, 500))
+const conversationEvents = new ConversationEventStream((id, after, limit) => conversationRepo.listMessages(id, after, limit))
 const conversationService = new ConversationService(conversationRepo, () => Date.now(), () => randomUUID(), conversationEvents)
 const webDeps: WebDeps = {
   collect: collectWeb,
