@@ -140,6 +140,16 @@ test("buildAttachmentFiles wraps buffers in named AttachmentBuilders and clamps 
 })
 
 import { buildInboundFromMessage } from "./gateway"
+import { InboundMultiplexer } from "./gateway"
+
+test("InboundMultiplexer notifies legacy and canonical listeners in registration order", () => {
+  const calls: string[] = []
+  const mux = new InboundMultiplexer<any>()
+  mux.add(() => calls.push("legacy"))
+  mux.add(() => calls.push("canonical"))
+  mux.emit({})
+  expect(calls).toEqual(["legacy", "canonical"])
+})
 
 test("buildInboundFromMessage sets threadParentId for a thread message", () => {
   const msg = {

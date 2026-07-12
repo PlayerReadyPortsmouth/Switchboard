@@ -15,6 +15,14 @@ export type AgentTurnResult = { message: Message; deliveries: Delivery[]; insert
 
 type WebTurnInput = { content: string; clientKey: string; replyTo?: string }
 
+export function acceptsInboundLink(link: TransportLink | null | undefined): link is TransportLink {
+  return inboundLinkRoute(link) === "canonical"
+}
+
+export function inboundLinkRoute(link: TransportLink | null | undefined): "canonical" | "legacy" {
+  return !!link?.enabled && (link.syncMode === "two_way" || link.syncMode === "inbound_only") ? "canonical" : "legacy"
+}
+
 export class TurnCoordinator {
   constructor(
     private readonly service: Pick<ConversationService, "appendUserMessage" | "appendExternalMessage" | "appendAgentMessage">,
@@ -34,7 +42,7 @@ export class TurnCoordinator {
 
   async acceptSurfaceEvent(event: NormalizedSurfaceEvent): Promise<AppendMessageResult | null> {
     const link = this.repo.resolveTransportLink(event.adapter, event.externalLocationId)
-    if (!link?.enabled || link.syncMode === "outbound_only" || link.syncMode === "notifications_only") return null
+    if (!acceptsInboundLink(link)) return null
     const input: AppendMessageInput = {
       id: this.id(), conversationId: link.conversationId,
       author: `${event.adapter}:${event.authorId}`, origin: "transport", content: event.content,

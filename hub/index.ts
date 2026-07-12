@@ -1,7 +1,7 @@
 import { join, dirname } from "path"
 import { unlinkSync, appendFileSync, mkdirSync, readFileSync, writeFileSync, existsSync, statSync, renameSync, readdirSync, rmSync } from "fs"
 import { config as loadEnv } from "./env"
-import { loadConfigs, resolveDiscordStartup } from "./config"
+import { createDiscordRuntime, loadConfigs, resolveDiscordStartup } from "./config"
 import { escalatedRuntime, countErrors, RateCap } from "./escalation"
 import { planReload } from "./configReload"
 import { classifyAgentChange, invalidAgentConfigShape, type AgentChangeClassification } from "./agentConfigDraft"
@@ -79,7 +79,7 @@ import { publishArtifact } from "./publishLink"
 import { selectExpired } from "./publishCleanup"
 import { randomBytes, randomUUID } from "crypto"
 import { Database } from "bun:sqlite"
-import { ConversationEventStream, ConversationService, SqliteConversationRepository, TurnCoordinator } from "./conversations"
+import { ConversationEventStream, ConversationService, inboundLinkRoute, SqliteConversationRepository, TurnCoordinator } from "./conversations"
 import { DiscordAdapter, SurfaceRouter } from "./surfaces"
 import { createAsyncShutdown } from "./shutdown"
 import { MemoryBrowse } from "./memoryBrowse"
@@ -165,14 +165,20 @@ catch (error) { console.error(error instanceof Error ? error.message : error); p
 const discordEnabled = discordStartup.enabled
 const token = discordStartup.enabled ? discordStartup.token : undefined
 
-const gateway = new Gateway(hub, agents)
-const surfaceRouter = new SurfaceRouter(discordEnabled ? [new DiscordAdapter(gateway, token!)] : [])
+const discordGateway = createDiscordRuntime(discordStartup, () => new Gateway(hub, agents))
+// Core services retain a narrow, inert façade so legacy Discord-only delivery
+// hooks fail closed in web-only mode without constructing discord.js Client.
+const gateway = discordGateway ?? new Proxy({} as Gateway, { get: (_target, key) => {
+  if (key === "client") throw new Error("Discord is disabled")
+  return () => undefined
+} })
+const surfaceRouter = new SurfaceRouter(discordGateway ? [new DiscordAdapter(discordGateway, token!)] : [])
 let turnCoordinator: TurnCoordinator | undefined
 const deployApprover = hub.deployApproverUserId ?? ""
 // Approval buttons are pressable only by configured approvers (default: the
 // deploy approver); everything else keeps the existing deploy/gated-action gate.
 const approvalApprovers = hub.approvals?.approvers ?? (deployApprover ? [deployApprover] : [])
-gateway.setNotifyButtonGate((customId, userId) => {
+if (discordGateway) gateway.setNotifyButtonGate((customId, userId) => {
   if (customId.startsWith("approval:")) return approvalApprovers.includes(userId)
   return isDeployAuthorized(customId, userId, deployApprover) &&
     (requiresApprover(customId, hub.gatedActions ?? []) ? !!deployApprover && userId === deployApprover : true)
@@ -1510,7 +1516,7 @@ if (shareLinksOn) {
 const baseGate = new BaseGate(join(hub.stateDir, "access.json"))
 
 // Only allowlisted users may press card buttons.
-gateway.setPermissionAuthorizer((uid) => baseGate.listAllowed().includes(uid))
+if (discordGateway) gateway.setPermissionAuthorizer((uid) => baseGate.listAllowed().includes(uid))
 
 async function handleMemButton(action: string, arg: { corrId: string; idx?: number }, userId: string): Promise<void> {
   const s = memSessions.get(arg.corrId)
@@ -1551,7 +1557,7 @@ async function handleMemButton(action: string, arg: { corrId: string; idx?: numb
 }
 
 // A card button was clicked → gated actions run hub-side; others relay to the agent.
-gateway.onNotifyButton((customId, userId) => {
+if (discordGateway) gateway.onNotifyButton((customId, userId) => {
   const ap = parseApprovalCustomId(customId)
   if (ap) { void resolveApproval(ap.id, ap.decision, userId); return }
   const action = matchGatedAction(customId, hub.gatedActions ?? [])
@@ -1569,12 +1575,12 @@ gateway.onNotifyButton((customId, userId) => {
   if (key) transports.get(key)?.sendInteraction(customId, userId)
 })
 
-gateway.onModalSubmit((customId, userId, fields) => {
+if (discordGateway) gateway.onModalSubmit((customId, userId, fields) => {
   const key = notifyRouter.agentFor(customId)
   if (key) transports.get(key)?.sendInteraction(customId, userId, fields)
 })
 
-gateway.onReaction((emojiName, userId, channelId /* , messageId */) => {
+if (discordGateway) gateway.onReaction((emojiName, userId, channelId /* , messageId */) => {
   if (!baseGate.listAllowed().includes(userId)) return
   const agentName = clearReactionAgent(channelId, emojiName, hub.channelAgents ?? [])
   if (agentName) void resetAgentSession(agentName, channelId)
@@ -1582,7 +1588,7 @@ gateway.onReaction((emojiName, userId, channelId /* , messageId */) => {
 
 // A Discord thread archived or deleted → hard-clean up its dedicated agent
 // instance (kill process, remove worktree, drop state) if one was ever spawned.
-gateway.onThreadArchived((threadId) => { void threadRegistry.hardCleanup(threadId).then((r) => {
+if (discordGateway) gateway.onThreadArchived((threadId) => { void threadRegistry.hardCleanup(threadId).then((r) => {
   if (!r.ok) process.stderr.write(`thread-agents: cleanup for ${threadId} skipped — ${r.dirty ? "worktree is dirty" : `removeWorktree failed: ${r.error}`}\n`)
 }) })
 
@@ -1891,10 +1897,10 @@ function gatherDoctorFacts(): DoctorFacts {
     routerModel: hub.routerModel,
   }
 }
-gateway.handleInbound((m) => {
+if (discordGateway) gateway.handleInbound((m) => {
   // Linked locations are canonical conversation traffic and are handled by the
   // Discord surface adapter; all other locations retain the legacy command/card path.
-  if (turnCoordinator && conversationRepo.resolveTransportLink("discord", m.chatId)) return
+  if (turnCoordinator && inboundLinkRoute(conversationRepo.resolveTransportLink("discord", m.chatId)) === "canonical") return
   channelStream.publish(m.chatId, { kind: "chat", ts: Date.now(), author: m.user, content: m.content, origin: "discord" })
   const trimmed = m.content.trim()
   // Audit ledger query (operator-only): list recent governed effects or a rollup.

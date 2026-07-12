@@ -172,10 +172,16 @@ export function buildInboundFromMessage(
   }
 }
 
+export class InboundMultiplexer<T> {
+  private readonly listeners: Array<(value: T) => void> = []
+  add(listener: (value: T) => void): void { this.listeners.push(listener) }
+  emit(value: T): void { for (const listener of this.listeners) listener(value) }
+}
+
 /** Thin discord.js wrapper. Caller supplies handlers; this owns the client + I/O. */
 export class Gateway {
   readonly client: Client
-  private onMessages: Array<(m: InboundMessage) => void> = []
+  private onMessages = new InboundMultiplexer<InboundMessage>()
   private permButtonCb: (requestId: string, behavior: "allow" | "deny") => void = () => {}
   private notifyButtonCb: (customId: string, userId: string) => void = () => {}
   private isAuthorized: (userId: string) => boolean = () => false
@@ -206,7 +212,7 @@ export class Gateway {
     })
   }
 
-  handleInbound(cb: (m: InboundMessage) => void): void { this.onMessages.push(cb) }
+  handleInbound(cb: (m: InboundMessage) => void): void { this.onMessages.add(cb) }
 
   /** Called by the hub: which users may answer permission prompts (base-gate allowlist). */
   setPermissionAuthorizer(fn: (userId: string) => boolean): void { this.isAuthorized = fn }
@@ -268,7 +274,7 @@ export class Gateway {
         // flow through the existing download/Read pipeline.
         const forwards = extractForwards(msg)
         const inbound = buildInboundFromMessage(msg, forwards, quote)
-        for (const handler of this.onMessages) handler(inbound)
+        this.onMessages.emit(inbound)
       })()
     })
     this.client.on("threadUpdate", (oldThread, newThread) => {

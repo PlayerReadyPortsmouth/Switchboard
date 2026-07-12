@@ -18,6 +18,13 @@ export function resolveDiscordStartup(
   return { enabled: true, token }
 }
 
+export function createDiscordRuntime<T>(
+  startup: { enabled: false } | { enabled: true; token: string },
+  create: (token: string) => T,
+): T | undefined {
+  return startup.enabled ? create(startup.token) : undefined
+}
+
 function readConfigFile(dir: string, file: string, hint: string): string {
   try {
     return readFileSync(join(dir, file), "utf8")

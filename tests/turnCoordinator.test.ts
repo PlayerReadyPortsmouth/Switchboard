@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite"
 import { describe, expect, test } from "bun:test"
-import { ConversationEventStream, ConversationService, SqliteConversationRepository, TurnCoordinator } from "../hub/conversations"
+import { ConversationEventStream, ConversationService, inboundLinkRoute, SqliteConversationRepository, TurnCoordinator } from "../hub/conversations"
 import type { ConversationEvent } from "../hub/conversations/events"
 import type { InboundMessage } from "../hub/types"
 import { DiscordAdapter, SurfaceRouter, type DiscordGatewayPort, type NormalizedSurfaceEvent, type SurfaceDeliveryResult } from "../hub/surfaces"
@@ -38,6 +38,15 @@ function fixture(options: { dispatch?: boolean; dispatchError?: Error } = {}) {
 }
 
 describe("TurnCoordinator", () => {
+  test("routes only enabled inbound links canonically and all others to legacy", () => {
+    const link = (syncMode: "two_way" | "inbound_only" | "outbound_only" | "notifications_only", enabled = true) => ({ syncMode, enabled } as any)
+    expect(inboundLinkRoute(null)).toBe("legacy")
+    expect(inboundLinkRoute(link("two_way", false))).toBe("legacy")
+    expect(inboundLinkRoute(link("outbound_only"))).toBe("legacy")
+    expect(inboundLinkRoute(link("notifications_only"))).toBe("legacy")
+    expect(inboundLinkRoute(link("two_way"))).toBe("canonical")
+    expect(inboundLinkRoute(link("inbound_only"))).toBe("canonical")
+  })
   test("persists web input before dispatch and uses the conversation as agent chatId", async () => {
     const f = fixture()
     const result = await f.coordinator.submitWebTurn("owner", f.conversation.id, { content: "hello", clientKey: "web-1" })
@@ -78,6 +87,13 @@ describe("TurnCoordinator", () => {
       expect(f.dispatched).toHaveLength(0)
       expect(f.repo.listMessages(f.conversation.id)).toHaveLength(0)
     }
+  })
+
+  test("accepts inbound_only surface links", async () => {
+    const f = fixture()
+    f.repo.createTransportLink({ id: "link", conversationId: f.conversation.id, adapter: "discord", externalLocationId: "room", label: null, syncMode: "inbound_only", enabled: true }, 1)
+    const event: NormalizedSurfaceEvent = { adapter: "discord", eventId: "evt", externalLocationId: "room", externalMessageId: "m", authorId: "u", authorName: "User", content: "accepted", createdAt: 1 }
+    expect((await f.coordinator.acceptSurfaceEvent(event))?.inserted).toBe(true)
   })
 
   test("persists agent text and delivery rows before invoking the surface router", async () => {

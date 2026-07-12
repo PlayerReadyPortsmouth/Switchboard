@@ -40,3 +40,17 @@ Final fresh verification:
 ## Concerns
 
 No known functional concerns. Cards, updates, modals, and interaction handling intentionally remain on the Discord compatibility path in Phase 2, as documented.
+
+## Review fixes
+
+- Root cause: token resolution was conditional, but `new Gateway(...)` and Discord callback registration were still unconditional. `createDiscordRuntime` now gates the factory itself; disabled mode therefore constructs neither `Gateway` nor its discord.js `Client`. All Discord startup callback registrations are guarded by the resulting optional runtime. The core retains only an inert fail-closed façade for legacy call-site compatibility.
+- Added a factory instrumentation regression test proving disabled mode performs zero factory construction and registration calls, alongside the existing zero token-environment-read assertion.
+- Root cause: legacy inbound suppression tested only whether any transport link existed, while `TurnCoordinator` separately rejected disabled/outbound-only/notifications-only links. Both now share `inboundLinkRoute`/`acceptsInboundLink`: only enabled `two_way` and `inbound_only` links are canonical; absent, disabled, `outbound_only`, and `notifications_only` links fall back to legacy handling.
+- Added explicit routing-matrix coverage and an inbound gateway multiplexer ordering test.
+
+Review-fix TDD evidence:
+
+- RED: optional composition test failed because `createDiscordRuntime` did not exist; gateway multiplexer test failed because `InboundMultiplexer` did not exist; routing-matrix test failed because `inboundLinkRoute` did not exist.
+- `bun test tests/discordOptional.test.ts tests/config.test.ts tests/conversationWeb.test.ts tests/turnCoordinator.test.ts hub/gateway.test.ts tests/discordAdapter.test.ts` — 65 pass, 0 fail, 173 assertions.
+- `bun run typecheck` — exit 0 (`tsc --noEmit`). An intermediate run exposed and then corrected null narrowing after the shared route helper was introduced.
+- `bun test` — 785 pass, 0 fail, 1910 assertions across 107 files.

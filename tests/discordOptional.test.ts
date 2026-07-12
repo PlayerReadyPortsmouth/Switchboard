@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test"
 import type { HubConfig } from "../hub/types"
-import { resolveDiscordStartup } from "../hub/config"
+import { createDiscordRuntime, resolveDiscordStartup } from "../hub/config"
 
 test("HubConfig permits web-only startup without a Discord token setting", () => {
   const config = {
@@ -21,4 +21,11 @@ test("disabled Discord does not read the token environment", () => {
 test("Discord defaults enabled and requires its backward-compatible token variable", () => {
   expect(resolveDiscordStartup({}, { DISCORD_BOT_TOKEN: "secret" })).toEqual({ enabled: true, token: "secret" })
   expect(() => resolveDiscordStartup({}, {})).toThrow("missing DISCORD_BOT_TOKEN")
+})
+
+test("disabled Discord constructs and registers nothing", () => {
+  const calls: string[] = []
+  const runtime = createDiscordRuntime({ enabled: false }, () => { calls.push("construct"); return { register: () => calls.push("register") } })
+  expect(runtime).toBeUndefined()
+  expect(calls).toEqual([])
 })
