@@ -246,6 +246,8 @@ Built on the same request/response seam as `recall`: the target runs on a virtua
 
 Point a browser at the hub and watch it work. Set `webPort` and the hub serves a single self-contained page (off when unset). See [`docs/superpowers/specs/2026-06-24-web-dashboard-design.md`](docs/superpowers/specs/2026-06-24-web-dashboard-design.md).
 
+The canonical conversation API is documented in [`docs/architecture/conversations.md`](docs/architecture/conversations.md); its approved cross-platform direction is in the [`standalone web-client and transport architecture`](docs/superpowers/specs/2026-07-12-standalone-web-client-and-transport-architecture-design.md). Phase 1 persists and streams canonical web messages but does not yet submit them to agents or mirror them to transports. Until Phase 2, the legacy channel chat below remains the active agent path.
+
 - **`GET /`** — a read-only dashboard (vanilla JS, no build step) that polls `/api/status` every 3 s and renders the agent fleet (alive/busy, context-fill bar, queue, cost, replicas), hub health + uptime, the ledger summary, and a recent-activity feed.
 - **`GET /api/status`** — the JSON the page consumes, projected from the same `StatusSnapshot` + audit data as `!status`/`!audit`/`/metrics` (its readiness flag matches `/health`).
 
@@ -325,3 +327,4 @@ Each step runs on a hidden `mission:<id>` channel — the same run-and-capture p
 - Agent workflows / missions — Spec: [`docs/superpowers/specs/2026-06-24-agent-workflows-design.md`](docs/superpowers/specs/2026-06-24-agent-workflows-design.md)
 - Replay / time-travel — Spec: [`docs/superpowers/specs/2026-06-24-replay-design.md`](docs/superpowers/specs/2026-06-24-replay-design.md)
 - Web dashboard — Spec: [`docs/superpowers/specs/2026-06-24-web-dashboard-design.md`](docs/superpowers/specs/2026-06-24-web-dashboard-design.md)
+- Canonical conversations — Architecture: [`docs/architecture/conversations.md`](docs/architecture/conversations.md), approved design: [`docs/superpowers/specs/2026-07-12-standalone-web-client-and-transport-architecture-design.md`](docs/superpowers/specs/2026-07-12-standalone-web-client-and-transport-architecture-design.md)
