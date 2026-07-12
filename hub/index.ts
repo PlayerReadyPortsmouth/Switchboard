@@ -28,7 +28,7 @@ import { CardRegistry } from "./cardRegistry"
 import { CardLifecycle } from "./cardLifecycle"
 import { matchGatedAction, requiresApprover } from "./gatedActions"
 import { isDeployAuthorized } from "./deployGate"
-import { clearReactionAgent } from "./channelPin"
+import { clearReactionAgent, resolvePinnedAgent } from "./channelPin"
 import { MessageCache } from "./messageCache"
 import { enrich, foldQuote, foldAttachments, foldForward } from "./enrich"
 import { materializeAttachments } from "./attachments"
@@ -79,7 +79,7 @@ import { publishArtifact } from "./publishLink"
 import { selectExpired } from "./publishCleanup"
 import { randomBytes, randomUUID } from "crypto"
 import { Database } from "bun:sqlite"
-import { ConversationEventStream, ConversationService, inboundLinkRoute, SqliteConversationRepository, TurnCoordinator } from "./conversations"
+import { ConversationEventStream, ConversationService, createDiscordConversationMigrator, inboundLinkRoute, SqliteConversationRepository, TurnCoordinator } from "./conversations"
 import { DiscordAdapter, SurfaceRouter } from "./surfaces"
 import { createAsyncShutdown } from "./shutdown"
 import { MemoryBrowse } from "./memoryBrowse"
@@ -174,6 +174,7 @@ const gateway = discordGateway ?? new Proxy({} as Gateway, { get: (_target, key)
 } })
 const surfaceRouter = new SurfaceRouter(discordGateway ? [new DiscordAdapter(discordGateway, token!)] : [])
 let turnCoordinator: TurnCoordinator | undefined
+let ensureDiscordConversation: ReturnType<typeof createDiscordConversationMigrator> | undefined
 const deployApprover = hub.deployApproverUserId ?? ""
 // Approval buttons are pressable only by configured approvers (default: the
 // deploy approver); everything else keeps the existing deploy/gated-action gate.
@@ -1898,9 +1899,18 @@ function gatherDoctorFacts(): DoctorFacts {
   }
 }
 if (discordGateway) gateway.handleInbound((m) => {
+  // Control messages stay on the compatibility path. Ordinary text establishes
+  // its canonical channel mapping synchronously before this multiplexer reaches
+  // the legacy orchestrator branch.
+  const compatibilityMessage = /^\s*!/.test(m.content)
+  if (!compatibilityMessage) ensureDiscordConversation?.({
+    adapter: "discord", eventId: m.messageId, externalLocationId: m.chatId,
+    externalMessageId: m.messageId, authorId: m.userId, authorName: m.user,
+    content: m.content, createdAt: Date.parse(m.ts), replyToExternalId: m.replyToMessageId,
+  }, resolvePinnedAgent(m.chatId, hub.channelAgents ?? []) ?? hub.defaultAgent)
   // Linked locations are canonical conversation traffic and are handled by the
   // Discord surface adapter; all other locations retain the legacy command/card path.
-  if (turnCoordinator && inboundLinkRoute(conversationRepo.resolveTransportLink("discord", m.chatId)) === "canonical") return
+  if (!compatibilityMessage && turnCoordinator && inboundLinkRoute(conversationRepo.resolveTransportLink("discord", m.chatId)) === "canonical") return
   channelStream.publish(m.chatId, { kind: "chat", ts: Date.now(), author: m.user, content: m.content, origin: "discord" })
   const trimmed = m.content.trim()
   // Audit ledger query (operator-only): list recent governed effects or a rollup.
@@ -2081,6 +2091,13 @@ const conversationDb = new Database(hub.conversationDbFile ?? join(hub.stateDir,
 const conversationRepo = new SqliteConversationRepository(conversationDb)
 const conversationEvents = new ConversationEventStream((id, after, limit) => conversationRepo.listMessages(id, after, limit))
 const conversationService = new ConversationService(conversationRepo, () => Date.now(), () => randomUUID(), conversationEvents)
+ensureDiscordConversation = createDiscordConversationMigrator({
+  repo: conversationRepo,
+  now: () => Date.now(),
+  id: () => randomUUID(),
+  cachedHistory: channelId => messageCache.recent(channelId),
+  audit: detail => audit.record({ kind: "event", actor: "hub", action: "discord_channel_migration", chat: detail.channelId, detail }),
+})
 turnCoordinator = new TurnCoordinator(
   conversationService,
   conversationRepo,
@@ -2091,7 +2108,11 @@ turnCoordinator = new TurnCoordinator(
   () => randomUUID(),
 )
 if (discordEnabled) {
-  await surfaceRouter.startAll(event => turnCoordinator?.acceptSurfaceEvent(event).then(() => {}) ?? Promise.resolve())
+  await surfaceRouter.startAll(event => {
+    if (/^\s*!/.test(event.content)) return Promise.resolve()
+    ensureDiscordConversation?.(event, resolvePinnedAgent(event.externalLocationId, hub.channelAgents ?? []) ?? hub.defaultAgent)
+    return turnCoordinator?.acceptSurfaceEvent(event).then(() => {}) ?? Promise.resolve()
+  })
   console.error("switchboard hub: gateway connected")
 }
 

@@ -26,7 +26,7 @@ export function inboundLinkRoute(link: TransportLink | null | undefined): "canon
 export class TurnCoordinator {
   constructor(
     private readonly service: Pick<ConversationService, "appendUserMessage" | "appendExternalMessage" | "appendAgentMessage">,
-    private readonly repo: Pick<ConversationRepository, "getConversation" | "resolveTransportLink" | "listTransportLinks" | "resolveDeliveredExternalMessageId">,
+    private readonly repo: Pick<ConversationRepository, "getConversation" | "resolveTransportLink" | "listTransportLinks" | "resolveDeliveredExternalMessageId" | "createDeliveries">,
     private readonly dispatcher: TurnDispatcher,
     private readonly events: TurnEventPublisher,
     private readonly router: TurnSurfaceRouter,
@@ -36,7 +36,14 @@ export class TurnCoordinator {
 
   async submitWebTurn(identity: string, conversationId: string, input: WebTurnInput): Promise<AppendMessageResult> {
     const result = this.service.appendUserMessage(identity, conversationId, input)
-    if (result.inserted) this.dispatch(conversationId, result.message, `web:${identity}`, identity)
+    if (result.inserted) {
+      const links = this.repo.listTransportLinks(conversationId).filter(link => link.enabled && link.syncMode !== "inbound_only" && link.syncMode !== "notifications_only")
+      if (links.length) {
+        this.repo.createDeliveries(result.message.id, links, "message", this.now())
+        await this.router.deliver(result.message, links, "transcript")
+      }
+      this.dispatch(conversationId, result.message, `web:${identity}`, identity)
+    }
     return result
   }
 

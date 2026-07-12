@@ -1,4 +1,5 @@
 export * from "./events"
+export * from "./channelMigration"
 export * from "./repository"
 export * from "./service"
 export * from "./sqliteRepository"
