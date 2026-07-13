@@ -1,0 +1,14 @@
+:root {
+  color-scheme: dark;
+  font-family: system-ui, sans-serif;
+  background: #121722;
+  color: #f4f7fb;
+}
+
+body {
+  margin: 0;
+}
+
+#workspace {
+  padding: 1.5rem;
+}

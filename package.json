@@ -4,18 +4,34 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "hub": "bun run hub/index.ts",
+    "build:web": "bun run scripts/build-web.ts",
+    "hub:server": "bun run hub/index.ts",
+    "hub": "bun run build:web && bun run hub:server",
     "test": "bun test",
+    "test:e2e": "bun run build:web && playwright test",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",
     "@modelcontextprotocol/sdk": "^1.0.0",
     "croner": "^10.0.1",
-    "discord.js": "^14.14.0"
+    "discord.js": "^14.14.0",
+    "react": "19.2.7",
+    "react-dom": "19.2.7"
   },
   "devDependencies": {
-    "typescript": "^5.4.0",
-    "@types/bun": "latest"
+    "@axe-core/playwright": "4.12.1",
+    "@happy-dom/global-registrator": "20.10.6",
+    "@playwright/test": "1.61.1",
+    "@testing-library/dom": "10.4.1",
+    "@testing-library/jest-dom": "6.9.1",
+    "@testing-library/react": "16.3.2",
+    "@testing-library/user-event": "14.6.1",
+    "@types/bun": "latest",
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.3",
+    "happy-dom": "20.10.6",
+    "sharp": "0.35.3",
+    "typescript": "^5.4.0"
   }
 }

@@ -37,7 +37,7 @@ const cfgB: PeeringConfig = {
 const secretFor = (_name: string): string => SHARED_SECRET
 
 // --- Hub B callbacks ---
-let notifyFired: PeerEnvelope | null = null
+const notifyFired: { value: PeerEnvelope | null } = { value: null }
 let askFired: PeerEnvelope | null = null
 let replyFiredOnA: PeerEnvelope | null = null
 
@@ -51,7 +51,7 @@ const depsB: PeerRouteDeps = {
   now: () => Date.now(),
   rateOk: (peer) => rlB.ok(peer),
   onRejected: (peer, reason) => { console.error(`[hub-b] rejected from ${peer}: ${reason}`) },
-  onNotify: (e) => { notifyFired = e },
+  onNotify: (e) => { notifyFired.value = e },
   onAsk: async (e) => {
     // Fake agent on hub-b produces a reply and POSTs it back to hub-a's /peer/reply
     askFired = e
@@ -132,8 +132,9 @@ try {
   }
   const notifyResult = await postPeer("hub-a", defB, SHARED_SECRET, `${LISTEN_PATH}/notify`, notifyEnv, fetch)
   if (!notifyResult.ok) throw new Error(`notify POST failed: status ${notifyResult.status}`)
-  if (!notifyFired) throw new Error("hub-b onNotify was not called")
-  if (notifyFired.text !== "hello from hub-a") throw new Error(`notify text mismatch: ${notifyFired.text}`)
+  const fired = notifyFired.value
+  if (!fired) throw new Error("hub-b onNotify was not called")
+  if (fired.text !== "hello from hub-a") throw new Error(`notify text mismatch: ${fired.text}`)
   console.log("OK: notify A→B delivered (status 200, onNotify fired, text correct)")
 
   // --- Smoke 2: ask A → B → reply back to A ---

@@ -8,6 +8,7 @@ import type { Conversation, Message, SyncMode, TransportLink } from "./conversat
 import type { ConversationEvent } from "./conversations/events"
 import { ConversationForbiddenError, ConversationValidationError, MAX_MESSAGES_PAGE_SIZE } from "./conversations/service"
 import { RepositoryConflictError, RepositoryNotFoundError, type AppendMessageResult } from "./conversations/repository"
+import { createBuiltWorkspaceAssets, type WorkspaceAssetHandler } from "./webAssets"
 
 export interface ChannelInfo { channelId: string; name?: string; agent: string }
 
@@ -81,18 +82,28 @@ const nonNegativeInteger = (value: string | null, fallback: number): number | nu
   return Number.isSafeInteger(parsed) ? parsed : null
 }
 
-/** Route a dashboard/API request. `GET /` and `GET /api/status` are unauthenticated
- *  (dashboard shell + poll payload); every other route requires the
+/** Route a workspace/legacy dashboard/API request. Workspace GETs and
+ *  `GET /api/status` are unauthenticated; every guarded API route requires the
  *  X-Switchboard-User identity header (via `deps.requireUser`) and is otherwise
  *  404 (unknown path) or 405 (known path, wrong method). Async — several routes
  *  await injected deps (approval resolution, channel I/O, command execution). */
-export async function handleWebRequest(req: Request, deps: WebDeps): Promise<Response> {
+export async function handleWebRequest(
+  req: Request,
+  deps: WebDeps,
+  workspaceAssets: WorkspaceAssetHandler = async () => null,
+): Promise<Response> {
   const url = new URL(req.url)
   const path = url.pathname
   const method = req.method
 
-  if (method === "GET" && (path === "/" || path === "/index.html")) {
+  if (method === "GET" && path === "/legacy/") {
+    return Response.redirect(new URL("/legacy", req.url), 308)
+  }
+  if (method === "GET" && path === "/legacy") {
     return new Response(DASHBOARD_HTML, { status: 200, headers: { "content-type": "text/html; charset=utf-8" } })
+  }
+  if (method === "GET" && !path.startsWith("/api/")) {
+    return await workspaceAssets(path) ?? new Response("workspace_not_built", { status: 503 })
   }
   if (method === "GET" && path === "/api/status") {
     return json(renderDashboardJson(deps.collect()))
@@ -281,7 +292,8 @@ export async function handleWebRequest(req: Request, deps: WebDeps): Promise<Res
  *  loopback-only unless an operator opts in). */
 export function startWebServer(port: number, deps: WebDeps, host = "127.0.0.1"): { stopAccepting: () => void; stop: () => Promise<void> } | null {
   if (!port) return null
-  const server = Bun.serve({ port, hostname: host, fetch: (req) => handleWebRequest(req, deps) })
+  const workspaceAssets = createBuiltWorkspaceAssets()
+  const server = Bun.serve({ port, hostname: host, fetch: (req) => handleWebRequest(req, deps, workspaceAssets) })
   let stopping: Promise<void> | undefined
   return {
     stopAccepting: () => { stopping ??= server.stop(false) },

@@ -3,6 +3,7 @@ import { handleWebRequest, startWebServer } from "../hub/webServer"
 import type { WebInput, DashboardJson } from "../hub/web"
 import type { WebDeps } from "../hub/webServer"
 import type { AgentConfig } from "../hub/types"
+import type { WorkspaceAssetHandler } from "../hub/webAssets"
 
 const baseInput = (): WebInput => ({
   now: 1000, startedAt: 0,
@@ -44,10 +45,15 @@ test("web server exposes asynchronous stop completion", () => {
   expect(start).toBe(startWebServer)
 })
 
-test("GET / → 200 HTML dashboard (no auth required)", async () => {
+test("GET / without built workspace → 503", async () => {
   const res = await handleWebRequest(get("/"), fakeDeps())
-  expect(res.status).toBe(200)
-  expect(res.headers.get("content-type")).toContain("text/html")
+  expect(res.status).toBe(503)
+})
+
+test("root uses workspace assets and legacy keeps the embedded dashboard", async () => {
+  const workspace: WorkspaceAssetHandler = async path => path === "/" ? new Response("workspace") : null
+  expect(await (await handleWebRequest(new Request("http://x/"), fakeDeps(), workspace)).text()).toBe("workspace")
+  expect(await (await handleWebRequest(new Request("http://x/legacy"), fakeDeps(), workspace)).text()).toContain("Switchboard")
 })
 
 test("GET /api/status → 200 JSON payload (no auth required)", async () => {
@@ -58,9 +64,9 @@ test("GET /api/status → 200 JSON payload (no auth required)", async () => {
   expect(json.pendingApprovalList).toEqual([])
 })
 
-test("POST / → 405, unknown path → 404", async () => {
+test("POST / → 405, unknown non-API GET → 503", async () => {
   expect((await handleWebRequest(post("/", {}, { "x-switchboard-user": "a@b.com" }), fakeDeps())).status).toBe(405)
-  expect((await handleWebRequest(get("/nope"), fakeDeps())).status).toBe(404)
+  expect((await handleWebRequest(get("/nope"), fakeDeps())).status).toBe(503)
 })
 
 test("POST /api/approvals/:id without X-Switchboard-User → 400", async () => {
