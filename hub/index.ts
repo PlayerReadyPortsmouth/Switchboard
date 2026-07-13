@@ -2118,7 +2118,7 @@ const conversationRepo = new SqliteConversationRepository(conversationDb)
 const legacyDiscordCompatibility = new LegacyDiscordCompatibilityRouter(conversationRepo, gateway)
 resolveLegacyDiscordChatId = chatId => legacyDiscordCompatibility.resolveChatId(chatId)
 const conversationEvents = new ConversationEventStream((id, after, limit) => conversationRepo.listMessages(id, after, limit))
-const conversationService = new ConversationService(conversationRepo, () => Date.now(), () => randomUUID(), conversationEvents)
+const conversationService = new ConversationService(conversationRepo, () => Date.now(), () => randomUUID(), conversationEvents, name => Object.hasOwn(agents, name))
 ensureDiscordConversation = createDiscordConversationMigrator({
   repo: conversationRepo,
   now: () => Date.now(),

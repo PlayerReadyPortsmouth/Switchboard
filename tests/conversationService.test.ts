@@ -9,7 +9,7 @@ const fixture = () => {
   const repo = new SqliteConversationRepository(new Database(":memory:"))
   let timestamp = 0
   let identifier = 0
-  const service = new ConversationService(repo, () => ++timestamp, () => `id-${++identifier}`)
+  const service = new ConversationService(repo, () => ++timestamp, () => `id-${++identifier}`, undefined, name => ["architect", "qa"].includes(name))
   return { service, repo }
 }
 
@@ -41,9 +41,29 @@ test("validates creation and message input", () => {
   const { service } = fixture()
   expect(() => service.create("owner", { title: "  ", primaryAgent: "architect" })).toThrow(ConversationValidationError)
   expect(() => service.create("owner", { title: "Title", primaryAgent: " " })).toThrow(ConversationValidationError)
+  expect(() => service.create("owner", { title: "Title", primaryAgent: "unknown" })).toThrow(ConversationValidationError)
   const c = service.create("owner", { title: "Title", primaryAgent: "architect" })
   expect(() => service.appendUserMessage("owner", c.id, { content: " ", clientKey: "m1" })).toThrow(ConversationValidationError)
   expect(() => service.appendUserMessage("owner", c.id, { content: "ok", clientKey: "" })).toThrow(ConversationValidationError)
+})
+
+test("accepts only configured primary agents on create and update", () => {
+  const { service } = fixture()
+  const c = service.create("owner", { title: "Build", primaryAgent: " architect " })
+  expect(c.primaryAgent).toBe("architect")
+  expect(service.update("owner", c.id, { primaryAgent: " qa " }).primaryAgent).toBe("qa")
+  expect(() => service.update("owner", c.id, { primaryAgent: "unknown" })).toThrow(ConversationValidationError)
+})
+
+test("authorizes conversation updates before validating the agent registry", () => {
+  const repo = new SqliteConversationRepository(new Database(":memory:"))
+  let registryChecks = 0
+  const service = new ConversationService(repo, () => 1, () => "c1", undefined, name => { registryChecks++; return name === "architect" })
+  const c = service.create("owner", { title: "Build", primaryAgent: "architect" })
+  repo.addParticipant({ conversationId: c.id, identity: "member", kind: "user", role: "member", createdAt: 2 })
+  registryChecks = 0
+  expect(() => service.update("member", c.id, { primaryAgent: "unknown" })).toThrow(ConversationForbiddenError)
+  expect(registryChecks).toBe(0)
 })
 
 test("owner changes the primary agent without replacing history", () => {

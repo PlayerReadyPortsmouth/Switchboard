@@ -21,6 +21,8 @@ export class ConversationService {
     private now: () => number,
     private id: () => string,
     private events?: ConversationEventStream,
+    // Compatibility default for isolated compositions; production injects the live registry predicate.
+    private isKnownAgent: (name: string) => boolean = () => true,
   ) {}
 
   create(identity: string, input: CreateInput): Conversation {
@@ -28,6 +30,7 @@ export class ConversationService {
     const primaryAgent = input.primaryAgent.trim()
     if (!title) throw new ConversationValidationError("Conversation title is required")
     if (!primaryAgent) throw new ConversationValidationError("Primary agent is required")
+    if (!this.isKnownAgent(primaryAgent)) throw new ConversationValidationError(`Unknown primary agent: ${primaryAgent}`)
     const createdAt = this.now()
     const conversationId = this.id()
     return this.repo.createConversationWithOwner(
@@ -47,6 +50,7 @@ export class ConversationService {
   }
 
   update(identity: string, conversationId: string, input: ConversationUpdate): Conversation {
+    this.requireRole(identity, conversationId, ["owner"])
     if (input.title === undefined && input.primaryAgent === undefined) throw new ConversationValidationError("Conversation update is required")
     const changes: ConversationUpdate = {}
     if (input.title !== undefined) {
@@ -56,8 +60,8 @@ export class ConversationService {
     if (input.primaryAgent !== undefined) {
       changes.primaryAgent = input.primaryAgent.trim()
       if (!changes.primaryAgent) throw new ConversationValidationError("Primary agent is required")
+      if (!this.isKnownAgent(changes.primaryAgent)) throw new ConversationValidationError(`Unknown primary agent: ${changes.primaryAgent}`)
     }
-    this.requireRole(identity, conversationId, ["owner"])
     return this.repo.updateConversation(conversationId, changes, this.now())
   }
 

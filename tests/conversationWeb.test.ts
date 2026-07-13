@@ -113,6 +113,7 @@ test("conversation errors map to transport statuses", async () => {
   expect((await handleWebRequest(req("/api/conversations", "POST", undefined), deps())).status).toBe(400)
   expect((await handleWebRequest(req("/api/conversations/c1"), deps({ getConversation: () => { throw new ConversationForbiddenError("no") } }))).status).toBe(403)
   expect((await handleWebRequest(req("/api/conversations", "POST", {}), deps({ createConversation: () => { throw new ConversationValidationError("bad") } }))).status).toBe(400)
+  expect((await handleWebRequest(req("/api/conversations/c1", "PATCH", { primaryAgent: "unknown" }), deps({ updateConversation: () => { throw new ConversationValidationError("Unknown primary agent") } }))).status).toBe(400)
   expect((await handleWebRequest(req("/api/conversations/missing"), deps({ getConversation: () => { throw new RepositoryNotFoundError("missing") } }))).status).toBe(404)
   expect((await handleWebRequest(req("/api/conversations/c1/links", "POST", { adapter: "discord", externalLocationId: "room" }), deps({ addConversationLink: () => { throw new RepositoryConflictError("duplicate") } }))).status).toBe(409)
 })

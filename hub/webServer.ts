@@ -85,7 +85,7 @@ const nonNegativeInteger = (value: string | null, fallback: number): number | nu
 
 /** Route a workspace/legacy dashboard/API request. Workspace GETs and
  *  `GET /api/status` are unauthenticated; every guarded API route requires the
- *  X-Switchboard-User identity header (via `deps.requireUser`) and is otherwise
+ *  configured trusted identity header (via `deps.requireUser`) and is otherwise
  *  404 (unknown path) or 405 (known path, wrong method). Async — several routes
  *  await injected deps (approval resolution, channel I/O, command execution). */
 export async function handleWebRequest(
