@@ -53,6 +53,21 @@ Implemented, independently reviewed, revised, and verified.
 - Canonical `message_committed` SSE events now enter reducer messages, and the latest structured turn state is announced through a visually hidden polite atomic live region.
 - Review-focused run: 19 pass, 0 fail, 53 assertions.
 
+### RED 4 — controller accessibility and race review
+
+- Global announcer regression expected one `aria-live="polite"` but found 2 because connection announcements lived inside the mobile-hidden application rail while turn announcements lived separately.
+- Tablet touch-contract regression could not find a 44px header-action override inside the `<1200px` media query; the controls remained 38px.
+- Real user-event focus regressions showed no focus transfer into the tablet inspector or mobile list/inspector/transcript panes and no invoking-control restoration on close/Escape.
+- Deferred archive regression showed the archive submit action remained enabled with no synchronous in-flight guard, allowing repeated activation to reach the API.
+
+### GREEN 4 — controller review fixes
+
+- Replaced the rail live region and separate turn region with one visually hidden, global, polite/atomic connection-and-turn announcer that stays accessible at every breakpoint.
+- Added a 44px minimum for transcript header actions across the full tablet/mobile `<1200px` range while keeping 38px desktop controls.
+- Added responsive layout detection, explicit search/composer/inspector refs, post-render focus entry, invoking-control restoration, and drawer Escape handling. Real user-event tests cover tablet inspector open/Escape, mobile selection and pane switching, close restoration, and archive modal cancellation.
+- Added a synchronous ref-backed archive lock, disabled pending controls, guarded pending Escape cancellation, re-enabled controls on API failure, and a deferred duplicate-submit regression.
+- Controller follow-up review: **approved**, with no remaining Critical or Important issues.
+
 ## Implemented behavior
 
 - `App` owns session/conversation loading, stable API/draft dependencies, workspace reducer state, URL selection, history/popstate, modal dialog actions, responsive pane state, and conversation-stream lifecycle.
@@ -60,24 +75,24 @@ Implemented, independently reviewed, revised, and verified.
 - Conversation navigation provides case-insensitive local title search, active state, primary-agent/updated metadata, explicit empty/no-match states, create dialog with agent selection, and archive confirmation.
 - URL state uses `history.pushState` and a `popstate` listener for `/` and `/conversations/<encoded-id>`; no router dependency was added.
 - Create and archive actions update canonical API-backed state and navigation only after the API succeeds, with actionable inline failure copy.
-- The default conversation stream performs gap-first message loading, canonicalizes committed SSE messages into reducer state, drives the connection announcer, and feeds a separate polite structured-turn announcer.
+- The default conversation stream performs gap-first message loading, canonicalizes committed SSE messages into reducer state, and feeds one global polite connection/structured-turn announcer.
 - DraftStore backs the deliberately minimal Task 4 composer shell; transcript/message composition internals remain for Task 5.
 - Semantic regions are exposed as `application-navigation`, `conversation-navigation`, `transcript`, and `conversation-inspector` through labelled landmarks plus stable `data-region` names.
 - Desktop uses `[72 rail][320 list][fluid transcript][320 inspector]`; tablet moves the inspector to a right drawer; mobile uses one fixed primary pane with full-screen list/inspector states and bottom navigation.
-- Mobile controls are at least 44px, navigation includes safe-area insets, and reduced motion collapses transition durations.
+- Tablet and mobile touch controls are at least 44px, mobile navigation includes safe-area insets, and reduced motion collapses transition durations.
 
 ## Verification
 
 Fresh sequential gate, with one Bun command running at a time:
 
 - `bun test web/client/App.test.tsx --timeout 5000`
-  - Exit 0; 19 pass, 0 fail, 53 assertions.
+  - Exit 0; 25 pass, 0 fail, 72 assertions.
 - `bun run build:web`
   - Exit 0.
 - `bun run typecheck`
   - Exit 0; `tsc --noEmit` clean.
 - `bun test`
-  - Exit 0; 875 pass, 0 fail, 2,208 assertions across 119 files in the final post-announcer run.
+  - Exit 0; 881 pass, 0 fail, 2,227 assertions across 119 files in the final controller-follow-up run.
 - `git diff --check`
   - Exit 0; only Git's existing LF/CRLF working-copy notices were emitted.
 
@@ -99,7 +114,7 @@ Fresh sequential gate, with one Bun command running at a time:
 - The design follows the approved quiet technical-studio direction: deep ink hierarchy and hairline boundaries carry structure, while Inter/system remains restrained and monospace is limited to technical metadata.
 - The single memorable device is the crisp teal signal trace/node on the active conversation and Switchboard mark. Teal also conveys live state; warm is reserved for connecting activity and coral for danger. No gradients, glassmorphism, decorative numbering, generic card grids, or excessive pills were introduced.
 - The shell remains truthful: only Conversations and the existing Legacy console are destinations; there are no dead Agents, Approvals, Operations, Settings, or PWA controls.
-- Visible `:focus-visible` treatment uses the accent with an ink separation ring. Controls are labelled, dialogs use native modal isolation and labelled headings, connection and structured turn changes use separate `aria-live="polite"` announcers, and mobile controls meet the 44px target.
+- Visible `:focus-visible` treatment uses the accent with an ink separation ring. Controls are labelled, dialogs use native modal isolation and labelled headings, and connection/structured-turn changes share one global `aria-live="polite"` announcer. Tablet and mobile controls meet the 44px target.
 - The transcript content column is capped at 780px. Mobile safe-area padding covers the top, horizontal edges, dialog, composer, and bottom navigation. `prefers-reduced-motion` disables effective drawer/message transition duration.
 - The in-app browser backend was unavailable (`agent.browsers.list()` returned no browser), and the browser skill prohibited switching to an unrelated automation backend. Therefore visual critique was completed from the rendered semantic structure and CSS contract rather than screenshots; this is the principal verification limitation.
 
@@ -110,7 +125,9 @@ Fresh sequential gate, with one Bun command running at a time:
 - Conversation IDs are encoded on writes and decoded defensively on reads.
 - Stream cleanup runs on selection changes/unmount, and API failures cannot silently imply successful creation or archive.
 - Inactive tablet/mobile drawers are visibility-hidden and pointer-disabled until active, preventing off-screen focus and assistive-technology traversal.
+- Drawer focus moves to a meaningful target on open and restores the still-connected invoking control on close/Escape; mobile pane switching is explicitly routed rather than left on hidden content.
 - Composer nodes remount per conversation, preventing one conversation's displayed draft from being written into another conversation.
+- Archive submission is guarded synchronously for the complete pending interval, and API failure restores an enabled retry action.
 - Empty, forbidden, unavailable, retry, no-match, and action-error paths all give explicit next steps.
 - No new runtime service, router, global state library, font fetch, or PWA dependency was introduced.
 
@@ -124,5 +141,5 @@ Fresh sequential gate, with one Bun command running at a time:
 - Initial review found no Critical issues and identified inactive-drawer focus exposure, draft leakage, modeless dialogs, missing committed-message canonicalization, stale action errors, unstable default dependencies, and a missing turn announcer.
 - All in-scope findings were fixed with focused regressions.
 - The reviewer accepted CSS visibility/pointer gating as resolving the actual responsive focus issue and accepted that transcript rendering remains Task 5 scope.
-- Final re-review: **approved**, with no remaining Critical or Important issues.
-- This report is finalized before the task commit and is not edited afterward.
+- Initial and controller follow-up re-reviews: **approved**, with no remaining Critical or Important issues.
+- This report is finalized before the controller-fix commit and is not edited afterward.

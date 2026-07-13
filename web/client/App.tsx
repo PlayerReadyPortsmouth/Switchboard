@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState, type FormEvent } from "react"
 import { ApiError, WorkspaceApi } from "./api"
 import { ConversationStream } from "./conversationStream"
 import { DraftStore } from "./drafts"
@@ -7,7 +7,7 @@ import { ConversationList } from "./components/ConversationList"
 import { Inspector } from "./components/Inspector"
 import { MobileNav, type MobilePane } from "./components/MobileNav"
 import { initialWorkspaceState, workspaceReducer } from "./state"
-import type { Conversation, ConversationInput, Session } from "./types"
+import type { ConnectionState, Conversation, ConversationInput, Session } from "./types"
 
 export interface AppApi {
   session(): Promise<Session>
@@ -25,6 +25,14 @@ interface AppProps {
 }
 
 type LoadState = "loading" | "ready" | "forbidden" | "unavailable"
+type WorkspaceLayout = "desktop" | "tablet" | "mobile"
+
+const connectionLabels: Record<ConnectionState, string> = {
+  connecting: "Connecting",
+  live: "Live",
+  reconnecting: "Reconnecting",
+  offline: "Offline",
+}
 
 const conversationIdFromLocation = () => {
   const match = location.pathname.match(/^\/conversations\/([^/]+)$/)
@@ -62,6 +70,16 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, streamF
   const [mobilePane, setMobilePane] = useState<MobilePane>(conversationIdFromLocation() ? "transcript" : "conversations")
   const [inspectorOpen, setInspectorOpen] = useState(false)
   const [actionError, setActionError] = useState("")
+  const layout = useWorkspaceLayout()
+  const conversationSearchRef = useRef<HTMLInputElement>(null)
+  const composerRef = useRef<HTMLTextAreaElement>(null)
+  const inspectorCloseRef = useRef<HTMLButtonElement>(null)
+  const drawerInvokerRef = useRef<HTMLElement | null>(null)
+  const dialogInvokerRef = useRef<HTMLElement | null>(null)
+
+  const focusAfterRender = useCallback((target: () => HTMLElement | null) => {
+    requestAnimationFrame(() => target()?.focus())
+  }, [])
 
   const load = useCallback(async () => {
     setLoadState("loading")
@@ -106,14 +124,58 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, streamF
 
   const selected = useMemo(() => state.conversations.find(item => item.id === state.selectedConversationId) ?? null, [state.conversations, state.selectedConversationId])
   const latestTurnState = [...state.activity].reverse().find(event => event.kind === "turn_state")?.state
+  const workspaceAnnouncement = `${connectionLabels[state.connection]}.${latestTurnState ? ` Turn ${latestTurnState}.` : ""}`
 
-  const openDialog = (next: "new" | "archive") => { setActionError(""); setDialog(next) }
-  const closeDialog = () => { setActionError(""); setDialog(null) }
+  const openDialog = (next: "new" | "archive") => {
+    dialogInvokerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    setActionError("")
+    setDialog(next)
+  }
+  const closeDialog = () => {
+    const invoker = dialogInvokerRef.current
+    setActionError("")
+    setDialog(null)
+    focusAfterRender(() => invoker?.isConnected ? invoker : null)
+  }
+
+  const closeInspector = () => {
+    const invoker = drawerInvokerRef.current
+    setInspectorOpen(false)
+    setMobilePane(selected ? "transcript" : "conversations")
+    focusAfterRender(() => invoker?.isConnected ? invoker : null)
+  }
+
+  const closeConversationDrawer = () => {
+    const invoker = drawerInvokerRef.current
+    setMobilePane("transcript")
+    focusAfterRender(() => invoker?.isConnected ? invoker : null)
+  }
+
+  const openInspector = (trigger: HTMLElement) => {
+    drawerInvokerRef.current = trigger
+    setInspectorOpen(true)
+    setMobilePane("inspector")
+    if (layout !== "desktop") focusAfterRender(() => inspectorCloseRef.current)
+  }
+
+  const changeMobilePane = (pane: MobilePane, trigger: HTMLButtonElement) => {
+    drawerInvokerRef.current = trigger
+    setMobilePane(pane)
+    setInspectorOpen(pane === "inspector")
+    if (pane === "conversations") focusAfterRender(() => conversationSearchRef.current)
+    else if (pane === "inspector") focusAfterRender(() => inspectorCloseRef.current)
+    else focusAfterRender(() => composerRef.current)
+  }
 
   const navigate = (conversationId: string | null, replace = false) => {
     history[replace ? "replaceState" : "pushState"](null, "", pathFor(conversationId))
     dispatch({ type: "conversation/selected", conversationId })
     setMobilePane(conversationId ? "transcript" : "conversations")
+  }
+
+  const selectConversation = (conversation: Conversation) => {
+    navigate(conversation.id)
+    if (layout === "mobile") focusAfterRender(() => composerRef.current)
   }
 
   const createConversation = async (input: ConversationInput) => {
@@ -136,6 +198,7 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, streamF
       dispatch({ type: "conversations/loaded", conversations: state.conversations.filter(item => item.id !== selected.id) })
       setDialog(null)
       navigate(null)
+      if (layout === "mobile") focusAfterRender(() => conversationSearchRef.current)
     } catch {
       setActionError("Conversation could not be archived. Try again.")
     }
@@ -148,28 +211,38 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, streamF
 
   return (
     <main className="workspace-shell" data-mobile-pane={mobilePane}>
-      <span className="sr-only" aria-live="polite" aria-atomic="true" data-turn-announcer>{latestTurnState ? `Turn ${latestTurnState}.` : ""}</span>
+      <span className="sr-only" aria-live="polite" aria-atomic="true" data-workspace-announcer data-turn-announcer>{workspaceAnnouncement}</span>
       <AppRail connection={state.connection} install={install} onNew={() => openDialog("new")} onConversations={() => navigate(null)} />
-      <ConversationList conversations={state.conversations} selectedId={state.selectedConversationId} open={mobilePane === "conversations"} closeDisabled={!selected} onNew={() => openDialog("new")} onSelect={item => navigate(item.id)} onClose={() => setMobilePane("transcript")} />
+      <ConversationList
+        conversations={state.conversations}
+        selectedId={state.selectedConversationId}
+        open={mobilePane === "conversations"}
+        closeDisabled={!selected}
+        searchRef={conversationSearchRef}
+        onEscape={layout === "mobile" && selected ? closeConversationDrawer : undefined}
+        onNew={() => openDialog("new")}
+        onSelect={item => selectConversation(item)}
+        onClose={closeConversationDrawer}
+      />
       <section className="transcript-pane" aria-label="Transcript" data-region="transcript" data-message-count={state.messages.length}>
         {selected ? (
           <>
             <header className="pane-header transcript-header">
               <div><p className="eyebrow">{selected.primaryAgent}</p><h2>{selected.title}</h2></div>
               <div className="header-actions">
-                <button type="button" className="inspector-toggle" onClick={() => { setInspectorOpen(true); setMobilePane("inspector") }}>Conversation details</button>
+                <button type="button" className="inspector-toggle" onClick={event => openInspector(event.currentTarget)}>Conversation details</button>
                 <button type="button" className="danger-action" onClick={() => openDialog("archive")}>Archive conversation</button>
               </div>
             </header>
             <div className="transcript-body"><p>Conversation messages will appear here.</p></div>
-            <label className="composer-shell"><span className="sr-only">Message</span><textarea key={selected.id} aria-label="Message" defaultValue={drafts.read(selected.id)?.text ?? ""} onInput={event => drafts.write(selected.id, event.currentTarget.value)} placeholder="Message the conversation" /></label>
+            <label className="composer-shell"><span className="sr-only">Message</span><textarea ref={composerRef} key={selected.id} aria-label="Message" defaultValue={drafts.read(selected.id)?.text ?? ""} onInput={event => drafts.write(selected.id, event.currentTarget.value)} placeholder="Message the conversation" /></label>
           </>
         ) : (
           <div className="transcript-empty"><span className="signal-map" aria-hidden="true"><i /></span><h2>Select a conversation</h2><p>Choose a conversation from the list to open its workspace.</p></div>
         )}
       </section>
-      <Inspector conversation={selected} session={state.session} open={inspectorOpen || mobilePane === "inspector"} onClose={() => { setInspectorOpen(false); setMobilePane(selected ? "transcript" : "conversations") }} />
-      <MobileNav pane={mobilePane} hasConversation={Boolean(selected)} onChange={pane => { setMobilePane(pane); setInspectorOpen(pane === "inspector") }} />
+      <Inspector conversation={selected} session={state.session} open={inspectorOpen || mobilePane === "inspector"} closeRef={inspectorCloseRef} onClose={closeInspector} onEscape={layout !== "desktop" ? closeInspector : undefined} />
+      <MobileNav pane={mobilePane} hasConversation={Boolean(selected)} onChange={changeMobilePane} />
       {dialog === "new" ? <NewConversationDialog session={state.session} error={actionError} onCancel={closeDialog} onCreate={createConversation} /> : null}
       {dialog === "archive" && selected ? <ConfirmArchiveDialog title={selected.title} error={actionError} onCancel={closeDialog} onArchive={archiveConversation} /> : null}
     </main>
@@ -198,19 +271,44 @@ function NewConversationDialog({ session, error, onCancel, onCreate }: { session
 }
 
 function ConfirmArchiveDialog({ title, error, onCancel, onArchive }: { title: string; error: string; onCancel(): void; onArchive(): Promise<void> }) {
-  const dialogRef = useModalDialog(onCancel)
+  const pendingRef = useRef(false)
+  const dialogRef = useModalDialog(() => { if (!pendingRef.current) onCancel() })
+  const [submitting, setSubmitting] = useState(false)
+  const submit = async (event: FormEvent) => {
+    event.preventDefault()
+    if (pendingRef.current) return
+    pendingRef.current = true
+    setSubmitting(true)
+    try {
+      await onArchive()
+    } finally {
+      pendingRef.current = false
+      if (dialogRef.current?.isConnected) setSubmitting(false)
+    }
+  }
   return (
     <div className="dialog-backdrop">
       <dialog ref={dialogRef} aria-labelledby="archive-conversation-title">
-        <form onSubmit={event => { event.preventDefault(); void onArchive() }}>
+        <form onSubmit={event => { void submit(event) }}>
           <h2 id="archive-conversation-title">Archive conversation</h2>
           <p>Archive “{title}”? It will leave this workspace list.</p>
           {error ? <p role="alert" className="form-error">{error}</p> : null}
-          <div className="dialog-actions"><button type="button" onClick={onCancel}>Cancel</button><button type="submit" className="danger-fill">Archive</button></div>
+          <div className="dialog-actions"><button type="button" disabled={submitting} onClick={onCancel}>Cancel</button><button type="submit" className="danger-fill" disabled={submitting}>{submitting ? "Archiving…" : "Archive"}</button></div>
         </form>
       </dialog>
     </div>
   )
+}
+
+function useWorkspaceLayout(): WorkspaceLayout {
+  const read = (): WorkspaceLayout => window.innerWidth < 768 ? "mobile" : window.innerWidth < 1200 ? "tablet" : "desktop"
+  const [layout, setLayout] = useState<WorkspaceLayout>(read)
+  useEffect(() => {
+    const update = () => setLayout(read())
+    window.addEventListener("resize", update)
+    return () => window.removeEventListener("resize", update)
+  }, [])
+  return layout
 }
 
 function useModalDialog(onCancel: () => void) {

@@ -1,6 +1,6 @@
 import "./testSetup"
 import { afterEach, describe, expect, test } from "bun:test"
-import { act, cleanup, render, waitFor, within } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { ApiError } from "./api"
 import { App, createWorkspaceStream, type AppApi } from "./App"
@@ -36,6 +36,11 @@ function deferred<T>() {
   return { promise, resolve, reject }
 }
 
+function setViewport(width: number) {
+  Object.defineProperty(window, "innerWidth", { configurable: true, value: width })
+  window.dispatchEvent(new Event("resize"))
+}
+
 function fakeApi(options: {
   conversations?: Conversation[]
   session?: Session
@@ -69,6 +74,7 @@ function fakeApi(options: {
 afterEach(() => {
   cleanup()
   history.replaceState(null, "", "/")
+  setViewport(1280)
 })
 
 describe("responsive workspace shell", () => {
@@ -312,6 +318,7 @@ describe("responsive workspace shell", () => {
     await userEvent.click(screen.getByRole("button", { name: "Archive conversation" }))
     await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Archive" }))
     expect((await screen.findByRole("alert")).textContent).toContain("could not be archived")
+    expect((within(screen.getByRole("dialog")).getByRole("button", { name: "Archive" }) as HTMLButtonElement).disabled).toBe(false)
     await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Cancel" }))
     await userEvent.click(screen.getByRole("button", { name: "New conversation" }))
     expect(screen.queryByText(/could not be archived/)).toBeNull()
@@ -337,6 +344,98 @@ describe("responsive workspace shell", () => {
 
     expect(screen.getByRole("region", { name: "Transcript" }).dataset.messageCount).toBe("1")
     act(() => handlers!.onEvent({ kind: "turn_state", conversationId: "design/review", sequence: 1, ts: 2, state: "working" }))
-    expect(document.querySelector("[data-turn-announcer]")?.textContent).toBe("Turn working.")
+    expect(document.querySelector("[data-workspace-announcer]")?.textContent).toBe("Live. Turn working.")
+    act(() => handlers!.onState("offline"))
+    expect(document.querySelector("[data-workspace-announcer]")?.textContent).toBe("Offline. Turn working.")
+  })
+
+  test("restores focus to the archive trigger when its modal is cancelled", async () => {
+    render(<App api={fakeApi()} />)
+    await userEvent.click(await screen.findByRole("button", { name: /Design review/ }))
+    const trigger = screen.getByRole("button", { name: "Archive conversation" })
+    await userEvent.click(trigger)
+    const dialog = screen.getByRole("dialog", { name: "Archive conversation" })
+    await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }))
+
+    await waitFor(() => expect(document.activeElement).toBe(trigger))
+  })
+
+  test("uses one global connection and turn announcer outside the responsive rail", async () => {
+    setViewport(500)
+    render(<App api={fakeApi()} />)
+    await screen.findByRole("heading", { name: "Switchboard" })
+
+    const announcers = document.querySelectorAll('[aria-live="polite"]')
+    expect(announcers.length).toBe(1)
+    expect(announcers[0]?.getAttribute("data-workspace-announcer")).not.toBeNull()
+    expect(announcers[0]?.textContent).toBe("Live.")
+    expect(document.querySelector(".app-rail [aria-live]")).toBeNull()
+  })
+
+  test("keeps tablet header actions at least 44px high", async () => {
+    const css = await Bun.file(new URL("./styles.css", import.meta.url)).text()
+    expect(css).toMatch(/@media \(max-width: 1199px\)[\s\S]*?\.header-actions button\s*\{[^}]*min-height:\s*44px/)
+  })
+
+  test("moves focus into the tablet inspector and restores it on Escape", async () => {
+    setViewport(900)
+    render(<App api={fakeApi()} />)
+    await userEvent.click(await screen.findByRole("button", { name: /Design review/ }))
+    const trigger = screen.getByRole("button", { name: "Conversation details" })
+
+    await userEvent.click(trigger)
+    const close = screen.getByRole("button", { name: "Close conversation details" })
+    await waitFor(() => expect(document.activeElement).toBe(close))
+    await userEvent.keyboard("{Escape}")
+
+    await waitFor(() => expect(document.activeElement).toBe(trigger))
+  })
+
+  test("moves focus through mobile pane switches and restores it when drawers close", async () => {
+    setViewport(500)
+    render(<App api={fakeApi()} />)
+    await userEvent.click(await screen.findByRole("button", { name: /Design review/ }))
+    const composer = screen.getByRole("textbox", { name: "Message" })
+    await waitFor(() => expect(document.activeElement).toBe(composer))
+    const mobile = screen.getByRole("navigation", { name: "Mobile workspace navigation" })
+    const details = within(mobile).getByRole("button", { name: "Details" })
+
+    await userEvent.click(details)
+    const inspectorClose = screen.getByRole("button", { name: "Close conversation details" })
+    await waitFor(() => expect(document.activeElement).toBe(inspectorClose))
+    await userEvent.click(inspectorClose)
+    await waitFor(() => expect(document.activeElement).toBe(details))
+
+    const conversations = within(mobile).getByRole("button", { name: "Conversations" })
+    await userEvent.click(conversations)
+    const search = screen.getByRole("searchbox", { name: "Search conversations" })
+    await waitFor(() => expect(document.activeElement).toBe(search))
+    await userEvent.keyboard("{Escape}")
+    await waitFor(() => expect(document.activeElement).toBe(conversations))
+  })
+
+  test("submits archive once while the canonical request is pending", async () => {
+    const pending = deferred<Conversation>()
+    const api = fakeApi()
+    let attempts = 0
+    api.archiveConversation = id => { attempts++; return pending.promise }
+    render(<App api={api} />)
+    await userEvent.click(await screen.findByRole("button", { name: /Design review/ }))
+    const trigger = screen.getByRole("button", { name: "Archive conversation" })
+    await userEvent.click(trigger)
+    const dialog = screen.getByRole("dialog", { name: "Archive conversation" })
+    const archive = within(dialog).getByRole("button", { name: "Archive" }) as HTMLButtonElement
+
+    fireEvent.click(archive)
+    expect(archive.disabled).toBe(true)
+    fireEvent.submit(dialog.querySelector("form")!)
+    expect(attempts).toBe(1)
+
+    await act(async () => {
+      pending.resolve(conversation({ archivedAt: Date.now() }))
+      await pending.promise
+    })
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Archive conversation" })).toBeNull())
+    expect(location.pathname).toBe("/")
   })
 })

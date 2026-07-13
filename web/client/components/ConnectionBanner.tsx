@@ -9,7 +9,7 @@ const labels: Record<ConnectionState, string> = {
 
 export function ConnectionBanner({ state }: { state: ConnectionState }) {
   return (
-    <div className="connection-banner" data-state={state} aria-live="polite" aria-atomic="true">
+    <div className="connection-banner" data-state={state}>
       <span className="connection-node" aria-hidden="true" />
       <span className="connection-label">{labels[state]}</span>
     </div>

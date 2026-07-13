@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react"
+import { useMemo, useState, type Ref } from "react"
 import type { Conversation } from "../types"
 
 interface ConversationListProps {
@@ -6,8 +6,11 @@ interface ConversationListProps {
   selectedId: string | null
   open: boolean
   closeDisabled: boolean
+  searchRef?: Ref<HTMLInputElement>
+  closeRef?: Ref<HTMLButtonElement>
+  onEscape?(): void
   onNew(): void
-  onSelect(conversation: Conversation): void
+  onSelect(conversation: Conversation, trigger: HTMLButtonElement): void
   onClose(): void
 }
 
@@ -19,7 +22,7 @@ const relativeTime = (timestamp: number) => {
   return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(timestamp)
 }
 
-export function ConversationList({ conversations, selectedId, open, closeDisabled, onNew, onSelect, onClose }: ConversationListProps) {
+export function ConversationList({ conversations, selectedId, open, closeDisabled, searchRef, closeRef, onEscape, onNew, onSelect, onClose }: ConversationListProps) {
   const [query, setQuery] = useState("")
   const filtered = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase()
@@ -27,15 +30,17 @@ export function ConversationList({ conversations, selectedId, open, closeDisable
   }, [conversations, query])
 
   return (
-    <nav className="conversation-list" data-open={open} aria-label="Conversation navigation" data-region="conversation-navigation">
+    <nav className="conversation-list" data-open={open} aria-label="Conversation navigation" data-region="conversation-navigation" onKeyDown={event => {
+      if (event.key === "Escape" && onEscape) { event.preventDefault(); onEscape() }
+    }}>
       <header className="list-header">
         <div><p className="eyebrow">Workspace</p><h1>Switchboard</h1></div>
-        <button className="drawer-close" type="button" disabled={closeDisabled} onClick={onClose} aria-label="Close conversations">×</button>
+        <button ref={closeRef} className="drawer-close" type="button" disabled={closeDisabled} onClick={onClose} aria-label="Close conversations">×</button>
       </header>
       <label className="search-field">
         <span className="sr-only">Search conversations</span>
         <span aria-hidden="true">⌕</span>
-        <input type="search" value={query} onChange={event => setQuery(event.currentTarget.value)} placeholder="Search conversations" aria-label="Search conversations" />
+        <input ref={searchRef} type="search" value={query} onChange={event => setQuery(event.currentTarget.value)} placeholder="Search conversations" aria-label="Search conversations" />
       </label>
       <div className="conversation-items">
         {filtered.map(item => (
@@ -45,7 +50,7 @@ export function ConversationList({ conversations, selectedId, open, closeDisable
             className="conversation-item"
             data-active={item.id === selectedId}
             aria-pressed={item.id === selectedId}
-            onClick={() => onSelect(item)}
+            onClick={event => onSelect(item, event.currentTarget)}
           >
             <span className="signal-trace" aria-hidden="true"><i /></span>
             <span className="conversation-copy"><strong>{item.title}</strong><small>{item.primaryAgent} · {relativeTime(item.updatedAt)}</small></span>

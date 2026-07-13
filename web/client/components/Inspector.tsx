@@ -1,11 +1,14 @@
+import type { Ref } from "react"
 import type { Conversation, Session } from "../types"
 
-export function Inspector({ conversation, session, open, onClose }: { conversation: Conversation | null; session: Session; open: boolean; onClose(): void }) {
+export function Inspector({ conversation, session, open, closeRef, onClose, onEscape }: { conversation: Conversation | null; session: Session; open: boolean; closeRef?: Ref<HTMLButtonElement>; onClose(): void; onEscape?(): void }) {
   return (
-    <aside className="inspector" role="region" data-open={open} aria-label="Conversation inspector" data-region="conversation-inspector">
+    <aside className="inspector" role="region" data-open={open} aria-label="Conversation inspector" data-region="conversation-inspector" onKeyDown={event => {
+      if (event.key === "Escape" && onEscape) { event.preventDefault(); onEscape() }
+    }}>
       <header className="pane-header inspector-header">
         <div><p className="eyebrow">Context</p><h2>Conversation details</h2></div>
-        <button className="drawer-close" type="button" onClick={onClose} aria-label="Close conversation details">×</button>
+        <button ref={closeRef} className="drawer-close" type="button" onClick={onClose} aria-label="Close conversation details">×</button>
       </header>
       {conversation ? (
         <dl className="inspector-details">

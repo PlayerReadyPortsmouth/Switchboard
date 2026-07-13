@@ -151,6 +151,7 @@ dialog input, dialog select { min-height: 44px; width: 100%; padding: 0 11px; bo
 
 @media (max-width: 1199px) {
   .workspace-shell { grid-template-columns: var(--rail-width) var(--list-width) minmax(0, 1fr); grid-template-areas: "rail list transcript"; }
+  .header-actions button { min-height: 44px; }
   .inspector { position: fixed; z-index: 50; inset: 0 0 0 auto; width: min(var(--inspector-width), calc(100vw - var(--rail-width))); visibility: hidden; pointer-events: none; transform: translateX(100%); transition: transform 180ms ease, visibility 0s linear 180ms; box-shadow: -18px 0 45px rgba(0, 0, 0, .3); }
   .inspector[data-open="true"] { visibility: visible; pointer-events: auto; transform: translateX(0); transition-delay: 0s; }
   .inspector-toggle, .inspector .drawer-close { display: block; }
