@@ -180,6 +180,9 @@ button { color: inherit; }
 .linked-surfaces li small { grid-column: 1 / -1; color: var(--muted); font: .6rem/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; }
 .pane-guidance { padding: 20px; }
 .mobile-nav { display: none; }
+.pwa-issue { position: fixed; z-index: 90; right: 18px; bottom: 18px; width: min(420px, calc(100vw - 36px)); display: grid; gap: 5px; padding: 13px 15px; border: 1px solid var(--danger); background: var(--ink-1); color: var(--text); box-shadow: 0 14px 40px rgba(0, 0, 0, .38); }
+.pwa-issue strong { color: var(--danger); font-size: .78rem; }
+.pwa-issue span { color: var(--muted); font-size: .78rem; line-height: 1.45; }
 
 .status-page { min-height: 100dvh; display: grid; place-items: center; padding: 24px; background: var(--ink-0); }
 .status-page > * { width: min(100%, 480px); padding: 26px; border-left: 1px solid var(--accent); background: var(--ink-1); }
@@ -239,6 +242,7 @@ dialog input, dialog select { min-height: 44px; width: 100%; padding: 0 11px; bo
   .mobile-nav button { min-height: 48px; border: 0; border-top: 1px solid transparent; background: transparent; color: var(--muted); font-size: .72rem; cursor: pointer; }
   .mobile-nav button[aria-current="page"] { color: var(--text); border-top-color: var(--accent); }
   .mobile-nav button:disabled { opacity: .36; cursor: default; }
+  .pwa-issue { right: max(12px, env(safe-area-inset-right)); bottom: calc(76px + env(safe-area-inset-bottom)); width: min(420px, calc(100vw - 24px)); }
   .dialog-backdrop { padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); }
 }
 

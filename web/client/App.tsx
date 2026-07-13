@@ -240,7 +240,7 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, st
   const drawerInvokerRef = useRef<HTMLElement | null>(null)
   const dialogInvokerRef = useRef<HTMLElement | null>(null)
   const [focusRequest, setFocusRequest] = useState<FocusRequest | null>(null)
-  const [pwaState, setPwaState] = useState<PwaState>(() => pwa?.state() ?? { installAvailable: false, online: true })
+  const [pwaState, setPwaState] = useState<PwaState>(() => pwa?.state() ?? { installAvailable: false, online: true, issue: null })
 
   useEffect(() => pwa?.subscribe(setPwaState), [pwa])
 
@@ -399,6 +399,10 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, st
   return (
     <main className="workspace-shell" data-mobile-pane={mobilePane}>
       <span className="sr-only" aria-live="polite" aria-atomic="true" data-workspace-announcer data-turn-announcer>{workspaceAnnouncement}</span>
+      {pwaState.issue ? <div className="pwa-issue" role="status" aria-labelledby="pwa-issue-title" data-source={pwaState.issue.source}>
+        <strong id="pwa-issue-title">{pwaState.issue.source === "install" ? "Install Switchboard" : "Offline support"}</strong>
+        <span>{pwaState.issue.message}</span>
+      </div> : null}
       <AppRail
         connection={displayedConnection}
         install={pwa ? { available: pwaState.installAvailable, run: () => pwa.install() } : install ? { available: true, run: async () => install.run() } : undefined}
