@@ -1,0 +1,71 @@
+import { expect, test } from "bun:test"
+import { ApiError, WorkspaceApi } from "./api"
+import type { Conversation, Message, TransportLink } from "./types"
+
+const conversation: Conversation = { id: "c/1", title: "Design", primaryAgent: "architect", createdBy: "owner@example.com", createdAt: 1, updatedAt: 1, archivedAt: null }
+const message: Message = { id: "m1", conversationId: "c/1", sequence: 1, author: "owner@example.com", origin: "web", content: "hello", replyTo: null, state: "committed", clientKey: "draft-1", createdAt: 2 }
+const link: TransportLink = { id: "l1", conversationId: "c/1", adapter: "discord", externalLocationId: "room", label: null, syncMode: "two_way", enabled: true, createdAt: 3, updatedAt: 3 }
+
+test("postMessage reuses the supplied idempotency key", async () => {
+  const calls: Request[] = []
+  const api = new WorkspaceApi(async input => {
+    calls.push(input as Request)
+    return Response.json(message, { status: 201 })
+  })
+
+  expect(await api.postMessage("c/1", { content: "hello", clientKey: "draft-1" })).toEqual(message)
+  expect(calls[0].url).toEndWith("/api/conversations/c%2F1/messages")
+  expect(calls[0].headers.get("content-type")).toBe("application/json")
+  expect(calls[0].headers.get("idempotency-key")).toBe("draft-1")
+  expect(await calls[0].json()).toEqual({ content: "hello" })
+})
+
+test("typed conversation methods encode IDs and use documented request shapes", async () => {
+  const calls: Request[] = []
+  const responses: unknown[] = [
+    { identity: "owner@example.com", agents: [{ name: "architect", alive: true, busy: false }] },
+    [conversation], conversation, conversation, conversation, [message], [link],
+  ]
+  const api = new WorkspaceApi(async input => {
+    calls.push(input as Request)
+    return Response.json(responses.shift())
+  })
+
+  await api.session()
+  await api.listConversations(true)
+  await api.createConversation({ title: "Design", primaryAgent: "architect" })
+  await api.updateConversation("c/1", { title: "Roadmap" })
+  await api.archiveConversation("c/1")
+  await api.listMessages("c/1", 7, 50)
+  await api.listLinks("c/1")
+
+  expect(calls.map(call => `${call.method} ${new URL(call.url).pathname}${new URL(call.url).search}`)).toEqual([
+    "GET /api/session",
+    "GET /api/conversations?includeArchived=true",
+    "POST /api/conversations",
+    "PATCH /api/conversations/c%2F1",
+    "DELETE /api/conversations/c%2F1",
+    "GET /api/conversations/c%2F1/messages?after=7&limit=50",
+    "GET /api/conversations/c%2F1/links",
+  ])
+  expect(calls[2].headers.get("content-type")).toBe("application/json")
+  expect(calls[3].headers.get("content-type")).toBe("application/json")
+  expect(calls.every((call, index) => index === 2 || index === 3 || call.headers.get("content-type") === null)).toBe(true)
+})
+
+test("non-JSON error responses become safe ApiErrors", async () => {
+  const api = new WorkspaceApi(async () => new Response("<html>proxy failure</html>", { status: 502, headers: { "content-type": "text/html" } }))
+  try {
+    await api.session()
+    throw new Error("expected session to fail")
+  } catch (error) {
+    expect(error).toBeInstanceOf(ApiError)
+    expect(error).toMatchObject({ status: 502, code: "request_failed" })
+    expect(String(error)).not.toContain("proxy failure")
+  }
+})
+
+test("JSON API error codes are preserved", async () => {
+  const api = new WorkspaceApi(async () => Response.json({ error: "missing_identity" }, { status: 400 }))
+  expect(api.session()).rejects.toMatchObject({ status: 400, code: "missing_identity" })
+})

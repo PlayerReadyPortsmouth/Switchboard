@@ -37,7 +37,7 @@ export class ConversationEventStream {
       while (queue.events.length) {
         const next = queue.events.shift()!
         for (const subscription of this.subscriptions.get(next.conversationId) ?? []) {
-          if (next.sequence <= subscription.highWaterMark) continue
+          if (!this.shouldDeliver(subscription, next)) continue
           if (subscription.replaying) subscription.pending.push(next)
           else this.deliver(subscription, next)
         }
@@ -71,7 +71,7 @@ export class ConversationEventStream {
     }
     subscription.replaying = false
     for (const event of subscription.pending.sort((left, right) => left.sequence - right.sequence)) {
-      if (event.sequence > subscription.highWaterMark) this.deliver(subscription, event)
+      if (this.shouldDeliver(subscription, event)) this.deliver(subscription, event)
     }
     subscription.pending.length = 0
 
@@ -82,12 +82,18 @@ export class ConversationEventStream {
   }
 
   private deliver(subscription: Subscription, event: ConversationEvent): void {
-    if (event.sequence <= subscription.highWaterMark) return
-    subscription.highWaterMark = event.sequence
+    if (!this.shouldDeliver(subscription, event)) return
+    if (event.kind === "message_committed") subscription.highWaterMark = event.sequence
     try {
       subscription.callback(event)
     } catch {
       // Subscriber failures must not interrupt persistence callers or other subscribers.
     }
+  }
+
+  private shouldDeliver(subscription: Subscription, event: ConversationEvent): boolean {
+    return event.kind === "message_committed"
+      ? event.sequence > subscription.highWaterMark
+      : event.sequence >= subscription.highWaterMark
   }
 }

@@ -82,3 +82,22 @@ test("a throwing subscriber does not escape publish or starve another subscriber
   expect(() => stream.publish({ kind: "activity", conversationId: "c1", sequence: 1, ts: 10 })).not.toThrow()
   expect(seen).toEqual([1])
 })
+
+test("live activity at the committed message sequence is delivered while replay remains message-only", () => {
+  const history = [message(1)]
+  const stream = new ConversationEventStream((_conversationId, after) => history.filter(item => item.sequence > after))
+  const live: string[] = []
+  stream.subscribe("c1", 1, event => live.push(event.kind === "turn_state" ? event.state! : event.kind))
+
+  stream.publish({ kind: "message_committed", conversationId: "c1", sequence: 2, ts: 20, message: message(2) })
+  stream.publish({ kind: "turn_state", conversationId: "c1", sequence: 2, ts: 21, state: "queued" })
+  stream.publish({ kind: "turn_state", conversationId: "c1", sequence: 2, ts: 22, state: "working" })
+  stream.publish({ kind: "turn_state", conversationId: "c1", sequence: 2, ts: 23, state: "failed" })
+  history.push(message(2))
+
+  const replay: string[] = []
+  stream.subscribe("c1", 1, event => replay.push(event.kind))
+
+  expect(live).toEqual(["message_committed", "queued", "working", "failed"])
+  expect(replay).toEqual(["message_committed"])
+})
