@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Switchboard routing mark">
+  <path fill="#0b0f17" d="M0 0h512v512H0z"/>
+  <path fill="#121722" d="M104 104h304v304H104z"/>
+  <path fill="#64d8cb" fill-rule="evenodd" d="M112 152h132v24H112zm120 12a28 28 0 1 0 56 0 28 28 0 1 0-56 0zm24 0a4 4 0 1 1 8 0 4 4 0 1 1-8 0zM268 244h132v24H268zm-44 12a28 28 0 1 0 56 0 28 28 0 1 0-56 0zm24 0a4 4 0 1 1 8 0 4 4 0 1 1-8 0zM112 336h132v24H112zm120 12a28 28 0 1 0 56 0 28 28 0 1 0-56 0zm24 0a4 4 0 1 1 8 0 4 4 0 1 1-8 0z"/>
+  <path fill="#edf3f8" d="M400 128h-88v80h64v44h-64v24h88v-92h-64v-32h64z"/>
+</svg>

@@ -1,5 +1,6 @@
 import type { ConnectionState } from "../types"
 import { ConnectionBanner } from "./ConnectionBanner"
+import { InstallButton } from "./InstallButton"
 
 const destinations = [
   { id: "conversations", label: "Conversations", available: true },
@@ -8,7 +9,7 @@ const destinations = [
 
 interface AppRailProps {
   connection: ConnectionState
-  install?: { run(): void }
+  install?: { available: boolean; run(): Promise<void> }
   onNew(): void
   onConversations(): void
 }
@@ -35,7 +36,7 @@ export function AppRail({ connection, install, onNew, onConversations }: AppRail
         ))}
       </div>
       <div className="rail-footer">
-        {install ? <button className="install-action" type="button" onClick={() => install.run()} aria-label="Install Switchboard">↓</button> : null}
+        {install ? <InstallButton available={install.available} onInstall={install.run} /> : null}
         <ConnectionBanner state={connection} />
       </div>
     </nav>

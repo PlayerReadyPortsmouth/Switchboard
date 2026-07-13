@@ -11,6 +11,7 @@ import { ActivityDisclosure } from "./components/ActivityItem"
 import { MobileNav, type MobilePane } from "./components/MobileNav"
 import { initialWorkspaceState, workspaceReducer } from "./state"
 import type { ConnectionState, Conversation, ConversationEvent, ConversationInput, ConversationUpdate, Message, PostMessageInput, Session, TransportLink } from "./types"
+import type { PwaController, PwaState } from "./pwa"
 
 export interface AppApi {
   session(): Promise<Session>
@@ -33,6 +34,7 @@ interface AppProps {
   api?: AppApi
   drafts?: DraftStore
   install?: { run(): void }
+  pwa?: Pick<PwaController, "state" | "subscribe" | "install">
   streamFactory?: (api: AppApi) => ConversationStream
 }
 
@@ -217,7 +219,7 @@ export function ConversationView({ api, conversation: suppliedConversation, mess
   </>
 }
 
-export function App({ api: suppliedApi, drafts: suppliedDrafts, install, streamFactory = createWorkspaceStream }: AppProps) {
+export function App({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, streamFactory = createWorkspaceStream }: AppProps) {
   const apiRef = useRef<AppApi | null>(null)
   const draftsRef = useRef<DraftStore | null>(null)
   if (apiRef.current === null) apiRef.current = suppliedApi ?? new WorkspaceApi()
@@ -238,6 +240,9 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, streamF
   const drawerInvokerRef = useRef<HTMLElement | null>(null)
   const dialogInvokerRef = useRef<HTMLElement | null>(null)
   const [focusRequest, setFocusRequest] = useState<FocusRequest | null>(null)
+  const [pwaState, setPwaState] = useState<PwaState>(() => pwa?.state() ?? { installAvailable: false, online: true })
+
+  useEffect(() => pwa?.subscribe(setPwaState), [pwa])
 
   useLayoutEffect(() => {
     if (!focusRequest) return
@@ -302,7 +307,10 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, streamF
     return () => { active = false }
   }, [api, selected?.id])
   const latestTurnState = [...state.activity].reverse().find(event => event.kind === "turn_state")?.state
-  const workspaceAnnouncement = `${connectionLabels[state.connection]}.${latestTurnState ? ` Turn ${latestTurnState}.` : ""}`
+  const displayedConnection = pwa && !pwaState.online ? "offline" : state.connection
+  const workspaceAnnouncement = pwa && !pwaState.online
+    ? `Offline — drafts stay on this device. Messages are not submitted.${latestTurnState ? ` Turn ${latestTurnState}.` : ""}`
+    : `${connectionLabels[state.connection]}.${latestTurnState ? ` Turn ${latestTurnState}.` : ""}`
 
   const openDialog = (next: "new" | "archive") => {
     dialogInvokerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
@@ -391,7 +399,12 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, streamF
   return (
     <main className="workspace-shell" data-mobile-pane={mobilePane}>
       <span className="sr-only" aria-live="polite" aria-atomic="true" data-workspace-announcer data-turn-announcer>{workspaceAnnouncement}</span>
-      <AppRail connection={state.connection} install={install} onNew={() => openDialog("new")} onConversations={() => navigate(null)} />
+      <AppRail
+        connection={displayedConnection}
+        install={pwa ? { available: pwaState.installAvailable, run: () => pwa.install() } : install ? { available: true, run: async () => install.run() } : undefined}
+        onNew={() => openDialog("new")}
+        onConversations={() => navigate(null)}
+      />
       <ConversationList
         conversations={state.conversations}
         selectedId={state.selectedConversationId}

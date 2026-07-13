@@ -1,8 +1,0 @@
-{
-  "name": "Switchboard",
-  "short_name": "Switchboard",
-  "start_url": "/",
-  "display": "standalone",
-  "background_color": "#121722",
-  "theme_color": "#121722"
-}
