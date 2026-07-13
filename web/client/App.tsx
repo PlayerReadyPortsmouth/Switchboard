@@ -1,13 +1,16 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type FormEvent } from "react"
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type FormEvent, type Ref } from "react"
 import { ApiError, WorkspaceApi } from "./api"
 import { ConversationStream } from "./conversationStream"
 import { DraftStore } from "./drafts"
 import { AppRail } from "./components/AppRail"
 import { ConversationList } from "./components/ConversationList"
 import { Inspector } from "./components/Inspector"
+import { Transcript, canonicalMessages } from "./components/Transcript"
+import { Composer } from "./components/Composer"
+import { ActivityDisclosure } from "./components/ActivityItem"
 import { MobileNav, type MobilePane } from "./components/MobileNav"
 import { initialWorkspaceState, workspaceReducer } from "./state"
-import type { ConnectionState, Conversation, ConversationInput, Session } from "./types"
+import type { ConnectionState, Conversation, ConversationEvent, ConversationInput, ConversationUpdate, Message, PostMessageInput, Session, TransportLink } from "./types"
 
 export interface AppApi {
   session(): Promise<Session>
@@ -15,6 +18,15 @@ export interface AppApi {
   createConversation(input: ConversationInput): Promise<Conversation>
   archiveConversation(conversationId: string): Promise<Conversation>
   listMessages?(conversationId: string, after?: number, limit?: number): ReturnType<WorkspaceApi["listMessages"]>
+  postMessage?(conversationId: string, input: PostMessageInput): Promise<Message>
+  updateConversation?(conversationId: string, input: ConversationUpdate): Promise<Conversation>
+  listLinks?(conversationId: string): Promise<TransportLink[]>
+}
+
+export interface ConversationViewApi {
+  postMessage?(conversationId: string, input: PostMessageInput): Promise<Message>
+  updateConversation?(conversationId: string, input: ConversationUpdate): Promise<Conversation>
+  listLinks?(conversationId: string): Promise<TransportLink[]>
 }
 
 interface AppProps {
@@ -60,6 +72,147 @@ export function createWorkspaceStream(api: AppApi): ConversationStream {
   })
 }
 
+export function ConversationView({ api, conversation: suppliedConversation, messages, activity = [], drafts: suppliedDrafts, session: suppliedSession, links: suppliedLinks, inspectorOpen = true, composerRef, inspectorCloseRef, onOpenInspector, onCloseInspector = () => {}, onInspectorEscape, onArchive, onCanonicalMessage, onConversationUpdated }: {
+  api: ConversationViewApi
+  conversation: Conversation
+  messages?: Message[]
+  activity?: ConversationEvent[]
+  drafts?: DraftStore
+  session?: Session
+  links?: TransportLink[]
+  inspectorOpen?: boolean
+  composerRef?: Ref<HTMLTextAreaElement>
+  inspectorCloseRef?: Ref<HTMLButtonElement>
+  onOpenInspector?(trigger: HTMLElement): void
+  onCloseInspector?(): void
+  onInspectorEscape?(): void
+  onArchive?(): void
+  onCanonicalMessage?(message: Message): void
+  onConversationUpdated?(conversation: Conversation): void
+}) {
+  const draftsRef = useRef<DraftStore | null>(null)
+  if (draftsRef.current === null) draftsRef.current = suppliedDrafts ?? new DraftStore()
+  const drafts = suppliedDrafts ?? draftsRef.current
+  const [conversation, setConversation] = useState(suppliedConversation)
+  const [localMessages, setLocalMessages] = useState<Message[]>([])
+  const [loadedLinks, setLoadedLinks] = useState<TransportLink[]>([])
+  const [text, setText] = useState(() => drafts.read(suppliedConversation.id)?.text ?? "")
+  const [replyTo, setReplyTo] = useState<Message | null>(null)
+  const [sending, setSending] = useState(false)
+  const [sendError, setSendError] = useState("")
+  const failedAttemptRef = useRef<PostMessageInput | null>(null)
+  const sendingRef = useRef(false)
+  const conversationIdRef = useRef(suppliedConversation.id)
+  const requestGenerationRef = useRef(0)
+  const agentRequestRef = useRef(0)
+  const renderedMessages = canonicalMessages(messages ?? localMessages)
+  const session = suppliedSession ?? { identity: suppliedConversation.createdBy, agents: [{ name: conversation.primaryAgent, alive: true, busy: false }] }
+  const links = suppliedLinks ?? loadedLinks
+
+  useLayoutEffect(() => {
+    conversationIdRef.current = suppliedConversation.id
+    requestGenerationRef.current++
+    agentRequestRef.current++
+    setConversation(suppliedConversation)
+    setLocalMessages([])
+    setText(drafts.read(suppliedConversation.id)?.text ?? "")
+    setReplyTo(null)
+    setSending(false)
+    sendingRef.current = false
+    setSendError("")
+    failedAttemptRef.current = null
+    return () => {
+      conversationIdRef.current = ""
+      requestGenerationRef.current++
+      agentRequestRef.current++
+      sendingRef.current = false
+    }
+  }, [drafts, suppliedConversation.id])
+
+  useEffect(() => { setConversation(suppliedConversation) }, [suppliedConversation])
+
+  useEffect(() => {
+    if (suppliedLinks || !api.listLinks) return
+    let active = true
+    setLoadedLinks([])
+    void api.listLinks(suppliedConversation.id).then(next => { if (active) setLoadedLinks(next) }).catch(() => { if (active) setLoadedLinks([]) })
+    return () => { active = false }
+  }, [api, suppliedConversation.id, suppliedLinks])
+
+  const changeText = (next: string) => {
+    setText(next)
+    drafts.write(conversation.id, next)
+    if (sendError) setSendError("")
+    failedAttemptRef.current = null
+  }
+
+  const deliver = async (input: PostMessageInput) => {
+    if (sendingRef.current) return
+    if (!api.postMessage) { setSendError("Message not sent. Sending is unavailable."); return }
+    sendingRef.current = true
+    setSending(true)
+    setSendError("")
+    const requestConversationId = conversation.id
+    const generation = requestGenerationRef.current
+    try {
+      const canonical = await api.postMessage(requestConversationId, input)
+      const cleared = drafts.markSent(requestConversationId, input.clientKey)
+      if (conversationIdRef.current !== requestConversationId || generation !== requestGenerationRef.current) return
+      if (messages === undefined) setLocalMessages(current => canonicalMessages([...current, canonical]))
+      onCanonicalMessage?.(canonical)
+      if (cleared) setText("")
+      setReplyTo(null)
+      failedAttemptRef.current = null
+    } catch {
+      if (conversationIdRef.current !== requestConversationId || generation !== requestGenerationRef.current) return
+      failedAttemptRef.current = input
+      setSendError("Message not sent. Check the connection, then retry.")
+    } finally {
+      if (conversationIdRef.current === requestConversationId && generation === requestGenerationRef.current) {
+        setSending(false)
+        sendingRef.current = false
+      }
+    }
+  }
+
+  const submit = () => {
+    const content = text.trim()
+    if (!content) return
+    const draft = drafts.write(conversation.id, text)
+    if (!draft) return
+    void deliver({ content: text, clientKey: draft.clientKey, ...(replyTo ? { replyTo: replyTo.id } : {}) })
+  }
+  const retry = () => { if (failedAttemptRef.current) void deliver(failedAttemptRef.current) }
+  const updatePrimaryAgent = async (primaryAgent: string) => {
+    if (!api.updateConversation || primaryAgent === conversation.primaryAgent) return
+    const requestConversationId = conversation.id
+    const request = ++agentRequestRef.current
+    try {
+      const canonical = await api.updateConversation(requestConversationId, { primaryAgent })
+      if (conversationIdRef.current !== requestConversationId || request !== agentRequestRef.current) return
+      setConversation(canonical)
+      onConversationUpdated?.(canonical)
+    } catch {
+      // Keep the canonical selection unchanged when PATCH fails.
+    }
+  }
+
+  return <>
+    <section className="transcript-pane" aria-label="Transcript" data-region="transcript" data-message-count={renderedMessages.length}>
+      <header className="pane-header transcript-header">
+        <div><p className="eyebrow">{conversation.primaryAgent}</p><h2>{conversation.title}</h2></div>
+        <div className="header-actions">
+          {onOpenInspector ? <button type="button" className="inspector-toggle" onClick={event => onOpenInspector(event.currentTarget)}>Conversation details</button> : null}
+          {onArchive ? <button type="button" className="danger-action" onClick={onArchive}>Archive conversation</button> : null}
+        </div>
+      </header>
+      <div className="transcript-body"><Transcript messages={renderedMessages} onReply={setReplyTo} /><ActivityDisclosure events={activity} /></div>
+      <Composer value={text} replyTo={replyTo} sending={sending} error={sendError} textareaRef={composerRef} onChange={changeText} onSubmit={submit} onRetry={retry} onDismissReply={() => setReplyTo(null)} />
+    </section>
+    <Inspector conversation={conversation} session={session} links={links} open={inspectorOpen} closeRef={inspectorCloseRef} onClose={onCloseInspector} onEscape={onInspectorEscape} onPrimaryAgentChange={api.updateConversation ? primaryAgent => { void updatePrimaryAgent(primaryAgent) } : undefined} />
+  </>
+}
+
 export function App({ api: suppliedApi, drafts: suppliedDrafts, install, streamFactory = createWorkspaceStream }: AppProps) {
   const apiRef = useRef<AppApi | null>(null)
   const draftsRef = useRef<DraftStore | null>(null)
@@ -72,6 +225,7 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, streamF
   const [dialog, setDialog] = useState<"new" | "archive" | null>(null)
   const [mobilePane, setMobilePane] = useState<MobilePane>(conversationIdFromLocation() ? "transcript" : "conversations")
   const [inspectorOpen, setInspectorOpen] = useState(false)
+  const [links, setLinks] = useState<TransportLink[]>([])
   const [actionError, setActionError] = useState("")
   const layout = useWorkspaceLayout()
   const conversationSearchRef = useRef<HTMLInputElement>(null)
@@ -136,6 +290,13 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, streamF
   }, [api, state.selectedConversationId, streamFactory])
 
   const selected = useMemo(() => state.conversations.find(item => item.id === state.selectedConversationId) ?? null, [state.conversations, state.selectedConversationId])
+  useEffect(() => {
+    if (!selected || !api.listLinks) { setLinks([]); return }
+    let active = true
+    setLinks([])
+    void api.listLinks(selected.id).then(next => { if (active) setLinks(next) }).catch(() => { if (active) setLinks([]) })
+    return () => { active = false }
+  }, [api, selected?.id])
   const latestTurnState = [...state.activity].reverse().find(event => event.kind === "turn_state")?.state
   const workspaceAnnouncement = `${connectionLabels[state.connection]}.${latestTurnState ? ` Turn ${latestTurnState}.` : ""}`
 
@@ -238,24 +399,27 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, streamF
         onSelect={item => selectConversation(item)}
         onClose={closeConversationDrawer}
       />
-      <section className="transcript-pane" aria-label="Transcript" data-region="transcript" data-message-count={state.messages.length}>
-        {selected ? (
-          <>
-            <header className="pane-header transcript-header">
-              <div><p className="eyebrow">{selected.primaryAgent}</p><h2>{selected.title}</h2></div>
-              <div className="header-actions">
-                <button type="button" className="inspector-toggle" onClick={event => openInspector(event.currentTarget)}>Conversation details</button>
-                <button type="button" className="danger-action" onClick={() => openDialog("archive")}>Archive conversation</button>
-              </div>
-            </header>
-            <div className="transcript-body"><p>Conversation messages will appear here.</p></div>
-            <label className="composer-shell"><span className="sr-only">Message</span><textarea ref={composerRef} key={selected.id} aria-label="Message" defaultValue={drafts.read(selected.id)?.text ?? ""} onInput={event => drafts.write(selected.id, event.currentTarget.value)} placeholder="Message the conversation" /></label>
-          </>
-        ) : (
-          <div className="transcript-empty"><span className="signal-map" aria-hidden="true"><i /></span><h2>Select a conversation</h2><p>Choose a conversation from the list to open its workspace.</p></div>
-        )}
-      </section>
-      <Inspector conversation={selected} session={state.session} open={inspectorOpen || mobilePane === "inspector"} closeRef={inspectorCloseRef} onClose={closeInspector} onEscape={layout !== "desktop" ? closeInspector : undefined} />
+      {selected ? <ConversationView
+        api={api}
+        conversation={selected}
+        messages={state.messages}
+        activity={state.activity}
+        drafts={drafts}
+        session={state.session}
+        links={links}
+        inspectorOpen={inspectorOpen || mobilePane === "inspector"}
+        composerRef={composerRef}
+        inspectorCloseRef={inspectorCloseRef}
+        onOpenInspector={openInspector}
+        onCloseInspector={closeInspector}
+        onInspectorEscape={layout !== "desktop" ? closeInspector : undefined}
+        onArchive={() => openDialog("archive")}
+        onCanonicalMessage={message => dispatch({ type: "messages/received", messages: [message] })}
+        onConversationUpdated={updated => dispatch({ type: "conversations/loaded", conversations: state.conversations.map(item => item.id === updated.id ? updated : item) })}
+      /> : <>
+        <section className="transcript-pane" aria-label="Transcript" data-region="transcript" data-message-count="0"><div className="transcript-empty"><span className="signal-map" aria-hidden="true"><i /></span><h2>Select a conversation</h2><p>Choose a conversation from the list to open its workspace.</p></div></section>
+        <Inspector conversation={null} session={state.session} open={false} onClose={closeInspector} />
+      </>}
       <MobileNav pane={mobilePane} hasConversation={Boolean(selected)} onChange={changeMobilePane} />
       {dialog === "new" ? <NewConversationDialog session={state.session} error={actionError} onCancel={closeDialog} onCreate={createConversation} /> : null}
       {dialog === "archive" && selected ? <ConfirmArchiveDialog title={selected.title} error={actionError} onCancel={closeDialog} onArchive={archiveConversation} /> : null}

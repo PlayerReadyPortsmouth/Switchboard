@@ -2,55 +2,69 @@
 
 ## Status
 
-Implemented optional Discord startup and canonical web agent turns.
-
-## Changes
-
-- Added `discord?: { enabled?: boolean }`; config loading materializes the backward-compatible `true` default.
-- Added `resolveDiscordStartup`, which returns before accessing the environment when disabled and requires the configured/default token only when enabled.
-- Composed `DiscordAdapter`/`SurfaceRouter` only when enabled. Disabled startup uses an empty router, an empty role resolver, and shutdown never calls the Discord gateway.
-- Allowed the gateway's legacy handler and canonical surface handler to coexist. Linked Discord locations go only through the canonical coordinator; unlinked locations retain legacy commands/cards/interactions.
-- Routed canonical HTTP message POSTs through `TurnCoordinator.submitWebTurn` while retaining 201/200 `{ message, inserted }` semantics.
-- Routed canonical agent text replies through `acceptAgentReply`, so they persist and stream without requiring a surface link and do not fall through to `gateway.sendReply`.
-- Documented the flag, default, web-only behavior, and Phase 2 Discord-specific card/interaction limitation.
+Implemented the canonical conversation transcript, text composer, live activity disclosure, and structured conversation inspector while preserving the Task 4 routing, stream, reducer, draft, and drawer/focus model.
 
 ## TDD evidence
 
-Initial focused run failed as expected:
+- Initial RED: `bun test web/client/ConversationView.test.tsx` failed because `ConversationView` was not exported from `App.tsx`.
+- Composer/send GREEN: focused tests proved failed-text retention, exact idempotency-key retry, matching-draft-only clearing, canonical-response insertion, no optimistic transcript row, Enter/Shift+Enter/IME behavior, blank disablement, and the six-line cap.
+- Transcript/activity GREEN: focused tests proved accessible origin labels, five-minute/non-reply grouping boundaries, resolved/dismissible reply preview, collapsed activity, streaming-state dedupe, and canonical ID dedupe/sequence ordering.
+- Inspector GREEN: focused tests proved canonical primary-agent header refresh, safe link metadata, focus trapping, and desktop column collapse.
+- Race RED/GREEN: an out-of-order PATCH test first ended on `reviewer` instead of the later `operator`; request generations now discard stale PATCH results. Late sends are also prevented from reducing into a newly selected conversation.
+- Focus-trap RED/GREEN: with the cycling branch removed, Tab left focus on the last control; restoring it cycles last-to-first and Shift+Tab first-to-last.
+- Desktop-collapse RED/GREEN: the CSS contract initially found no state-driven grid collapse; desktop now removes the inspector column and hides the closed region.
 
-- `loads and validates both files`: expected `hub.discord.enabled` true, received undefined.
-- `message POST awaits asynchronous turn submission`: expected 201, received 200 because the Promise was not awaited.
-- The later environment-access tests first failed with `Export named 'resolveDiscordStartup' not found`.
+## Implementation
 
-Final fresh verification:
+- Exported `ConversationView` from `App.tsx` as the selected-pane orchestrator. `App` remains owner of the selected conversation, single `ConversationStream`, canonical reducer state, routing, and cross-pane focus.
+- Added focused `Transcript`, `MessageItem`, `Composer`, and `ActivityItem` components.
+- Rendered canonical messages only, deduplicated by ID and ordered by sequence, with accessible role/origin labels, reply context, and restrained grouping.
+- Added durable draft/idempotency handling, local sending/error state, exact-key retry, canonical-response reduction, and conversation/request generation guards.
+- Added primary-agent PATCH with latest-response wins semantics, safe linked-surface summaries, sync/enabled/timestamp metadata, responsive inspector focus trapping/return, and desktop collapse.
+- Kept external location IDs, internal message IDs, attachment/markdown controls, and Phase 4 operations out of the UI.
 
-- `git diff --check` — exit 0 (only Git CRLF conversion warnings).
-- `bun test tests/discordOptional.test.ts tests/conversationWeb.test.ts tests/config.test.ts` — 25 pass, 0 fail, 70 assertions.
+## Verification
+
+- `bun test web/client/ConversationView.test.tsx web/client/App.test.tsx` — 45 pass, 0 fail, 141 assertions.
 - `bun run typecheck` — exit 0 (`tsc --noEmit`).
-- `bun test` — 781 pass, 0 fail, 1900 assertions across 107 files.
+- `bun run build:web` — exit 0.
+- Single full-suite run: `bun test` — 900 pass, 0 fail, 2294 assertions across 120 files. The final desktop-only CSS adjustment was subsequently covered by the focused 45-test run, typecheck, and build above.
+- `git diff --check` — exit 0; only existing LF-to-CRLF conversion warnings were emitted.
+
+## Files
+
+- Created `web/client/ConversationView.test.tsx`.
+- Created `web/client/components/Transcript.tsx`.
+- Created `web/client/components/MessageItem.tsx`.
+- Created `web/client/components/Composer.tsx`.
+- Created `web/client/components/ActivityItem.tsx`.
+- Modified `web/client/components/Inspector.tsx`.
+- Modified `web/client/App.tsx`.
+- Modified `web/client/styles.css`.
+- Overwrote `.superpowers/sdd/task-5-report.md`.
+
+## Design critique
+
+- Direction: a quiet technical record rather than chat bubbles. Fine horizontal rules establish chronology; one-pixel origin traces distinguish sources without turning messages into colored cards.
+- Signature: the existing signal-trace motif is concentrated in the live-activity disclosure, where it communicates actual turn progression.
+- Typography: body copy remains the existing system sans stack; monospace is limited to origin/state/time and inspector labels.
+- Composer: one grounded field/action assembly, with status and retry below it; no decorative container, gradients, glass, pills, or dead controls.
+- Inspector: metadata reads as a ledger (`dl`, timestamps, linked-surface rows), not a stack of decorative cards.
+- Responsive/accessibility: semantic articles, labelled controls, visible focus, reduced-motion inheritance, six-line composer cap, drawer focus trap, Escape/close focus return, and desktop state-driven collapse are preserved.
+- Visual browser QA could not be performed because the in-app browser backend was unavailable; the design critique used source/CSS inspection plus responsive and semantic tests.
 
 ## Self-review
 
-- Backward compatibility: omission enables Discord and defaults the token variable to `DISCORD_BOT_TOKEN`; legacy non-linked Discord traffic remains on the existing orchestration path.
-- Web-only safety: disabled resolution performs zero environment property reads; no adapter is constructed or started; role resolution returns `[]`; empty-router shutdown never invokes `gateway.stop()`/`gateway.client`.
-- Canonical routing: coordinator initialization precedes surface startup; linked Discord inbound is not double-dispatched; canonical agent replies return before legacy Discord delivery.
-- HTTP compatibility: asynchronous coordinator results preserve the existing inserted-dependent 201/200 response behavior.
-- Scope note: `hub/gateway.ts` and `hub/webServer.ts` were additionally required to multiplex legacy/canonical inbound listeners and await the coordinator Promise respectively.
+- Async send races: a request captures conversation ID and generation; a late success clears only its matching durable draft and cannot update a newer conversation or interrupt its send state.
+- Conversation switching: reply, error, local fallback transcript, and composer state reset to the selected conversation's durable draft; `App` retains the only stream/reducer ownership.
+- Retry semantics: unchanged failed content reuses the same persisted key; editing invalidates the failed attempt and creates the draft lifecycle's new key.
+- PATCH races: only the newest agent update response can refresh header/inspector state.
+- Accessibility: four origins have distinct article labels; activity is collapsed; repeated streaming chunks do not add repeated state announcements; tablet/mobile inspector focus is trapped and returned to the trigger.
+- Metadata safety: link ID, external location ID, message ID, and client idempotency key are never rendered.
+- Visual restraint: no new font dependency, gradient, glass, excessive pill, attachment UI, markdown composer, or Phase 4 operation was introduced.
+- Responsibilities: leaf components render one concern; `ConversationView` coordinates reply/send/metadata UI; `App` retains canonical workspace ownership.
 
 ## Concerns
 
-No known functional concerns. Cards, updates, modals, and interaction handling intentionally remain on the Discord compatibility path in Phase 2, as documented.
-
-## Review fixes
-
-- Root cause: token resolution was conditional, but `new Gateway(...)` and Discord callback registration were still unconditional. `createDiscordRuntime` now gates the factory itself; disabled mode therefore constructs neither `Gateway` nor its discord.js `Client`. All Discord startup callback registrations are guarded by the resulting optional runtime. The core retains only an inert fail-closed façade for legacy call-site compatibility.
-- Added a factory instrumentation regression test proving disabled mode performs zero factory construction and registration calls, alongside the existing zero token-environment-read assertion.
-- Root cause: legacy inbound suppression tested only whether any transport link existed, while `TurnCoordinator` separately rejected disabled/outbound-only/notifications-only links. Both now share `inboundLinkRoute`/`acceptsInboundLink`: only enabled `two_way` and `inbound_only` links are canonical; absent, disabled, `outbound_only`, and `notifications_only` links fall back to legacy handling.
-- Added explicit routing-matrix coverage and an inbound gateway multiplexer ordering test.
-
-Review-fix TDD evidence:
-
-- RED: optional composition test failed because `createDiscordRuntime` did not exist; gateway multiplexer test failed because `InboundMultiplexer` did not exist; routing-matrix test failed because `inboundLinkRoute` did not exist.
-- `bun test tests/discordOptional.test.ts tests/config.test.ts tests/conversationWeb.test.ts tests/turnCoordinator.test.ts hub/gateway.test.ts tests/discordAdapter.test.ts` — 65 pass, 0 fail, 173 assertions.
-- `bun run typecheck` — exit 0 (`tsc --noEmit`). An intermediate run exposed and then corrected null narrowing after the shared route helper was introduced.
-- `bun test` — 785 pass, 0 fail, 1910 assertions across 107 files.
+- No known functional concerns.
+- Visual QA is limited to source/test inspection because the in-app browser was unavailable in this session.
