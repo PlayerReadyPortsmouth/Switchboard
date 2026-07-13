@@ -1,4 +1,5 @@
 import type { ConversationRepository } from "../conversations/repository"
+import { RepositoryConflictError } from "../conversations/repository"
 import { randomUUID } from "node:crypto"
 import type { SurfaceDeliveryResult } from "./types"
 
@@ -89,10 +90,15 @@ export class DeliveryWorker {
         const delay = Math.min(60_000, 1_000 * 2 ** (attempt - 1)) + Math.max(0, Math.min(250, Math.trunc(this.jitter())))
         this.repo.markDeliveryRetry(delivery.id, error, exhausted ? null : this.now() + delay, exhausted, this.now(), owner)
       } catch (error) {
+        if (error instanceof RepositoryConflictError) continue
         const attempt = delivery.attempts + 1
         const exhausted = attempt >= this.maxAttempts
         const delay = Math.min(60_000, 1_000 * 2 ** (attempt - 1)) + Math.max(0, Math.min(250, Math.trunc(this.jitter())))
-        this.repo.markDeliveryRetry(delivery.id, error instanceof Error ? error.message : String(error), exhausted ? null : this.now() + delay, exhausted, this.now(), owner)
+        try {
+          this.repo.markDeliveryRetry(delivery.id, error instanceof Error ? error.message : String(error), exhausted ? null : this.now() + delay, exhausted, this.now(), owner)
+        } catch (transitionError) {
+          if (!(transitionError instanceof RepositoryConflictError)) throw transitionError
+        }
       }
     }
   }

@@ -5,7 +5,7 @@ import type { ConversationEvent } from "../hub/conversations/events"
 import type { InboundMessage } from "../hub/types"
 import { DiscordAdapter, SurfaceRouter, type DiscordGatewayPort, type NormalizedSurfaceEvent, type SurfaceDeliveryResult } from "../hub/surfaces"
 
-function fixture(options: { dispatch?: boolean; dispatchError?: Error } = {}) {
+function fixture(options: { dispatch?: boolean; dispatchError?: Error; reportError?: (error: unknown) => void } = {}) {
   const repo = new SqliteConversationRepository(new Database(":memory:"))
   let now = 100
   let id = 0
@@ -33,7 +33,7 @@ function fixture(options: { dispatch?: boolean; dispatchError?: Error } = {}) {
       return []
     },
   }
-  const coordinator = new TurnCoordinator(service, repo, dispatcher, stream, router, () => ++now, () => `turn-${++id}`)
+  const coordinator = new TurnCoordinator(service, repo, dispatcher, stream, router, () => ++now, () => `turn-${++id}`, options.reportError)
   return { repo, service, conversation, coordinator, dispatched, delivered, events, order }
 }
 
@@ -89,12 +89,38 @@ describe("TurnCoordinator", () => {
     expect(f.repo.listDueDeliveries(99)).toHaveLength(0)
   })
 
+  test("dispatches once before slow fan-out and reports ownership loss after lease reclaim", async () => {
+    const repo = new SqliteConversationRepository(new Database(":memory:"))
+    let now = 1; let id = 0; let release!: () => void
+    const stream = new ConversationEventStream(() => [])
+    const service = new ConversationService(repo, () => ++now, () => `id-${++id}`, stream)
+    const conversation = service.create("owner", { title: "Race", primaryAgent: "architect" })
+    repo.createTransportLink({ id: "origin", conversationId: conversation.id, adapter: "discord", externalLocationId: "room", label: null, syncMode: "two_way", enabled: true }, 1)
+    repo.createTransportLink({ id: "mirror", conversationId: conversation.id, adapter: "webhook", externalLocationId: "mirror", label: null, syncMode: "outbound_only", enabled: true }, 1)
+    const dispatched: InboundMessage[] = []; const errors: unknown[] = []
+    const coordinator = new TurnCoordinator(service, repo, { dispatch: (_a, _c, inbound) => (dispatched.push(inbound), true) }, stream, {
+      deliver: async () => { await new Promise<void>(resolve => { release = resolve }); return [{ deliveryId: "d", adapter: "webhook", ok: true, externalMessageId: "sent" }] },
+    }, () => ++now, () => `turn-${++id}`, error => errors.push(error))
+    const event: NormalizedSurfaceEvent = { adapter: "discord", eventId: "race", externalLocationId: "room", externalMessageId: "race", authorId: "u", authorName: "U", content: "go", createdAt: 2 }
+    expect((await coordinator.acceptSurfaceEvent(event))?.inserted).toBe(true)
+    expect(dispatched).toHaveLength(1)
+    const reclaimed = repo.claimDueDeliveries("worker", 100_000, 130_000)
+    expect(reclaimed).toHaveLength(1)
+    release()
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(errors).toHaveLength(1)
+    expect((await coordinator.acceptSurfaceEvent(event))?.inserted).toBe(false)
+    expect(dispatched).toHaveLength(1)
+  })
+
   test("rejects malformed normalized events without persistence or dispatch", async () => {
-    const f = fixture()
+    const reported: unknown[] = []
+    const f = fixture({ reportError: error => reported.push(error) })
     f.repo.createTransportLink({ id: "link", conversationId: f.conversation.id, adapter: "discord", externalLocationId: "room", label: null, syncMode: "two_way", enabled: true }, 1)
     await expect(f.coordinator.acceptSurfaceEvent({ adapter: "discord", eventId: " ", externalLocationId: "room", externalMessageId: "m", authorId: "u", authorName: "U", content: "x", createdAt: Number.NaN })).rejects.toThrow("Malformed normalized surface event")
     expect(f.repo.listMessages(f.conversation.id)).toHaveLength(0)
     expect(f.dispatched).toHaveLength(0)
+    expect((reported[0] as Error).message).toBe("Malformed normalized surface event")
   })
 
   test("rejects disabled and non-inbound surface links", async () => {

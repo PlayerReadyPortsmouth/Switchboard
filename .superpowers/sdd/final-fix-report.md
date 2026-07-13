@@ -21,3 +21,13 @@ Addressed all five final-review areas.
 ## Notes
 
 The lease duration is 30 seconds. A process that remains alive but spends longer than that inside an adapter send could allow a recovery worker to retry; deterministic Discord nonces still provide adapter-side deduplication, and the lease duration is documented for future tuning/renewal if slow adapters are added.
+
+## R2 follow-up
+
+- Canonical web/inbound dispatch no longer awaits opportunistic surface I/O. Delivery rows are persisted first, agent dispatch happens once, and background ownership loss is reported without failing the committed turn.
+- Workers treat only `RepositoryConflictError` terminal/ownership races as another executor winning; unrelated persistence failures still escape and are reported.
+- Added a canonical-to-Discord compatibility resolver for cards, attachments, edits, reactions, and other legacy rich reply routing.
+- Malformed normalized envelopes now enter the hub audit/error reporter before rejection.
+- Shutdown remains intentionally unbounded while an adapter send is active because the adapter contract has no abort signal; this is documented rather than closing SQLite while active work can still write.
+
+R2 verification: focused coordinator/worker/rich-compatibility tests passed; `tsc --noEmit` passed; integrated composition/mirror tests passed 7/7; full suite passed 817/817 with 2,007 assertions across 112 files; `git diff --check` passed.

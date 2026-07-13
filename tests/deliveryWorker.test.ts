@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test"
 import { DeliveryWorker } from "../hub/surfaces/deliveryWorker"
 import { SurfaceRouter } from "../hub/surfaces"
+import { RepositoryConflictError } from "../hub/conversations/repository"
 import type { Delivery, Message, TransportLink } from "../hub/conversations/types"
 
 function fixture(results: Array<{ ok: boolean; externalMessageId?: string; error?: string; retryable?: boolean }>) {
@@ -77,6 +78,21 @@ test("unknown or failed delivery does not block the next due row", async () => {
   ;(f.worker as any).repo.listTransportLinks = () => [f.link, link2]
   await f.worker.tick()
   expect(f.writes.map(row => row[0])).toEqual(["retry", "delivered"])
+})
+
+test("stale owner completion is ignored and the claimed batch continues", async () => {
+  const f = fixture([{ ok: true }, { ok: true }])
+  f.due.push({ ...f.delivery, id: "m:l2", linkId: "l2" })
+  ;(f.worker as any).repo.listTransportLinks = () => [f.link, { ...f.link, id: "l2" }]
+  let completions = 0
+  ;(f.worker as any).repo.markDeliveryDelivered = (...args: unknown[]) => {
+    if (completions++ === 0) throw new RepositoryConflictError("lease ownership lost")
+    f.writes.push(["delivered", ...args]); return f.delivery
+  }
+  await f.worker.tick()
+  expect(f.sends()).toBe(2)
+  expect(f.writes).toHaveLength(1)
+  expect(f.writes[0]?.[1]).toBe("m:l2")
 })
 
 test("real router marks an unknown adapter non-retryable and worker exhausts it once", async () => {

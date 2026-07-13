@@ -32,24 +32,28 @@ export class TurnCoordinator {
     private readonly router: TurnSurfaceRouter,
     private readonly now: () => number,
     private readonly id: () => string,
+    private readonly reportError: (error: unknown) => void = error => process.stderr.write(`turn coordinator delivery failed: ${error}\n`),
   ) {}
 
   async submitWebTurn(identity: string, conversationId: string, input: WebTurnInput): Promise<AppendMessageResult> {
     const result = this.service.appendUserMessage(identity, conversationId, input)
     if (result.inserted) {
       const links = this.repo.listTransportLinks(conversationId).filter(link => link.enabled && link.syncMode !== "inbound_only" && link.syncMode !== "notifications_only")
+      let deliveries: Delivery[] = []
       if (links.length) {
-        const deliveries = this.repo.createDeliveries(result.message.id, links, "message", this.now())
-        await this.deliverClaimed(result.message, deliveries, links)
+        deliveries = this.repo.createDeliveries(result.message.id, links, "message", this.now())
       }
       this.dispatch(conversationId, result.message, `web:${identity}`, identity)
+      if (deliveries.length) this.deliverInBackground(result.message, deliveries, links)
     }
     return result
   }
 
   async acceptSurfaceEvent(event: NormalizedSurfaceEvent): Promise<AppendMessageResult | null> {
     if (![event.adapter,event.eventId,event.externalLocationId,event.externalMessageId,event.authorId,event.authorName,event.content].every(value => typeof value === "string" && value.trim()) || !Number.isFinite(event.createdAt)) {
-      throw new Error("Malformed normalized surface event")
+      const error = new Error("Malformed normalized surface event")
+      this.reportError(error)
+      throw error
     }
     const link = this.repo.resolveTransportLink(event.adapter, event.externalLocationId)
     if (!acceptsInboundLink(link)) return null
@@ -61,8 +65,9 @@ export class TurnCoordinator {
     const result = this.service.appendExternalMessage(event.adapter, event.eventId, input, { linkId: link.id, externalMessageId: event.externalMessageId })
     if (result.inserted) {
       const links = this.repo.listTransportLinks(link.conversationId).filter(item => item.id !== link.id && item.enabled && item.syncMode !== "inbound_only" && item.syncMode !== "notifications_only")
-      if (links.length) await this.deliverClaimed(result.message, this.repo.createDeliveries(result.message.id, links, "message", this.now()), links)
+      const deliveries = links.length ? this.repo.createDeliveries(result.message.id, links, "message", this.now()) : []
       this.dispatch(link.conversationId, result.message, `${event.adapter}:${event.authorId}`, `${event.adapter}:${event.authorName}`)
+      if (deliveries.length) this.deliverInBackground(result.message, deliveries, links)
     }
     return result
   }
@@ -121,6 +126,10 @@ export class TurnCoordinator {
     const claimedIds = new Set(claimed.map(item => item.id))
     const claimedLinks = links.filter((_, index) => claimedIds.has(deliveries[index]!.id))
     this.persistDeliveryResults(claimed, await this.router.deliver(message, claimedLinks, "transcript", replyIds))
+  }
+
+  private deliverInBackground(message: Message, deliveries: Delivery[], links: TransportLink[], replyIds?: ReadonlyMap<string,string>): void {
+    void Promise.resolve().then(() => this.deliverClaimed(message, deliveries, links, replyIds)).catch(this.reportError)
   }
 
   private turnState(message: Message, state: "queued" | "working" | "failed"): void {
