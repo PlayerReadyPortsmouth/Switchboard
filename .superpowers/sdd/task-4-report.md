@@ -68,6 +68,19 @@ Implemented, independently reviewed, revised, and verified.
 - Added a synchronous ref-backed archive lock, disabled pending controls, guarded pending Escape cancellation, re-enabled controls on API failure, and a deferred duplicate-submit regression.
 - Controller follow-up review: **approved**, with no remaining Critical or Important issues.
 
+### RED 5 — successful-action focus handoff
+
+- Real user-event create regression at the mobile breakpoint expected focus on the newly rendered composer but `document.activeElement === composer` was false after the modal and list pane disappeared.
+- Real user-event archive regression at the desktop breakpoint expected focus on conversation search but `document.activeElement === search` was false after the selected transcript and archive trigger disappeared.
+- The regression matrix covers successful create and archive at desktop (1280px), tablet (900px), and mobile (500px), asserting both the logical region and active visible pane.
+
+### GREEN 5 — committed focus destinations
+
+- Replaced frame-scheduled focus callbacks with semantic focus requests consumed by `useLayoutEffect` after the corresponding React render commits.
+- Successful create now focuses the new conversation's visible composer at every layout; successful archive focuses the visible conversation search at every layout.
+- Modal cancellation still restores a connected invoker, responsive drawers still transfer and restore focus, and failed/pending actions keep their existing modal behavior.
+- Independent follow-up review: **approved**, with no Critical, Important, or Minor findings.
+
 ## Implemented behavior
 
 - `App` owns session/conversation loading, stable API/draft dependencies, workspace reducer state, URL selection, history/popstate, modal dialog actions, responsive pane state, and conversation-stream lifecycle.
@@ -86,13 +99,13 @@ Implemented, independently reviewed, revised, and verified.
 Fresh sequential gate, with one Bun command running at a time:
 
 - `bun test web/client/App.test.tsx --timeout 5000`
-  - Exit 0; 25 pass, 0 fail, 72 assertions.
+  - Exit 0; 31 pass, 0 fail, 99 assertions.
 - `bun run build:web`
   - Exit 0.
 - `bun run typecheck`
   - Exit 0; `tsc --noEmit` clean.
 - `bun test`
-  - Exit 0; 881 pass, 0 fail, 2,227 assertions across 119 files in the final controller-follow-up run.
+  - Exit 0; 887 pass, 0 fail, 2,254 assertions across 119 files in the final successful-action-focus run.
 - `git diff --check`
   - Exit 0; only Git's existing LF/CRLF working-copy notices were emitted.
 
@@ -126,6 +139,7 @@ Fresh sequential gate, with one Bun command running at a time:
 - Stream cleanup runs on selection changes/unmount, and API failures cannot silently imply successful creation or archive.
 - Inactive tablet/mobile drawers are visibility-hidden and pointer-disabled until active, preventing off-screen focus and assistive-technology traversal.
 - Drawer focus moves to a meaningful target on open and restores the still-connected invoking control on close/Escape; mobile pane switching is explicitly routed rather than left on hidden content.
+- Successful create/archive transitions use semantic, state-driven post-commit focus requests, so focus lands on the newly visible composer or conversation search instead of a removed or hidden modal invoker.
 - Composer nodes remount per conversation, preventing one conversation's displayed draft from being written into another conversation.
 - Archive submission is guarded synchronously for the complete pending interval, and API failure restores an enabled retry action.
 - Empty, forbidden, unavailable, retry, no-match, and action-error paths all give explicit next steps.
@@ -142,4 +156,5 @@ Fresh sequential gate, with one Bun command running at a time:
 - All in-scope findings were fixed with focused regressions.
 - The reviewer accepted CSS visibility/pointer gating as resolving the actual responsive focus issue and accepted that transcript rendering remains Task 5 scope.
 - Initial and controller follow-up re-reviews: **approved**, with no remaining Critical or Important issues.
-- This report is finalized before the controller-fix commit and is not edited afterward.
+- Successful-action focus follow-up re-review: **approved**, with no Critical, Important, or Minor findings.
+- This report is finalized before the successful-action-focus commit and is not edited afterward.

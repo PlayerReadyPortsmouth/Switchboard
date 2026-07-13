@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState, type FormEvent } from "react"
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type FormEvent } from "react"
 import { ApiError, WorkspaceApi } from "./api"
 import { ConversationStream } from "./conversationStream"
 import { DraftStore } from "./drafts"
@@ -26,6 +26,9 @@ interface AppProps {
 
 type LoadState = "loading" | "ready" | "forbidden" | "unavailable"
 type WorkspaceLayout = "desktop" | "tablet" | "mobile"
+type FocusRequest =
+  | { target: "conversation-search" | "composer" | "inspector-close" }
+  | { target: "element"; element: HTMLElement }
 
 const connectionLabels: Record<ConnectionState, string> = {
   connecting: "Connecting",
@@ -76,10 +79,20 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, streamF
   const inspectorCloseRef = useRef<HTMLButtonElement>(null)
   const drawerInvokerRef = useRef<HTMLElement | null>(null)
   const dialogInvokerRef = useRef<HTMLElement | null>(null)
+  const [focusRequest, setFocusRequest] = useState<FocusRequest | null>(null)
 
-  const focusAfterRender = useCallback((target: () => HTMLElement | null) => {
-    requestAnimationFrame(() => target()?.focus())
-  }, [])
+  useLayoutEffect(() => {
+    if (!focusRequest) return
+    const target = focusRequest.target === "element"
+      ? focusRequest.element
+      : focusRequest.target === "conversation-search"
+        ? conversationSearchRef.current
+        : focusRequest.target === "composer"
+          ? composerRef.current
+          : inspectorCloseRef.current
+    if (target?.isConnected) target.focus()
+    setFocusRequest(null)
+  }, [focusRequest])
 
   const load = useCallback(async () => {
     setLoadState("loading")
@@ -135,36 +148,36 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, streamF
     const invoker = dialogInvokerRef.current
     setActionError("")
     setDialog(null)
-    focusAfterRender(() => invoker?.isConnected ? invoker : null)
+    if (invoker) setFocusRequest({ target: "element", element: invoker })
   }
 
   const closeInspector = () => {
     const invoker = drawerInvokerRef.current
     setInspectorOpen(false)
     setMobilePane(selected ? "transcript" : "conversations")
-    focusAfterRender(() => invoker?.isConnected ? invoker : null)
+    if (invoker) setFocusRequest({ target: "element", element: invoker })
   }
 
   const closeConversationDrawer = () => {
     const invoker = drawerInvokerRef.current
     setMobilePane("transcript")
-    focusAfterRender(() => invoker?.isConnected ? invoker : null)
+    if (invoker) setFocusRequest({ target: "element", element: invoker })
   }
 
   const openInspector = (trigger: HTMLElement) => {
     drawerInvokerRef.current = trigger
     setInspectorOpen(true)
     setMobilePane("inspector")
-    if (layout !== "desktop") focusAfterRender(() => inspectorCloseRef.current)
+    if (layout !== "desktop") setFocusRequest({ target: "inspector-close" })
   }
 
   const changeMobilePane = (pane: MobilePane, trigger: HTMLButtonElement) => {
     drawerInvokerRef.current = trigger
     setMobilePane(pane)
     setInspectorOpen(pane === "inspector")
-    if (pane === "conversations") focusAfterRender(() => conversationSearchRef.current)
-    else if (pane === "inspector") focusAfterRender(() => inspectorCloseRef.current)
-    else focusAfterRender(() => composerRef.current)
+    if (pane === "conversations") setFocusRequest({ target: "conversation-search" })
+    else if (pane === "inspector") setFocusRequest({ target: "inspector-close" })
+    else setFocusRequest({ target: "composer" })
   }
 
   const navigate = (conversationId: string | null, replace = false) => {
@@ -175,7 +188,7 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, streamF
 
   const selectConversation = (conversation: Conversation) => {
     navigate(conversation.id)
-    if (layout === "mobile") focusAfterRender(() => composerRef.current)
+    if (layout === "mobile") setFocusRequest({ target: "composer" })
   }
 
   const createConversation = async (input: ConversationInput) => {
@@ -185,6 +198,7 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, streamF
       dispatch({ type: "conversations/loaded", conversations: [created, ...state.conversations] })
       setDialog(null)
       navigate(created.id)
+      setFocusRequest({ target: "composer" })
     } catch {
       setActionError("Conversation could not be created. Check the title and agent, then try again.")
     }
@@ -198,7 +212,7 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, streamF
       dispatch({ type: "conversations/loaded", conversations: state.conversations.filter(item => item.id !== selected.id) })
       setDialog(null)
       navigate(null)
-      if (layout === "mobile") focusAfterRender(() => conversationSearchRef.current)
+      setFocusRequest({ target: "conversation-search" })
     } catch {
       setActionError("Conversation could not be archived. Try again.")
     }

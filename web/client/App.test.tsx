@@ -438,4 +438,43 @@ describe("responsive workspace shell", () => {
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Archive conversation" })).toBeNull())
     expect(location.pathname).toBe("/")
   })
+
+  for (const [layout, width] of [["desktop", 1280], ["tablet", 900], ["mobile", 500]] as const) {
+    test(`focuses the visible composer after successful create on ${layout}`, async () => {
+      setViewport(width)
+      const api = fakeApi({ conversations: [] })
+      render(<App api={api} />)
+      await screen.findByText("No conversations yet")
+      const conversationNav = screen.getByRole("navigation", { name: "Conversation navigation" })
+      const createTrigger = layout === "mobile"
+        ? within(conversationNav).getByRole("button", { name: "New conversation" })
+        : screen.getAllByRole("button", { name: "New conversation" })[0]
+
+      await userEvent.click(createTrigger)
+      const dialog = screen.getByRole("dialog", { name: "New conversation" })
+      await userEvent.type(within(dialog).getByRole("textbox", { name: "Title" }), `${layout} follow-up`)
+      await userEvent.click(within(dialog).getByRole("button", { name: "Create conversation" }))
+
+      expect(await screen.findByRole("heading", { name: `${layout} follow-up` })).toBeTruthy()
+      const composer = screen.getByRole("textbox", { name: "Message" })
+      expect(document.activeElement === composer).toBe(true)
+      expect(composer.closest('[data-region="transcript"]')).not.toBeNull()
+      expect(document.querySelector(".workspace-shell")?.getAttribute("data-mobile-pane")).toBe("transcript")
+    })
+
+    test(`focuses the visible conversation search after successful archive on ${layout}`, async () => {
+      setViewport(width)
+      render(<App api={fakeApi()} />)
+      await userEvent.click(await screen.findByRole("button", { name: /Design review/ }))
+      await userEvent.click(screen.getByRole("button", { name: "Archive conversation" }))
+      await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Archive" }))
+
+      await waitFor(() => expect(screen.queryByRole("dialog", { name: "Archive conversation" })).toBeNull())
+      const search = screen.getByRole("searchbox", { name: "Search conversations" })
+      expect(document.activeElement === search).toBe(true)
+      expect(search.closest('[data-region="conversation-navigation"]')).not.toBeNull()
+      expect(document.querySelector(".workspace-shell")?.getAttribute("data-mobile-pane")).toBe("conversations")
+      expect(location.pathname).toBe("/")
+    })
+  }
 })
