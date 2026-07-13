@@ -1,107 +1,68 @@
-# Task 7 report — retry worker, shutdown, and Phase 2 gate
+# Task 7 report — responsive, accessibility, reconnect, and installability gate
 
 ## Status
 
-Implemented and verified.
+Implemented, independently reviewed, remediated, and verified. Phase 3 is complete for durable responsive web text conversations and PWA shell installability. This report does not claim Phase 4 operations parity.
 
-## Changes
+## Implementation
 
-- Added a single-flight delivery worker that reads at most 100 due rows per tick, reconstructs their canonical message/link, persists success and failure outcomes, honors explicit non-retryable results, and applies injected bounded exponential backoff/jitter with five attempts by default.
-- The worker owns an unref'd timer, performs an initial recovery tick only after configured adapters start, and awaits an in-flight tick when stopped.
-- Extended idempotent shutdown ordering to stop web ingress, retry work, adapters, and the web server before closing SQLite. The web server exposes a split stop-accepting/await-stop lifecycle.
-- Wired the worker into the production canonical conversation runtime and documented adapter/sync/import/delivery/web-only behavior plus deferred rich-card parity.
+- Added Playwright projects with the exact approved desktop (`1440×1000`), tablet (`900×1100`), and mobile (`390×844`, mobile/touch) settings.
+- Added a single loopback-only fixture process at `127.0.0.1:4173`. It keeps one SQLite `:memory:` database open for its lifetime and routes real requests through `handleWebRequest`, `ConversationService`, `ConversationEventStream`, and `SqliteConversationRepository`.
+- The fixture strips caller-provided trusted identity headers and sets `owner@example.com`. Its mutation namespace returns `404` unless `NODE_ENV=test`.
+- Added per-conversation, idempotent SSE drop/close support and deterministic gap commits through the real service. Reconnect tests assert gap-first recovery, canonical sequence order, and one rendered row.
+- Added commit-then-network-abort coverage proving Retry reuses the original idempotency key and yields one canonical user message and one agent reply.
+- Added real UI workflows for create, multi-turn send/reply, primary-agent change, search, archive, `/legacy`, trusted identity, draft reload, responsive pane geometry, inspector collapse/drawer focus, mobile overflow/touch/safe-area controls, dialog/drawer focus traps, Enter/Shift+Enter, and whole-workspace Axe scans.
+- Added manifest, exact icon dimension/content-type, active service-worker, cached-shell offline reload, offline API failure, and service-worker/cache cleanup coverage.
+- Added `bunfig.toml` so the exact `bun test` command excludes Playwright-owned `tests/e2e/**`, and ignored Playwright output directories.
+- Added the mobile creation control required when the application rail is hidden, raised Reply control contrast, and fixed modal Tab boundary trapping.
+- Updated operator, configuration, architecture, and roadmap documentation for `/` versus `/legacy`, build/hub behavior, configurable trusted-header proxy requirements, shell-only caching/no offline submit, Discord-disabled web conversations, Phase 3 completion, the explicit Phase 4 backlog, and uncancellable adapter-send shutdown delay.
 
-## TDD evidence
+## RED → GREEN evidence
 
-Initial worker run before implementation:
+- Initial mobile gate reached the real app and failed waiting for the absent `Design review` fixture conversation. Seeding it through `ConversationService` made the required draft/reload case pass.
+- The per-project mobile workflow failed because the rail-only New action was hidden on mobile. A mobile list-header action made the workflow pass.
+- Whole mobile Axe coverage failed on the Reply control at 4.38:1. Removing its opacity reduction made serious/critical violations zero.
+- Reconnect initially remained at `Connecting` because Bun did not flush empty SSE response headers. A valid ignored SSE comment established observable readiness; drop/gap recovery then passed without sleeps or server errors.
+- The strengthened dialog boundary test proved Shift+Tab could leave the native dialog. An explicit shared modal Tab trap made the boundary and focus-return assertions pass.
+- The first phase-gate typecheck identified incomplete fixture `AgentStatus` projections. Supplying the required status-safe fields made typecheck pass.
+- The first full Bun run discovered Playwright `.spec.ts` files and rejected Playwright hooks under Bun. Native `test.pathIgnorePatterns` restored the exact `bun test` command to its unit/integration boundary.
 
-`bun test tests/deliveryWorker.test.ts`
+## Independent review and remediation
 
-- Exit 1.
-- Expected failure: `Cannot find module '../hub/surfaces/deliveryWorker'`.
+The read-only review found no Critical issues. All Important findings were fixed:
 
-Initial shutdown run after adding the ordered lifecycle test:
+- Axe now scans the complete rendered workspace in both list and transcript states rather than isolated fragments.
+- Desktop asserts non-overlapping rail/list/transcript/inspector geometry and transcript expansion after inspector collapse; mobile asserts touch capability, bottom-navigation/control bounds, safe-area CSS presence, and no horizontal overflow.
+- The new-conversation dialog now cycles both focus boundaries, and the E2E gate retains Escape/focus-return coverage.
 
-`bun test tests/shutdown.test.ts`
+The Minor artifact finding was also fixed by removing generated output and ignoring `test-results/` and `playwright-report/`.
 
-- Exit 1.
-- Existing shutdown passed; new ordered shutdown failed with `TypeError: closeDatabase is not a function` because the object-form lifecycle did not exist.
+## Final phase gate
 
-Focused green run:
+Commands ran from fresh shells in the required order after remediation:
 
-`bun test tests/deliveryWorker.test.ts tests/shutdown.test.ts; bun run typecheck`
+1. `bun run typecheck` — exit 0.
+2. `bun test` — 924 passed, 0 failed, 2370 expectations across 121 files.
+3. `bun run build:web` — exit 0; production workspace/PWA assets emitted.
+4. `bun run test:e2e` — 15 passed, 12 intentional project skips, 0 failed across 27 discovered cases.
+5. `git diff --check` — exit 0; no whitespace errors (line-ending notices only).
 
-- Exit 0: 8 pass, 0 fail, 14 expectations; TypeScript exit 0.
+Playwright totals:
 
-## Phase 2 completion gate
-
-`git diff --check; bun run typecheck; bun test`
-
-- Exit 0.
-- `git diff --check`: no whitespace errors (Git emitted line-ending notices only).
-- TypeScript: exit 0.
-- Tests: 801 pass, 0 fail, 1954 expectations across 110 files.
-
-## Smoke scenarios
-
-Web-only boot/message/agent reply/restart scenario:
-
-`bun test tests/discordOptional.test.ts tests/conversationWeb.test.ts tests/turnCoordinator.test.ts tests/conversationRepository.test.ts`
-
-- Exit 0: 54 pass, 0 fail, 171 expectations.
-- Covers disabled Discord construction/token access, HTTP canonical submit, agent dispatch/reply idempotency, durable delivery creation, and file-backed database reopen.
-
-Fake-Discord inbound/web mirror/dedup scenario (no network):
-
-`bun test tests/discordAdapter.test.ts tests/channelMigration.test.ts tests/transportMirror.test.ts tests/surfaceRouter.test.ts`
-
-- Exit 0: 21 pass, 0 fail, 49 expectations.
-- Covers fake adapter inbound normalization, atomic channel mapping/import, one canonical receipt under duplicate inbound, outbound sync-mode selection, isolated adapters, and compatibility callbacks.
+- Desktop: 7 passed, 2 skipped.
+- Tablet: 4 passed, 5 skipped.
+- Mobile: 4 passed, 5 skipped.
+- PWA spec: 2 passed on desktop, 4 intentionally skipped on tablet/mobile because installability behavior is viewport-independent.
+- Aggregate: 15 passed, 12 skipped, 0 failed.
 
 ## Self-review
 
-- Retry scheduling uses the post-attempt ordinal: first failure waits 1 second plus jitter, fifth failure exhausts, and delay is capped at 60 seconds before 0–250 ms jitter.
-- Missing message/link and explicit non-retryable results exhaust without rescheduling.
-- A concurrent tick is a no-op; stopping prevents future ticks and waits for the active one.
-- The delivery id remains the durable `(message, link)` id used by adapters for external idempotency.
-- The web stop split is included because stopping acceptance before adapter drain cannot be represented by the previous single `stop()` method.
+- Determinism: no fixed sleeps; readiness uses visible states, service-worker readiness, request completion, and Playwright polling. Titles are project-unique and SSE drops are scoped by conversation id.
+- Security: fixture binds only `127.0.0.1`, strips and sets the trusted header, and fail-closes `__e2e` routes outside test mode.
+- Business boundaries: canonical data and events use the real repository/service/event/request boundaries; no mock conversation API substitutes for production behavior.
+- Lifetime and cleanup: one fixture application process and one open in-memory database per Playwright run; SSE readers, server, database, offline state, service workers, caches, and generated Playwright artifacts are cleaned or ignored appropriately.
+- Documentation: Phase 3 is described as durable text-conversation/PWA completion only. Canonical web attachments, consultations, delegations, handoff, approvals, agent management, operations, and settings remain explicitly in Phase 4.
 
-No known Task 7 concern remains.
+## Concerns
 
-## Review remediation
-
-- Unknown adapters now return `retryable: false`. A real `SurfaceRouter([])` plus `DeliveryWorker` integration regression proves the row exhausts after one attempt instead of entering `retry_wait`.
-- Ordered shutdown now captures every lifecycle error while still awaiting web-ingress stop, worker, adapters, web drain, and database close in that order. It throws an `AggregateError` only after cleanup and preserves the same promise for repeated callers. Parameterized tests inject failure at every step, plus a multi-error case.
-- Worker timer and initial ticks attach explicit rejection handlers through injected `reportError`. Active-state cleanup uses handled `then` branches rather than creating an ignored rejecting `finally` promise. The regression installs an `unhandledRejection` sentinel and forces `listDueDeliveries` to throw.
-- Immediate canonical delivery outcomes are now persisted by `TurnCoordinator`; this prevents the recovery worker from resending an already successful adapter delivery.
-- Added production-boundary, temporary-SQLite smoke tests. The web-only composition exercises HTTP create/submit, fake dispatch/reply, SSE replay, close/reopen, and persisted canonical history. The fake-Discord composition exercises the real adapter/router/coordinator/worker, duplicate inbound receipt, canonical agent reply, one eligible external send, terminal delivery state, ordered cleanup, and temporary-state removal without network.
-
-Review RED evidence:
-
-- Router/worker integration initially entered `retry_wait` at `2000` rather than exhausting.
-- Worker exception test produced Bun unhandled errors from both the initial and interval tick.
-- Shutdown failure-injection tests showed later steps were skipped after the first rejection.
-- The integrated Discord smoke initially observed two external sends because an immediate success remained `pending` for the worker.
-
-Review focused verification:
-
-`bun test tests/phase2CompositionSmoke.test.ts tests/turnCoordinator.test.ts tests/transportMirror.test.ts tests/deliveryWorker.test.ts tests/shutdown.test.ts tests/surfaceRouter.test.ts`
-
-- Exit 0: 39 pass, 0 fail, 104 expectations.
-
-Review completion gate:
-
-`git diff --check; bun run typecheck; bun test`
-
-- Exit 0.
-- Diff check: no whitespace errors (line-ending notices only).
-- TypeScript: exit 0.
-- Full suite: 811 pass, 0 fail, 1983 expectations across 111 files.
-
-Review smoke command:
-
-`bun test tests/phase2CompositionSmoke.test.ts`
-
-- Included in both focused and full verification: 2 pass, 0 fail, 7 expectations.
-
-No remaining review concern identified.
+No blocking concern remains. The PWA cases intentionally execute once in the desktop project; responsive behavior is separately covered in every configured viewport.

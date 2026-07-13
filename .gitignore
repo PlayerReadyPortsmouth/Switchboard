@@ -12,6 +12,8 @@ config/agents.json
 # Dependencies & build
 node_modules/
 dist/
+playwright-report/
+test-results/
 *.tsbuildinfo
 
 # Editor / OS

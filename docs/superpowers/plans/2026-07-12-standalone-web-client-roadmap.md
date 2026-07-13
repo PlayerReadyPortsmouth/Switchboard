@@ -16,13 +16,13 @@ Introduce the transport-neutral domain, SQLite migrations and repositories, auth
 
 Create a follow-on plan after Phase 1 types and repository interfaces are merged. Define the adapter contract, delivery planner, receipts and retries; wrap the current Discord gateway; move Discord ingestion and output through canonical conversations; and support web-only agent turns when Discord is disabled. The gate is full existing Discord regression coverage plus web-only and two-way mirror integration tests.
 
-## Phase 3: Responsive Workspace and PWA
+## Phase 3: Responsive Workspace and PWA — completed
 
-Create a follow-on plan after the Phase 2 API/event contract stabilizes. Replace the embedded HTML dashboard with a bundled TypeScript client implementing the application rail, conversation list and transcript, composer, agent activity, responsive drawers, service worker, manifest, accessibility, and reconnect behavior. The gate is desktop/tablet/mobile end-to-end coverage and installable-PWA verification.
+Completed with a bundled TypeScript client implementing the application rail, conversation list and transcript, composer, agent activity, responsive drawers, service worker, manifest, accessibility, deterministic reconnect recovery, and desktop/tablet/mobile end-to-end plus installable-PWA verification. `/legacy` remains available because this completion covers durable text conversations, not Phase 4 operations parity.
 
 ## Phase 4: Operations Parity and Legacy Retirement
 
-Create a follow-on plan after the workspace shell is usable. Move agents, approvals, delivery failures, tools, traces, workflows, audit, and settings into their workspace destinations. Preserve preview/confirm safety flows. Redirect the legacy dashboard only after a parity checklist and operational soak pass.
+Create a follow-on plan after the workspace shell is usable. The parity checklist explicitly retains canonical web attachments, consultations, delegations, handoff, approvals, agent management, operations (including delivery failures, tools, traces, workflows, and audit), and settings. Preserve preview/confirm safety flows. Redirect the legacy dashboard only after every parity item and an operational soak pass.
 
 ## Cross-Phase Constraints
 

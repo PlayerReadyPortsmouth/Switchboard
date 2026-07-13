@@ -414,6 +414,7 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, st
         selectedId={state.selectedConversationId}
         open={mobilePane === "conversations"}
         closeDisabled={!selected}
+        showHeaderNew={layout === "mobile"}
         searchRef={conversationSearchRef}
         onEscape={layout === "mobile" && selected ? closeConversationDrawer : undefined}
         onNew={() => openDialog("new")}
@@ -518,10 +519,20 @@ function useModalDialog(onCancel: () => void) {
     const dialog = dialogRef.current
     if (!dialog) return
     const handleCancel = (event: Event) => { event.preventDefault(); cancelRef.current() }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Tab") return
+      const focusable = [...dialog.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])')]
+      if (!focusable.length) return
+      const first = focusable[0], last = focusable[focusable.length - 1]
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus() }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus() }
+    }
     dialog.addEventListener("cancel", handleCancel)
+    dialog.addEventListener("keydown", handleKeyDown)
     dialog.showModal()
     return () => {
       dialog.removeEventListener("cancel", handleCancel)
+      dialog.removeEventListener("keydown", handleKeyDown)
       if (dialog.open) dialog.close()
     }
   }, [])

@@ -6,6 +6,7 @@ interface ConversationListProps {
   selectedId: string | null
   open: boolean
   closeDisabled: boolean
+  showHeaderNew?: boolean
   searchRef?: Ref<HTMLInputElement>
   closeRef?: Ref<HTMLButtonElement>
   onEscape?(): void
@@ -22,7 +23,7 @@ const relativeTime = (timestamp: number) => {
   return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(timestamp)
 }
 
-export function ConversationList({ conversations, selectedId, open, closeDisabled, searchRef, closeRef, onEscape, onNew, onSelect, onClose }: ConversationListProps) {
+export function ConversationList({ conversations, selectedId, open, closeDisabled, showHeaderNew = false, searchRef, closeRef, onEscape, onNew, onSelect, onClose }: ConversationListProps) {
   const [query, setQuery] = useState("")
   const filtered = useMemo(() => {
     const needle = query.trim().toLocaleLowerCase()
@@ -35,7 +36,10 @@ export function ConversationList({ conversations, selectedId, open, closeDisable
     }}>
       <header className="list-header">
         <div><p className="eyebrow">Workspace</p><h1>Switchboard</h1></div>
-        <button ref={closeRef} className="drawer-close" type="button" disabled={closeDisabled} onClick={onClose} aria-label="Close conversations">×</button>
+        <div className="list-header-actions">
+          {showHeaderNew ? <button className="list-new" type="button" onClick={onNew} aria-label="New conversation">New</button> : null}
+          <button ref={closeRef} className="drawer-close" type="button" disabled={closeDisabled} onClick={onClose} aria-label="Close conversations">×</button>
+        </div>
       </header>
       <label className="search-field">
         <span className="sr-only">Search conversations</span>
@@ -60,7 +64,7 @@ export function ConversationList({ conversations, selectedId, open, closeDisable
           <div className="empty-state">
             <h2>No conversations yet</h2>
             <p>Create a conversation to start working with an agent.</p>
-            <button type="button" onClick={onNew}>New conversation</button>
+            {showHeaderNew ? null : <button type="button" onClick={onNew}>New conversation</button>}
           </div>
         ) : filtered.length === 0 ? (
           <div className="empty-state compact"><h2>No matches</h2><p>Try a different conversation title.</p></div>

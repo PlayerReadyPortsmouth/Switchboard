@@ -17,7 +17,7 @@ The uniqueness constraints are part of the public persistence contract:
 
 ## Identity and authorization
 
-All conversation API routes trust the `X-Switchboard-User` request header as the caller identity. Switchboard does not authenticate that value. A trusted reverse proxy or hosting layer must authenticate the user, remove any client-supplied copy of the header, and set the verified identity before forwarding the request. Do not expose these routes directly to untrusted clients.
+All conversation API routes trust the header configured by `webIdentityHeader` as the caller identity; the default is `X-Switchboard-User`. Switchboard has no login screen and does not authenticate that value. A trusted reverse proxy or hosting layer must authenticate the user, remove every client-supplied copy of the configured header, and set the verified identity before forwarding the request. Do not expose these routes directly to untrusted clients.
 
 Authorization is enforced again in `ConversationService`:
 
@@ -49,6 +49,14 @@ All IDs in route paths are URL encoded. JSON routes return `400` for invalid inp
 Conversation events use the message sequence as the SSE `id`. A subscriber supplies either the `after` query parameter or `Last-Event-ID`; `after` takes precedence. The cursor is exclusive: reconnecting after sequence `N` replays persisted messages with sequence greater than `N`, in sequence order, then continues with live events.
 
 The event stream registers the live subscription before reading history and buffers concurrent publications during replay. Persisted catch-up is read in bounded 500-message pages until the complete gap is exhausted. Its high-water mark advances between pages and suppresses overlap with buffered live publications, so a reconnect receives every missing sequence exactly once from this hub process, including gaps larger than one page. SSE is a notification/resume surface, not the source of truth; clients should retain their cursor and can always recover through message history.
+
+## Workspace and PWA boundary
+
+Phase 3 is complete. `/` and client-side workspace routes serve the bundled desktop/tablet/mobile text-conversation workspace; `/legacy` retains the operational compatibility UI until Phase 4 parity and soak complete. `bun run build:web` emits the shell and installability assets, while `bun run hub` builds them and starts the same single Bun application process that owns SQLite and the APIs.
+
+The service worker caches only the application shell and safe static assets. It never caches `/api/**`, conversation responses, SSE responses, or authenticated operational data. Draft text may remain locally across reloads, but there is no offline submission queue: a user message renders as accepted only after a canonical POST succeeds.
+
+Discord-disabled startup remains a complete durable web text-conversation mode and does not read a Discord token. Phase 3 does not provide operations parity. Canonical web attachments, consultations, delegations, handoff, approvals, agent management, operations, and settings are explicit Phase 4 backlog items and remain available only through their existing compatibility surfaces where applicable.
 
 ## Agent and transport pipeline
 

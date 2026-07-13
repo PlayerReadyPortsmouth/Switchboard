@@ -397,7 +397,7 @@ describe("responsive workspace shell", () => {
     await userEvent.click(await screen.findByRole("button", { name: /Design review/ }))
     const composer = screen.getByRole("textbox", { name: "Message" })
     await waitFor(() => expect(document.activeElement).toBe(composer))
-    const mobile = screen.getByRole("navigation", { name: "Mobile workspace navigation" })
+    const mobile = screen.getByRole("navigation", { name: "Mobile navigation" })
     const details = within(mobile).getByRole("button", { name: "Details" })
 
     await userEvent.click(details)

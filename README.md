@@ -80,6 +80,8 @@ docs/        superpowers/ spec + plan
    bun run hub
    ```
 
+   `bun run hub` first runs `bun run build:web`, then starts the single Bun hub process; it does not start a second frontend service. Run `bun run build:web` by itself to emit the production workspace, manifest, generated icons, and service worker under `dist/web/` without starting the hub.
+
 6. **Pairing.** The first DM from a new user returns a pairing **code**. Approve it from the host machine:
 
    ```bash
@@ -242,16 +244,19 @@ Agents aren't islands. With `consult.enabled`, each agent gets an **`ask_agent`*
 
 Built on the same request/response seam as `recall`: the target runs on a virtual `consult:<id>` channel, its reply (text or a card) is intercepted before Discord and returned to the caller. **Governed** — an agent answers only if its `access.consultableBy` permits the requester (`"*"` = any; self-consult always denied); the tool is exposed only when `consult.enabled`. **Bounded** — the caller waits up to `timeoutMs` (then gets a timeout note), and every consult (`ask`/`answer`/`deny`/`timeout`) is a `consult` audit event threaded by `corr`. *Boundaries:* the call is synchronous (the caller holds its turn while waiting) and runs in the target's shared session; a mutual cycle is broken by the timeout. **Treat `consultableBy` as a data-flow grant, not just availability** — the target's raw reply is handed to the requester, so prefer an explicit agent allowlist over `"*"` (which lets any agent, including a prompt-injected one, consult that agent).
 
-## Web dashboard
+## Web workspace and legacy console
 
-Point a browser at the hub and watch it work. Set `webPort` and the hub serves a single self-contained page (off when unset). See [`docs/superpowers/specs/2026-06-24-web-dashboard-design.md`](docs/superpowers/specs/2026-06-24-web-dashboard-design.md).
+Set `webPort` and point a browser at the hub. The listener remains off when unset and binds **loopback (`127.0.0.1`) by default** (`webHost: "0.0.0.0"` opts into broader exposure).
 
-The canonical conversation API is documented in [`docs/architecture/conversations.md`](docs/architecture/conversations.md); its approved cross-platform direction is in the [`standalone web-client and transport architecture`](docs/superpowers/specs/2026-07-12-standalone-web-client-and-transport-architecture-design.md). Canonical web messages now run through the selected agent and ordinary text mirrors through durable transport deliveries. Discord is optional at startup, so a web-only hub remains fully agent-backed. Discord commands and rich cards/interactions continue on the compatibility path; workspace rich-card parity is deferred.
+- **`GET /`** and client-side conversation routes serve the bundled responsive React workspace for durable text conversations.
+- **`GET /legacy`** serves the existing operational compatibility UI. Keep using it for agents, approvals, operations, settings, and rich Discord workflows until Phase 4 parity and soak complete.
+- **`GET /api/status`** remains the status projection consumed by the compatibility UI and operations tooling.
 
-- **`GET /`** — a read-only dashboard (vanilla JS, no build step) that polls `/api/status` every 3 s and renders the agent fleet (alive/busy, context-fill bar, queue, cost, replicas), hub health + uptime, the ledger summary, and a recent-activity feed.
-- **`GET /api/status`** — the JSON the page consumes, projected from the same `StatusSnapshot` + audit data as `!status`/`!audit`/`/metrics` (its readiness flag matches `/health`).
+Conversation routes trust the configurable `webIdentityHeader` (default `X-Switchboard-User`) as the authenticated identity; Switchboard has no login screen and does not authenticate that value. A trusted reverse proxy must strip every caller-supplied copy of the configured header and set exactly the verified identity before forwarding traffic.
 
-Read-only and unauthenticated like `/metrics` — it serves only the already-public status/audit **metadata** (no message content, no secrets, no write actions), and binds **loopback (`127.0.0.1`) by default** (`webHost: "0.0.0.0"` to expose). This is deliberately the read-only slice of "web support"; a bidirectional web chat would mean abstracting the Discord-coupled gateway, a separate effort.
+Phase 3 is complete: desktop, tablet, and mobile workspace layouts, reconnect recovery, accessibility coverage, and installable PWA assets are shipped. The service worker caches only the application shell and safe static assets. It never caches `/api/**`, SSE, transcripts, or authenticated operational data, and offline drafts are not submitted until the API is reachable again.
+
+With `discord.enabled: false`, startup does not read a Discord token or construct a Discord client; durable web conversations and real agent-backed text turns still work. This is web text-conversation support, not Phase 4 operations parity: canonical web attachments, consultations, delegations, handoff, approvals, agent management, operations, and settings remain pending. See [`docs/architecture/conversations.md`](docs/architecture/conversations.md) and the [`standalone web-client and transport architecture`](docs/superpowers/specs/2026-07-12-standalone-web-client-and-transport-architecture-design.md).
 
 ## Workflows / missions
 

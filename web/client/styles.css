@@ -83,6 +83,8 @@ button { color: inherit; }
 .conversation-list { grid-area: list; min-width: 0; background: var(--ink-1); border-right: 1px solid var(--line); overflow: auto; }
 .list-header, .pane-header { min-height: 86px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 19px 20px 17px; border-bottom: 1px solid var(--line); }
 .list-header h1, .pane-header h2 { margin: 0; font-size: 1.04rem; line-height: 1.2; letter-spacing: -.01em; }
+.list-header-actions { display: flex; align-items: center; gap: 8px; }
+.list-new { display: none; min-height: 44px; padding: 0 12px; border: 1px solid var(--accent); background: transparent; color: var(--text); cursor: pointer; }
 .drawer-close { display: none; width: 44px; height: 44px; border: 1px solid var(--line); background: transparent; cursor: pointer; }
 .search-field { min-height: 52px; display: flex; align-items: center; gap: 9px; margin: 14px 16px 8px; padding: 0 12px; border: 1px solid var(--line); color: var(--muted); background: var(--ink-0); }
 .search-field:focus-within { border-color: var(--accent); }
@@ -129,8 +131,8 @@ button { color: inherit; }
 .message-meta { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px 10px; color: var(--muted); font: .63rem/1.3 ui-monospace, SFMono-Regular, Consolas, monospace; text-transform: uppercase; letter-spacing: .055em; }
 .message-item > p { margin: 11px 0 0; color: var(--text); font-size: .93rem; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
 .message-reply { margin: 13px 0 0; padding: 8px 11px; border-left: 1px solid var(--origin); color: var(--muted); font-size: .77rem; line-height: 1.45; }
-.message-reply-action { position: absolute; right: 0; bottom: 15px; min-width: 40px; min-height: 32px; padding: 0 5px; border: 0; background: transparent; color: var(--muted); font-size: .7rem; cursor: pointer; opacity: .72; }
-.message-reply-action:hover { color: var(--text); opacity: 1; }
+.message-reply-action { position: absolute; right: 0; bottom: 15px; min-width: 40px; min-height: 32px; padding: 0 5px; border: 0; background: transparent; color: var(--muted); font-size: .7rem; cursor: pointer; }
+.message-reply-action:hover { color: var(--text); }
 .activity-disclosure { margin-top: 20px; border-bottom: 1px solid var(--line); }
 .activity-disclosure summary { min-height: 44px; display: flex; align-items: center; gap: 10px; color: var(--muted); font: 600 .68rem/1 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: .07em; text-transform: uppercase; cursor: pointer; }
 .activity-trace { position: relative; width: 28px; height: 8px; border-top: 1px solid var(--accent); }
@@ -229,6 +231,7 @@ dialog input, dialog select { min-height: 44px; width: 100%; padding: 0 11px; bo
   .transcript-pane { z-index: 29; }
   .inspector { z-index: 31; box-shadow: none; }
   .list-header, .pane-header { min-height: 70px; padding: 14px 16px; }
+  .list-new { display: block; }
   .conversation-list .drawer-close, .inspector .drawer-close { display: block; }
   .conversation-list .drawer-close:disabled { display: none; }
   .header-actions button, .drawer-close, .conversation-item { min-height: 44px; }

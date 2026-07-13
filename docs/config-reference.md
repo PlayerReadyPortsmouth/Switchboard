@@ -36,7 +36,8 @@ Source of truth: this file is a snapshot of the code as of 2026-07-02. Re-derive
 | `statusChannelId` | string | absent = off | Discord channel for the live self-editing status embed. |
 | `statusRefreshMs` | number | `15000` | Status board edit cadence. |
 | `metricsPort` | number | absent = off | Port for Prometheus `/metrics` + `/health`. |
-| `webPort` | number | absent = off | Port for the (unauthenticated, loopback-bound by default) web dashboard. |
+| `webPort` | number | absent = off | Port for the workspace at `/`, compatibility UI at `/legacy`, and their APIs; loopback-bound by default. |
+| `webIdentityHeader` | string | `"X-Switchboard-User"` | Trusted reverse-proxy identity header for guarded web APIs. Must be a valid HTTP header name. |
 | `memory` | object | — | `{ index: "local"\|"qdrant", embedder: "local"\|"openai", qdrant: {url, apiKeyEnv, collection}, openai: {baseUrl, apiKeyEnv, model} }` |
 | `gardener` | object | off | `{ enabled, intervalMs, importanceWeight, hotSetSize, decayHalfLifeMs, staleAfterMs, archiveAfterMs, scopeBudget }` — vault-hygiene sweep. |
 | `deployApproverUserId` | string | — | The one Discord user allowed to press `deploy:*` buttons. |
@@ -66,7 +67,11 @@ Source of truth: this file is a snapshot of the code as of 2026-07-02. Re-derive
 
 `conversationDbFile` optionally selects the SQLite file used for canonical conversations. A leading `~` is expanded to the hub user's home directory. When omitted, the exact default is `<stateDir>/switchboard.sqlite`.
 
-Conversation HTTP routes trust the `X-Switchboard-User` request header as the authenticated identity. Deploy the web listener only behind a trusted proxy that strips any client-supplied copy of this header and sets it from the authenticated session; do not expose these routes directly to untrusted clients.
+Conversation HTTP routes trust the configurable `webIdentityHeader` as the authenticated identity; its exact default is `X-Switchboard-User`. Switchboard provides no login screen and does not validate the asserted identity. Deploy the web listener only behind a trusted proxy that strips every client-supplied copy of the configured header before setting it from the authenticated session; do not expose guarded routes directly to untrusted clients.
+
+`bun run build:web` emits the workspace shell, manifest, generated PNG icons, and service worker under `dist/web/`. `bun run hub` runs that build and then starts the one Bun application process. `/` and client-side workspace routes serve the built shell; `/legacy` keeps the existing operations UI available until Phase 4 parity and soak are complete.
+
+The service worker caches only the shell and safe static assets. It excludes `/api/**`, SSE, conversation data, and authenticated operations data. Drafts can remain in browser storage while offline, but Switchboard does not claim or queue offline submission; sending requires a successful canonical API response.
 
 SQLite uses write-ahead logging while the hub is running. A consistent live backup must include both the configured database file and its `-wal` file, captured consistently, or be made with SQLite's backup command. After a clean hub shutdown, the database file can be backed up normally.
 ## 3. `agents.json` — agent registry
@@ -95,7 +100,7 @@ Top-level keys are agent names → `AgentConfig` (`hub/types.ts:136-142`):
 | `SWITCHBOARD_CONFIG` | operator | Overrides config directory. | Optional |
 | `<botTokenEnv>` (default `DISCORD_BOT_TOKEN`) | operator, in `<stateDir>/.env` | Discord bot token. Hub exits if unset while `discord.enabled` is true. | Required only for Discord |
 
-Setting `discord.enabled` to `false` starts the canonical HTTP/SSE conversation APIs and agents without reading a bot token, logging in to Discord, resolving Discord roles, or touching the Discord client during startup/shutdown. Web message posts are real agent turns: replies are committed to the canonical transcript and streamed as conversation events even when the conversation has no surface links. Cards, buttons, modals, and other interaction compatibility behavior remain Discord-specific in Phase 2.
+Setting `discord.enabled` to `false` starts the canonical HTTP/SSE conversation APIs and agents without reading a bot token, logging in to Discord, resolving Discord roles, or touching the Discord client during startup/shutdown. Web message posts are real agent turns: replies are committed to the canonical transcript and streamed as conversation events even when the conversation has no surface links. Phase 3 covers durable text conversations only; canonical web attachments and Phase 4 operations parity remain pending.
 | `<memory.openai.apiKeyEnv>` | operator | Only read when `memory.embedder === "openai"`. | Optional |
 | `<memory.qdrant.apiKeyEnv>` | operator | Only read when `memory.index === "qdrant"`. | Optional |
 | `<webhooks[].secretEnv>` | operator | Inbound HMAC secret per webhook route. Defaults to `""` (can't verify) if unset. | Optional per-route, effectively required if using `webhooks[]` |
