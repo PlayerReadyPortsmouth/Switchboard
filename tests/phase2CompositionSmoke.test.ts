@@ -24,7 +24,7 @@ test("web-only production composition persists submit, fake agent reply, SSE, an
   let db = new Database(file, { create: true }); let repo = new SqliteConversationRepository(db); let id = 0; let now = 100
   let dispatched: InboundMessage | undefined
   const events = new ConversationEventStream((conversationId, after, limit) => repo.listMessages(conversationId, after, limit))
-  const service = new ConversationService(repo, () => ++now, () => `id-${++id}`, events)
+  const service = new ConversationService(repo, () => ++now, () => `id-${++id}`, events, name => name === "fake")
   const coordinator = new TurnCoordinator(service, repo, { dispatch: (_agent, _conversation, inbound) => (dispatched = inbound, true) }, events, new SurfaceRouter([]), () => ++now, () => `turn-${++id}`)
   const deps = {
     requireUser: (req: Request) => req.headers.get("x-switchboard-user"),
@@ -41,9 +41,13 @@ test("web-only production composition persists submit, fake agent reply, SSE, an
   try {
     const createdResponse = await handleWebRequest(request("/api/conversations", "POST", { title: "Smoke", primaryAgent: "fake" }), deps)
     const conversation = await createdResponse.json() as { id: string }
+    expect((await handleWebRequest(request("/api/conversations", "POST", { title: "No transport", primaryAgent: "ephemeral" }), deps)).status).toBe(400)
+    const states: string[] = []
+    events.subscribe(conversation.id, 0, event => { if (event.kind === "turn_state") states.push(`${event.state}:${event.detail?.messageId}`) })
     expect((await handleWebRequest(request(`/api/conversations/${conversation.id}/messages`, "POST", { content: "question" }, { "idempotency-key": "web-1" }), deps)).status).toBe(201)
     const reply: AgentReply = { agent: "fake", kind: "reply", chatId: dispatched!.chatId, correlationId: "reply-1", text: "answer" }
     await coordinator.acceptAgentReply(reply)
+    expect(states).toEqual([`queued:${dispatched!.messageId}`, `working:${dispatched!.messageId}`, `completed:${dispatched!.messageId}`])
     const sse = await handleWebRequest(request(`/api/conversations/${conversation.id}/events?after=0`), deps)
     const reader = sse.body!.getReader(); let text = ""
     while (!text.includes("answer")) { const part = await reader.read(); if (part.done) break; text += new TextDecoder().decode(part.value) }

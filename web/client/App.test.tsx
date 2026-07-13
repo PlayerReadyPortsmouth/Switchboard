@@ -2,6 +2,7 @@ import "./testSetup"
 import { afterEach, describe, expect, test } from "bun:test"
 import { act, cleanup, fireEvent, render, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
+import { StrictMode } from "react"
 import { ApiError } from "./api"
 import { App, createWorkspaceStream, type AppApi } from "./App"
 import type { ConversationStreamHandlers } from "./conversationStream"
@@ -150,6 +151,71 @@ describe("responsive workspace shell", () => {
     await userEvent.click(screen.getByRole("button", { name: "Try again" }))
     expect(await screen.findByRole("heading", { name: "Switchboard" })).toBeTruthy()
     expect(attempts).toBe(2)
+  })
+
+  test("offline deep routes recover a device draft without API data", async () => {
+    history.replaceState(null, "", "/conversations/design%2Freview")
+    const storage = new Map([["switchboard:draft:design/review", JSON.stringify({ text: "offline draft", clientKey: "draft-key", updatedAt: 1 })]])
+    const drafts = new DraftStore({ getItem: key => storage.get(key) ?? null, setItem: (key, value) => { storage.set(key, value) }, removeItem: key => { storage.delete(key) } })
+    const pwa = { state: () => ({ installAvailable: false, online: false, issue: null }), subscribe: (listener: any) => { listener(pwa.state()); return () => {} }, install: async () => {} }
+    render(<App api={fakeApi({ sessionResult: Promise.reject(new ApiError(503, "offline")) })} drafts={drafts} pwa={pwa} />)
+    expect((await screen.findByRole("textbox", { name: "Message" }) as HTMLTextAreaElement).value).toBe("offline draft")
+  })
+
+  test("an older failed load cannot overwrite a newer successful API load", async () => {
+    const oldSession = deferred<Session>()
+    const oldConversations = deferred<Conversation[]>()
+    const oldApi = fakeApi({ sessionResult: oldSession.promise, conversationsResult: oldConversations.promise })
+    const fresh = conversation({ id: "fresh", title: "Fresh workspace" })
+    const { rerender } = render(<App api={oldApi} />)
+    rerender(<App api={fakeApi({ conversations: [fresh] })} />)
+    expect(await screen.findByRole("button", { name: /Fresh workspace/ })).toBeTruthy()
+    await act(async () => { oldSession.reject(new ApiError(503, "old")); oldConversations.resolve([]); await Promise.resolve() })
+    expect(screen.queryByText("Switchboard is unavailable")).toBeNull()
+    expect(screen.getByRole("button", { name: /Fresh workspace/ })).toBeTruthy()
+  })
+
+  test("an older successful load cannot overwrite a newer failed API load", async () => {
+    const oldSession = deferred<Session>()
+    const oldConversations = deferred<Conversation[]>()
+    const { rerender } = render(<App api={fakeApi({ sessionResult: oldSession.promise, conversationsResult: oldConversations.promise })} />)
+    rerender(<App api={fakeApi({ sessionResult: Promise.reject(new ApiError(503, "new")) })} />)
+    expect((await screen.findByRole("alert")).textContent).toContain("Switchboard is unavailable")
+    await act(async () => { oldSession.resolve(session); oldConversations.resolve([conversation({ title: "Stale" })]); await Promise.resolve() })
+    expect(screen.getByRole("alert").textContent).toContain("Switchboard is unavailable")
+  })
+
+  test("unmount invalidates a pending workspace load", async () => {
+    const pending = deferred<Session>()
+    const { unmount } = render(<App api={fakeApi({ sessionResult: pending.promise })} />)
+    unmount()
+    await act(async () => { pending.resolve(session); await Promise.resolve() })
+    expect(document.body.textContent).toBe("")
+  })
+
+  test("StrictMode effect replay leaves only the current workspace load active", async () => {
+    const pending = deferred<Session>()
+    let calls = 0
+    const api = fakeApi()
+    api.session = () => { calls++; return pending.promise }
+    render(<StrictMode><App api={api} /></StrictMode>)
+    expect(calls).toBe(2)
+    await act(async () => { pending.resolve(session); await pending.promise })
+    expect(await screen.findByRole("heading", { name: "Switchboard" })).toBeTruthy()
+  })
+
+  test("a stale retry failure cannot replace a later retry success", async () => {
+    const stale = deferred<Session>()
+    const api = fakeApi()
+    let calls = 0
+    api.session = () => ++calls === 1 ? Promise.reject(new ApiError(503, "initial")) : stale.promise
+    const { rerender } = render(<App api={api} />)
+    await screen.findByRole("alert")
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }))
+    rerender(<App api={fakeApi()} />)
+    expect(await screen.findByRole("heading", { name: "Switchboard" })).toBeTruthy()
+    await act(async () => { stale.reject(new ApiError(503, "stale")); await Promise.resolve() })
+    expect(screen.queryByText("Switchboard is unavailable")).toBeNull()
   })
 
   test("filters conversations locally by title", async () => {

@@ -16,7 +16,7 @@ test("loads and validates both files", () => {
     defaultAgent: "qa", ephemeralTimeoutMs: 1000, tagStyle: "prefix", chatKeyScope: "user",
   }))
   writeFileSync(join(dir, "agents.json"), JSON.stringify({
-    qa: { emoji: "💡", description: "q", mode: "ephemeral",
+    qa: { emoji: "💡", description: "q", mode: "persistent",
       access: { roles: ["*"] }, runtime: { cwd: "." } },
   }))
   const { hub, agents } = loadConfigs(dir)
@@ -24,7 +24,7 @@ test("loads and validates both files", () => {
   expect(hub.discord?.enabled).toBe(true)
   expect(hub.webIdentityHeader).toBe("X-Switchboard-User")
   expect(hub.conversationDbFile).toBeUndefined()
-  expect(agents.qa.mode).toBe("ephemeral")
+  expect(agents.qa.mode).toBe("persistent")
 })
 
 test("normalizes and validates the trusted web identity header", () => {
@@ -33,7 +33,7 @@ test("normalizes and validates the trusted web identity header", () => {
     discord: { enabled: false }, guildIds: [], socketPath: "s", stateDir: "d", webIdentityHeader,
     routerModel: "m", switchThreshold: 0.7, defaultAgent: "qa", ephemeralTimeoutMs: 1, tagStyle: "prefix", chatKeyScope: "user",
   }))
-  writeFileSync(join(dir, "agents.json"), JSON.stringify({ qa: { emoji: "x", description: "q", mode: "ephemeral", access: { roles: ["*"] }, runtime: { cwd: "." } } }))
+  writeFileSync(join(dir, "agents.json"), JSON.stringify({ qa: { emoji: "x", description: "q", mode: "persistent", access: { roles: ["*"] }, runtime: { cwd: "." } } }))
 
   write("  X-Auth-User  ")
   expect(loadConfigs(dir).hub.webIdentityHeader).toBe("X-Auth-User")
@@ -51,7 +51,7 @@ test("explicitly disabled Discord remains disabled", () => {
     ephemeralTimeoutMs: 1, tagStyle: "prefix", chatKeyScope: "user",
   }))
   writeFileSync(join(dir, "agents.json"), JSON.stringify({
-    qa: { emoji: "x", description: "q", mode: "ephemeral", access: { roles: ["*"] }, runtime: { cwd: "." } },
+    qa: { emoji: "x", description: "q", mode: "persistent", access: { roles: ["*"] }, runtime: { cwd: "." } },
   }))
   expect(loadConfigs(dir).hub.discord?.enabled).toBe(false)
 })
@@ -64,7 +64,7 @@ test("expands a configured conversation database path", () => {
     defaultAgent: "qa", ephemeralTimeoutMs: 1, tagStyle: "prefix", chatKeyScope: "user",
   }))
   writeFileSync(join(dir, "agents.json"), JSON.stringify({
-    qa: { emoji: "x", description: "q", mode: "ephemeral", access: { roles: ["*"] }, runtime: { cwd: "." } },
+    qa: { emoji: "x", description: "q", mode: "persistent", access: { roles: ["*"] }, runtime: { cwd: "." } },
   }))
 
   expect(loadConfigs(dir).hub.conversationDbFile).toBe(join(homedir(), "custom.sqlite"))
@@ -79,7 +79,7 @@ test("rejects an enabled federation block with a malformed listenAddr", () => {
     federation: { enabled: true, name: "bravo", listenAddr: "no-port", peers: {} },
   }))
   writeFileSync(join(dir, "agents.json"), JSON.stringify({
-    qa: { emoji: "💡", description: "q", mode: "ephemeral", access: { roles: ["*"] }, runtime: { cwd: "." } },
+    qa: { emoji: "💡", description: "q", mode: "persistent", access: { roles: ["*"] }, runtime: { cwd: "." } },
   }))
   expect(() => loadConfigs(dir)).toThrow(/listenAddr/)
 })
@@ -93,7 +93,7 @@ test("rejects a federation peer missing its authKeyEnv", () => {
     federation: { enabled: true, name: "bravo", listenAddr: "127.0.0.1:9920", peers: { alpha: { addr: "10.0.0.1:9920" } } },
   }))
   writeFileSync(join(dir, "agents.json"), JSON.stringify({
-    qa: { emoji: "💡", description: "q", mode: "ephemeral", access: { roles: ["*"] }, runtime: { cwd: "." } },
+    qa: { emoji: "💡", description: "q", mode: "persistent", access: { roles: ["*"] }, runtime: { cwd: "." } },
   }))
   expect(() => loadConfigs(dir)).toThrow(/authKeyEnv/)
 })
@@ -109,4 +109,14 @@ test("rejects a defaultAgent missing from the registry", () => {
     qa: { emoji: "💡", description: "q", mode: "ephemeral", access: { roles: ["*"] }, runtime: { cwd: "." } },
   }))
   expect(() => loadConfigs(dir)).toThrow(/defaultAgent/)
+})
+
+test("rejects an ephemeral defaultAgent because canonical turns require a persistent transport", () => {
+  const dir = mkdtempSync(join(tmpdir(), "switchboard-config-"))
+  writeFileSync(join(dir, "hub.config.json"), JSON.stringify({
+    socketPath: "sock", stateDir: "state", botTokenEnv: "TOKEN", guildIds: [], routerModel: "m",
+    switchThreshold: 0.7, defaultAgent: "qa", ephemeralTimeoutMs: 1, tagStyle: "prefix", chatKeyScope: "user",
+  }))
+  writeFileSync(join(dir, "agents.json"), JSON.stringify({ qa: { emoji: "x", description: "q", mode: "ephemeral", access: { roles: ["*"] }, runtime: { cwd: "." } } }))
+  expect(() => loadConfigs(dir)).toThrow(/defaultAgent.*persistent/)
 })

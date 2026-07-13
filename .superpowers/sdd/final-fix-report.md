@@ -1,59 +1,52 @@
-# Final review fix report
+# Phase 3 consolidated final-fix report
 
 ## Outcome
 
-Addressed all five final-review areas.
+All five Important final-review findings are addressed at Phase 3 scope.
 
-- Inbound canonical surface events now persist durable fan-out deliveries to every other enabled transcript-eligible link, excluding the origin. Mixed two-way/outbound/inbound-only routing is covered.
-- Delivery rows have atomic owner/expiry leases (schema v3). Coordinators and workers claim before I/O, non-owners cannot complete a claim, and expired claims are recoverable.
-- Canonical Discord text sends include `allowedMentions: { parse: [] }` on every chunk.
-- The coordinator rejects normalized events with non-finite timestamps or blank adapter/event/location/message/author/content fields before persistence or dispatch. Adapter callback error reporting safely receives the rejection.
-- Canonical Discord capabilities remain deliberately text/reply-only. Migrated Discord channels retain rich cards, interactions, reactions, edits, and attachments through the legacy compatibility path; the architecture documentation now states this boundary explicitly.
+1. Conversation event delivery now uses the durable high-water mark only for canonical `message_committed` replay/deduplication. Live activity accepted after subscription is delivered exactly once regardless of whether a newer durable message has advanced the message cursor. Replay remains message-only and pending live events retain replay-before-live ordering.
+2. Accepted production turns now retain their originating canonical user message in a per-conversation/per-agent FIFO. Successful unique agent reply persistence publishes `completed`; dispatch refusal, dispatch exception, and agent-reply persistence failure publish one `failed` terminal. Duplicate/late callbacks do not duplicate terminal announcements. No synthetic streaming chunks were added.
+3. Same-origin navigation requests in the service worker now try the exact cache entry, `/index.html`, `/`, then the network. Existing API, SSE, non-GET, and cross-origin bypasses remain ahead of fallback, and no runtime cache writes were introduced. Offline deep conversation reload reconstructs only the shell and the already device-local draft; API reads still fail offline.
+4. Canonical primary-agent validation now accepts only persistent registry agents, matching the transports registered by production. Startup/default-agent validation and hub-config previews reject ephemeral defaults, conversation create/update reject undispatchable agents, and `/api/session` exposes only persistent selectable agents. Existing Discord migration tests remain green.
+5. Workspace loading now uses a monotonic epoch. Every new load and effect cleanup invalidates older work, and session/conversation/selection/connection/error state changes are guarded. Regressions cover old failure after new success, old success after new failure, unmount, StrictMode effect replay, API replacement, and overlapping retry/replacement.
 
-## Verification
+## Strict RED -> GREEN evidence
 
-- Focused transport/repository/gateway suite: 77 passed, 0 failed, 205 assertions.
-- Typecheck: `tsc --noEmit` exited 0.
-- Integrated composition/mirror smokes: 6 passed, 0 failed, 17 assertions.
-- Full suite: 814 passed, 0 failed, 1,996 assertions across 111 files.
-- `git diff --check`: clean.
+- Event cursor RED: `live activity below a newer durable message cursor...` and replay-reentrant activity tests omitted the `turn_state` event. GREEN: focused conversation-event suite passes 8/8.
+- Turn terminal RED: production coordinator emitted only `queued`, `working`; concurrent completion expectations were empty. GREEN: focused coordinator suite passes 20/20, including FIFO concurrent turns, duplicate reply suppression, and reply-persistence failure.
+- Navigation fallback RED: generated `sw.js` contained no navigation fallback and the build assertion failed. Offline deep-route draft reload also rendered the unavailable page. GREEN: build harness returns cached `/index.html` without network/cache writes, and focused Playwright PWA passes 2/2.
+- Agent dispatchability RED: an ephemeral `defaultAgent` loaded successfully. GREEN: config, service, API-session, and production composition regressions reject ephemeral/undispatchable names and accept persistent names.
+- Workspace epoch RED: older rejected/resolved loads could replace newer API results; offline deep-route draft recovery rendered `Switchboard is unavailable`. GREEN: App regressions cover both stale-result directions, cleanup/unmount, StrictMode, API replacement, retry overlap, and offline draft recovery.
 
-## Notes
+Focused aggregate after the final edge-case pass: 112 passed, 0 failed, 369 assertions across 8 files. Focused PWA E2E: 2 passed, 0 failed in the desktop project.
 
-The lease duration is 30 seconds. A process that remains alive but spends longer than that inside an adapter send could allow a recovery worker to retry; deterministic Discord nonces still provide adapter-side deduplication, and the lease duration is documented for future tuning/renewal if slow adapters are added.
+## Files changed
 
-## R2 follow-up
+- Production: `hub/config.ts`, `hub/conversations/events.ts`, `hub/conversations/turnCoordinator.ts`, `hub/index.ts`, `hub/webServer.ts`, `web/client/App.tsx`, `web/client/public/sw.template.js`.
+- Regression coverage: `tests/buildWeb.test.ts`, `tests/config.test.ts`, `tests/conversationEvents.test.ts`, `tests/conversationService.test.ts`, `tests/conversationWeb.test.ts`, `tests/e2e/pwa.spec.ts`, `tests/phase2CompositionSmoke.test.ts`, `tests/turnCoordinator.test.ts`, `web/client/App.test.tsx`.
 
-- Canonical web/inbound dispatch no longer awaits opportunistic surface I/O. Delivery rows are persisted first, agent dispatch happens once, and background ownership loss is reported without failing the committed turn.
-- Workers treat only `RepositoryConflictError` terminal/ownership races as another executor winning; unrelated persistence failures still escape and are reported.
-- Added a canonical-to-Discord compatibility resolver for cards, attachments, edits, reactions, and other legacy rich reply routing.
-- Malformed normalized envelopes now enter the hub audit/error reporter before rejection.
-- Shutdown remains intentionally unbounded while an adapter send is active because the adapter contract has no abort signal; this is documented rather than closing SQLite while active work can still write.
+## Fresh full phase gate
 
-R2 verification: focused coordinator/worker/rich-compatibility tests passed; `tsc --noEmit` passed; integrated composition/mirror tests passed 7/7; full suite passed 817/817 with 2,007 assertions across 112 files; `git diff --check` passed.
+Run once from a fresh shell after focused verification:
 
-## R3 follow-up
+- `bun run typecheck`: passed (`tsc --noEmit`, exit 0).
+- `bun test`: 938 passed, 0 failed, 2,397 assertions across 121 files.
+- `bun run build:web`: passed (exit 0).
+- `bun run test:e2e`: 18 passed, 15 intentionally skipped, 0 failed across desktop/tablet/mobile projects (33 discovered tests).
+- `git diff --check`: passed; only Git line-ending conversion warnings were emitted.
+- Post-gate hygiene: port 4173 had no listener; Playwright `test-results` was removed.
 
-- Canonical agent output now uses the same handled, tracked background-delivery path as web and inbound messages; callback resolution is independent of slow adapters and stale-owner completion is reported.
-- `TurnCoordinator.drainDeliveries()` is wired into shutdown after the retry worker and before adapters/database close.
-- Legacy rich Discord resolution accepts only enabled `two_way`/`outbound_only` links, chooses one deterministically by creation time/link id, safely declines unresolved canonical conversations, and preserves raw Discord channel ids.
+## Self-review
 
-R3 verification: focused/integrated suites passed 51/51; `tsc --noEmit` passed; full suite passed 820/820 with 2,032 assertions across 112 files; `git diff --check` passed.
+- Durable message replay/dedupe remains sequence-based; activity is neither persisted nor replayed.
+- Canonical agent message insertion and delivery-row creation are unchanged and still precede surface fan-out.
+- Terminal events reference the originating user message ID and sequence, which exercises the formerly broken lower-sequence interleaving.
+- API/SSE/authenticated data is not added to service-worker caches; the offline fallback uses only precached shell assets and an existing local draft.
+- Persistent-agent restrictions are applied at startup config, editable default config, canonical service composition, and session projection without changing ephemeral agents for legacy jobs/consults.
+- No Phase 4 controls, synthetic streams, browser canonical database, new service, router, or state library were introduced.
 
-## R4 follow-up
+## Concerns / explicit limitations
 
-- Added idempotent `TurnCoordinator.beginShutdown()` as an atomic no-new-turns boundary before worker stop/drain.
-- Post-boundary web, surface, and agent callbacks are controlled and cannot persist, dispatch, schedule delivery, fall through to legacy routing, or touch a closed database.
-- Background delivery cleanup uses fully handled promise branches; reporter exceptions are swallowed and covered by an unhandled-rejection regression.
-- Documentation now distinguishes reported coordinator ownership loss from deliberately ignored worker stale-owner conflicts.
-
-R4 verification: focused/integrated suites passed 43/43; `tsc --noEmit` passed; full suite passed 822/822 with 2,041 assertions across 112 files; `git diff --check` passed.
-
-## R5 follow-up
-
-- Added one shared production ingress gate, closed before coordinator shutdown.
-- Both Discord inbound paths now reject post-boundary ordinary and legacy-command events before migration, persistence, or dispatch.
-- Every agent reply kind and attachment/file/note callback is denied before legacy resolution or gateway I/O after the boundary.
-- Extracted regression counts ensure/persist/dispatch and every rich producer before/after close.
-
-R5 verification: focused/integrated suites passed 45/45; `tsc --noEmit` passed; full suite passed 823/823 with 2,063 assertions across 113 files; `git diff --check` passed.
+- Current agent transports do not return an originating canonical message correlation for ordinary text replies. Concurrent accepted turns are therefore terminally correlated in dispatch FIFO order per conversation and agent. This is deterministic and covered, but a future transport correlation field could replace FIFO if out-of-order ordinary replies become supported.
+- Offline recovery intentionally has no canonical conversation metadata or transcript: it presents the deep-route ID and the device-local draft, marks the connection offline, and still requires a successful canonical API response before a message can appear sent.
+- No unresolved architecture blocker remains for Phase 3.

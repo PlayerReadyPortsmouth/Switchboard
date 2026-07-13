@@ -17,5 +17,12 @@ self.addEventListener("fetch", event => {
   const url = new URL(event.request.url);
   if (event.request.method !== "GET" || url.origin !== self.location.origin) return;
   if (url.pathname.startsWith("/api/") || event.request.headers.get("accept")?.includes("text/event-stream")) return;
+  if (event.request.mode === "navigate") {
+    event.respondWith(caches.match(event.request)
+      .then(hit => hit ?? caches.match("/index.html"))
+      .then(hit => hit ?? caches.match("/"))
+      .then(hit => hit ?? fetch(event.request)));
+    return;
+  }
   event.respondWith(caches.match(event.request).then(hit => hit ?? fetch(event.request)));
 });

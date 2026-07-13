@@ -30,6 +30,7 @@ export function inboundLinkRoute(link: TransportLink | null | undefined): "canon
 
 export class TurnCoordinator {
   private readonly backgroundDeliveries = new Set<Promise<void>>()
+  private readonly pendingTurns = new Map<string, Message[]>()
   private closing = false
   constructor(
     private readonly service: Pick<ConversationService, "appendUserMessage" | "appendExternalMessage" | "appendAgentMessage">,
@@ -91,11 +92,20 @@ export class TurnCoordinator {
     const conversation = this.repo.getConversation(reply.chatId)
     if (!conversation) return null
     const links = this.repo.listTransportLinks(conversation.id).filter((link) => link.enabled && link.syncMode !== "inbound_only" && link.syncMode !== "notifications_only")
-    const result = this.service.appendAgentMessage({
-      id: this.id(), conversationId: conversation.id, author: reply.agent, origin: "agent", content: text,
-      replyTo: reply.replyTo, state: "completed", clientKey: `agent:${reply.agent}:${callbackId}`, createdAt: this.now(),
-    }, links)
+    const key = this.turnKey(conversation.id, reply.agent)
+    const originatingTurn = this.pendingTurns.get(key)?.[0]
+    let result: AgentTurnResult
+    try {
+      result = this.service.appendAgentMessage({
+        id: this.id(), conversationId: conversation.id, author: reply.agent, origin: "agent", content: text,
+        replyTo: reply.replyTo, state: "completed", clientKey: `agent:${reply.agent}:${callbackId}`, createdAt: this.now(),
+      }, links)
+    } catch (error) {
+      if (originatingTurn) this.finishTurn(key, originatingTurn, "failed")
+      throw error
+    }
     if (result.inserted) {
+      if (originatingTurn) this.finishTurn(key, originatingTurn, "completed")
       const replyIds = new Map<string, string>()
       if (result.message.replyTo) for (const link of links) {
         const externalId = this.repo.resolveDeliveredExternalMessageId(result.message.replyTo, link.id)
@@ -112,7 +122,10 @@ export class TurnCoordinator {
     this.turnState(message, "queued")
     const inbound: InboundMessage = { chatId: conversationId, messageId: message.id, userId, user, content: message.content, ts: new Date(message.createdAt).toISOString(), isDM: false }
     try {
-      if (this.dispatcher.dispatch(conversation.primaryAgent, conversationId, inbound)) this.turnState(message, "working")
+      if (this.dispatcher.dispatch(conversation.primaryAgent, conversationId, inbound)) {
+        this.pendingTurns.set(this.turnKey(conversationId, conversation.primaryAgent), [...(this.pendingTurns.get(this.turnKey(conversationId, conversation.primaryAgent)) ?? []), message])
+        this.turnState(message, "working")
+      }
       else this.turnState(message, "failed")
     } catch (error) {
       this.turnState(message, "failed")
@@ -154,7 +167,17 @@ export class TurnCoordinator {
     try { this.reportError(error) } catch {}
   }
 
-  private turnState(message: Message, state: "queued" | "working" | "failed"): void {
+  private turnKey(conversationId: string, agent: string): string { return `${conversationId}\0${agent}` }
+
+  private finishTurn(key: string, message: Message, state: "completed" | "failed"): void {
+    const pending = this.pendingTurns.get(key)
+    if (!pending || pending[0]?.id !== message.id) return
+    pending.shift()
+    if (!pending.length) this.pendingTurns.delete(key)
+    this.turnState(message, state)
+  }
+
+  private turnState(message: Message, state: "queued" | "working" | "completed" | "failed"): void {
     this.events.publish({ kind: "turn_state", conversationId: message.conversationId, sequence: message.sequence, ts: this.now(), state, detail: { messageId: message.id } })
   }
 }

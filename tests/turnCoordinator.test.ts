@@ -153,6 +153,35 @@ describe("TurnCoordinator", () => {
     expect(f.repo.listDueDeliveries(999)).toHaveLength(0)
   })
 
+  test("production coordinator publishes queued working completed for an accepted reply", async () => {
+    const f = fixture()
+    const submitted = await f.coordinator.submitWebTurn("owner", f.conversation.id, { content: "question", clientKey: "terminal" })
+    await f.coordinator.acceptAgentReply({ agent: "architect", kind: "reply", chatId: f.conversation.id, text: "answer", correlationId: "terminal-reply" })
+    expect(f.events.filter(event => event.kind === "turn_state").map(event => [event.state, event.detail?.messageId])).toEqual([
+      ["queued", submitted.message.id], ["working", submitted.message.id], ["completed", submitted.message.id],
+    ])
+  })
+
+  test("concurrent turns complete once in dispatch order and duplicate replies do not repeat terminals", async () => {
+    const f = fixture()
+    const first = await f.coordinator.submitWebTurn("owner", f.conversation.id, { content: "one", clientKey: "one" })
+    const second = await f.coordinator.submitWebTurn("owner", f.conversation.id, { content: "two", clientKey: "two" })
+    const reply = { agent: "architect", kind: "reply" as const, chatId: f.conversation.id, text: "answer one", correlationId: "one-reply" }
+    await f.coordinator.acceptAgentReply(reply)
+    await f.coordinator.acceptAgentReply(reply)
+    await f.coordinator.acceptAgentReply({ ...reply, text: "answer two", correlationId: "two-reply" })
+    expect(f.events.filter(event => event.kind === "turn_state" && event.state === "completed").map(event => event.detail?.messageId)).toEqual([first.message.id, second.message.id])
+  })
+
+  test("publishes one failed terminal when an accepted reply cannot be persisted", async () => {
+    const f = fixture()
+    const submitted = await f.coordinator.submitWebTurn("owner", f.conversation.id, { content: "question", clientKey: "persist-failure" })
+    const failure = new Error("append failed")
+    ;(f.service as any).appendAgentMessage = () => { throw failure }
+    await expect(f.coordinator.acceptAgentReply({ agent: "architect", kind: "reply", chatId: f.conversation.id, text: "answer", correlationId: "failed-reply" })).rejects.toBe(failure)
+    expect(f.events.filter(event => event.kind === "turn_state" && ["completed", "failed"].includes(event.state!)).map(event => [event.state, event.detail?.messageId])).toEqual([["failed", submitted.message.id]])
+  })
+
   test("resolves a canonical parent through the repository and router for Discord threading", async () => {
     const repo = new SqliteConversationRepository(new Database(":memory:"))
     let now = 10

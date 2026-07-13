@@ -94,6 +94,6 @@ export class ConversationEventStream {
   private shouldDeliver(subscription: Subscription, event: ConversationEvent): boolean {
     return event.kind === "message_committed"
       ? event.sequence > subscription.highWaterMark
-      : event.sequence >= subscription.highWaterMark
+      : true
   }
 }

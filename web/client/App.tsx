@@ -241,6 +241,7 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, st
   const dialogInvokerRef = useRef<HTMLElement | null>(null)
   const [focusRequest, setFocusRequest] = useState<FocusRequest | null>(null)
   const [pwaState, setPwaState] = useState<PwaState>(() => pwa?.state() ?? { installAvailable: false, online: true, issue: null })
+  const loadEpochRef = useRef(0)
 
   useEffect(() => pwa?.subscribe(setPwaState), [pwa])
 
@@ -258,22 +259,50 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, st
   }, [focusRequest])
 
   const load = useCallback(async () => {
+    const epoch = ++loadEpochRef.current
+    const current = () => loadEpochRef.current === epoch
     setLoadState("loading")
     try {
       const [session, conversations] = await Promise.all([api.session(), api.listConversations()])
+      if (!current()) return
       dispatch({ type: "session/loaded", session })
+      if (!current()) return
       dispatch({ type: "conversations/loaded", conversations })
+      if (!current()) return
       dispatch({ type: "conversation/selected", conversationId: conversationIdFromLocation() })
+      if (!current()) return
       dispatch({ type: "connection/changed", connection: "live" })
+      if (!current()) return
       setLoadState("ready")
     } catch (error) {
+      if (!current()) return
+      const offlineConversationId = conversationIdFromLocation()
+      if (pwa?.state().online === false && offlineConversationId && drafts.read(offlineConversationId)) {
+        const now = Date.now()
+        dispatch({ type: "session/loaded", session: { identity: "", agents: [] } })
+        if (!current()) return
+        dispatch({ type: "conversations/loaded", conversations: [{
+          id: offlineConversationId, title: offlineConversationId, primaryAgent: "", createdBy: "", createdAt: now, updatedAt: now, archivedAt: null,
+        }] })
+        if (!current()) return
+        dispatch({ type: "conversation/selected", conversationId: offlineConversationId })
+        if (!current()) return
+        dispatch({ type: "connection/changed", connection: "offline" })
+        if (!current()) return
+        setLoadState("ready")
+        return
+      }
       const forbidden = error instanceof ApiError && (error.status === 401 || error.status === 403 || error.code === "missing_identity")
       setLoadState(forbidden ? "forbidden" : "unavailable")
+      if (!current()) return
       dispatch({ type: "connection/changed", connection: "offline" })
     }
-  }, [api])
+  }, [api, drafts, pwa])
 
-  useEffect(() => { void load() }, [load])
+  useEffect(() => {
+    void load()
+    return () => { loadEpochRef.current++ }
+  }, [load])
   useEffect(() => {
     const onPopState = () => {
       const conversationId = conversationIdFromLocation()

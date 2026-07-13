@@ -2118,7 +2118,7 @@ const conversationRepo = new SqliteConversationRepository(conversationDb)
 const legacyDiscordCompatibility = new LegacyDiscordCompatibilityRouter(conversationRepo, gateway)
 resolveLegacyDiscordChatId = chatId => legacyDiscordCompatibility.resolveChatId(chatId)
 const conversationEvents = new ConversationEventStream((id, after, limit) => conversationRepo.listMessages(id, after, limit))
-const conversationService = new ConversationService(conversationRepo, () => Date.now(), () => randomUUID(), conversationEvents, name => Object.hasOwn(agents, name))
+const conversationService = new ConversationService(conversationRepo, () => Date.now(), () => randomUUID(), conversationEvents, name => agents[name]?.mode === "persistent")
 ensureDiscordConversation = createDiscordConversationMigrator({
   repo: conversationRepo,
   now: () => Date.now(),
@@ -2329,8 +2329,8 @@ const webDeps: WebDeps = {
   previewHubConfigChange: async (config) => {
     const excluded = excludedHubConfigKeyPresent(config)
     if (excluded) return { error: `cannot edit excluded field: ${excluded}` }
-    if (typeof config.defaultAgent !== "string" || !agents[config.defaultAgent]) {
-      return { error: "defaultAgent must name an existing agent" }
+    if (typeof config.defaultAgent !== "string" || agents[config.defaultAgent]?.mode !== "persistent") {
+      return { error: "defaultAgent must name a persistent agent" }
     }
     const current = readHubConfig()
     // Re-attach the excluded keys' real current values onto the proposed config —

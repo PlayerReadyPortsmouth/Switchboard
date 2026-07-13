@@ -55,6 +55,13 @@ test("accepts only configured primary agents on create and update", () => {
   expect(() => service.update("owner", c.id, { primaryAgent: "unknown" })).toThrow(ConversationValidationError)
 })
 
+test("rejects a registered but undispatchable primary agent", () => {
+  const repo = new SqliteConversationRepository(new Database(":memory:"))
+  const service = new ConversationService(repo, () => 1, () => "id", undefined, name => name === "persistent")
+  expect(() => service.create("owner", { title: "Bad", primaryAgent: "ephemeral" })).toThrow(ConversationValidationError)
+  expect(service.create("owner", { title: "Good", primaryAgent: "persistent" }).primaryAgent).toBe("persistent")
+})
+
 test("authorizes conversation updates before validating the agent registry", () => {
   const repo = new SqliteConversationRepository(new Database(":memory:"))
   let registryChecks = 0

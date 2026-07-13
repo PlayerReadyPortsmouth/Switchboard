@@ -33,7 +33,10 @@ test("conversation routes require identity and create a conversation", async () 
 test("workspace session uses the configured trusted header and exposes status-safe agents", async () => {
   const response = await handleWebRequest(new Request("http://x/api/session", { headers: { "x-auth-user": "ada@example.com" } }), deps({
     requireUser: req => req.headers.get("x-auth-user"),
-    collect: () => ({ now: 1, startedAt: 0, status: { now: 1, agents: [{ name: "qa", emoji: "Q", alive: true, busy: false, mode: "persistent", queueDepth: 0, fillPct: 0, lastActivityMs: 1 }], overseers: [], routes: [], routeRate10m: 0, ephemerals: [] }, audit: { total: 0, byKind: {}, byOutcome: {}, costUsd: 0, actors: 0 }, recent: [], pendingApprovals: 0, pendingApprovalList: [] }),
+    collect: () => ({ now: 1, startedAt: 0, status: { now: 1, agents: [
+      { name: "qa", emoji: "Q", alive: true, busy: false, mode: "persistent", queueDepth: 0, fillPct: 0, lastActivityMs: 1 },
+      { name: "temp", emoji: "T", alive: true, busy: false, mode: "ephemeral", queueDepth: 0, fillPct: 0, lastActivityMs: 1 },
+    ], overseers: [], routes: [], routeRate10m: 0, ephemerals: [] }, audit: { total: 0, byKind: {}, byOutcome: {}, costUsd: 0, actors: 0 }, recent: [], pendingApprovals: 0, pendingApprovalList: [] }),
   }))
   expect(response.status).toBe(200)
   expect(await response.json()).toEqual({ identity: "ada@example.com", agents: [{ name: "qa", alive: true, busy: false }] })

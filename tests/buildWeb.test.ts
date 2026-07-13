@@ -23,12 +23,14 @@ function serviceWorkerHarness(source: string) {
   const cachedRequests: string[] = []
   const deleted: string[] = []
   let claimed = 0
+  const hits = new Map<string, Response>()
+  const networkRequests: string[] = []
   const cache = { addAll: async (assets: string[]) => { added.push(assets) }, put: async (request: Request) => { cachedRequests.push(request.url) } }
   const caches = {
     open: async () => cache,
     keys: async () => ["switchboard-shell-old", "unrelated-cache"],
     delete: async (name: string) => { deleted.push(name); return true },
-    match: async () => undefined,
+    match: async (request: Request | string) => hits.get(typeof request === "string" ? request : request.url),
   }
   const self = {
     location: { origin: "https://switchboard.test" },
@@ -36,9 +38,9 @@ function serviceWorkerHarness(source: string) {
     skipWaiting: async () => {},
     addEventListener: (type: string, listener: (event: any) => void) => listeners.set(type, listener),
   }
-  const network = async (request: Request) => new Response(request.url)
+  const network = async (request: Request) => { networkRequests.push(request.url); return new Response(request.url) }
   new Function("self", "caches", "fetch", source)(self, caches, network)
-  return { listeners, added, cachedRequests, deleted, claimed: () => claimed }
+  return { listeners, added, cachedRequests, deleted, claimed: () => claimed, networkRequests, setCached: (key: string, response: Response) => hits.set(key, response) }
 }
 
 describe("PWA build", () => {
@@ -129,5 +131,19 @@ describe("PWA build", () => {
     expect(dispatch(new Request("https://switchboard.test/index.html"))).toBeInstanceOf(Promise)
     await dispatch(new Request("https://switchboard.test/conversations/private"))
     expect(harness.cachedRequests).toEqual([])
+  })
+
+  test("navigation requests fall back to the cached shell without caching authenticated responses", async () => {
+    build()
+    const source = await Bun.file(`${outdir}/sw.js`).text()
+    const harness = serviceWorkerHarness(source)
+    harness.setCached("/index.html", new Response("cached shell"))
+    let response!: Promise<Response>
+    const request = { url: "https://switchboard.test/conversations/deep", method: "GET", mode: "navigate", headers: new Headers() } as Request
+    harness.listeners.get("fetch")!({ request, respondWith: (value: Promise<Response>) => { response = value } })
+    expect(await (await response).text()).toBe("cached shell")
+    expect(harness.networkRequests).toEqual([])
+    expect(harness.cachedRequests).toEqual([])
+    expect(source).not.toContain("cache.put(")
   })
 })

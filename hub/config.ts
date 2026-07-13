@@ -61,6 +61,9 @@ export function loadConfigs(dir: string): { hub: HubConfig; agents: AgentRegistr
   if (!agents[hub.defaultAgent]) {
     throw new Error(`config: defaultAgent "${hub.defaultAgent}" is not in the agent registry`)
   }
+  if (agents[hub.defaultAgent].mode !== "persistent") {
+    throw new Error(`config: defaultAgent "${hub.defaultAgent}" must name a persistent agent`)
+  }
   for (const [name, cfg] of Object.entries(agents)) {
     if (cfg.mode !== "persistent" && cfg.mode !== "ephemeral") {
       throw new Error(`config: agent "${name}" has invalid mode "${cfg.mode}"`)

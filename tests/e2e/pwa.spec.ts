@@ -28,15 +28,18 @@ test("manifest and generated icons expose installable metadata", async ({ page, 
   }
 })
 
-test("active service worker reloads the cached shell offline while APIs fail", async ({ page, context }) => {
+test("active service worker reloads a deep conversation URL with its draft while APIs fail", async ({ page, context }) => {
   await page.goto("/")
+  await page.getByRole("button", { name: /Design review/ }).click()
+  await page.getByRole("textbox", { name: "Message" }).fill("offline deep-link draft")
+  await expect(page).toHaveURL(/\/conversations\//)
   await page.evaluate(async () => { await navigator.serviceWorker.ready })
   await page.reload()
   await expect.poll(() => page.evaluate(() => Boolean(navigator.serviceWorker.controller))).toBe(true)
   await context.setOffline(true)
   await page.reload()
   await expect(page).toHaveTitle("Switchboard")
-  await expect(page.getByRole("heading", { name: "Switchboard is unavailable" })).toBeVisible()
+  await expect(page.getByRole("textbox", { name: "Message" })).toHaveValue("offline deep-link draft")
   const apiFailed = await page.evaluate(async () => {
     try { await fetch("/api/conversations"); return false } catch { return true }
   })

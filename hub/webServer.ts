@@ -148,7 +148,7 @@ export async function handleWebRequest(
     if (sessionMatch && method === "GET") {
       return json({
         identity: email,
-        agents: deps.collect().status.agents.map(({ name, alive, busy }) => ({ name, alive, busy })),
+        agents: deps.collect().status.agents.filter(({ mode }) => mode === "persistent").map(({ name, alive, busy }) => ({ name, alive, busy })),
       })
     }
 

@@ -101,3 +101,24 @@ test("live activity at the committed message sequence is delivered while replay 
   expect(live).toEqual(["message_committed", "queued", "working", "failed"])
   expect(replay).toEqual(["message_committed"])
 })
+
+test("live activity below a newer durable message cursor is still delivered once", () => {
+  const stream = new ConversationEventStream(() => [])
+  const seen: string[] = []
+  stream.subscribe("c1", 0, event => seen.push(`${event.kind}:${event.sequence}:${event.state ?? ""}`))
+  stream.publish({ kind: "message_committed", conversationId: "c1", sequence: 2, ts: 20, message: message(2) })
+  stream.publish({ kind: "turn_state", conversationId: "c1", sequence: 1, ts: 21, state: "completed" })
+  expect(seen).toEqual(["message_committed:2:", "turn_state:1:completed"])
+})
+
+test("activity published reentrantly during replay follows the replayed messages without sequence filtering", () => {
+  let stream!: ConversationEventStream
+  const history = [message(2)]
+  stream = new ConversationEventStream(() => {
+    stream.publish({ kind: "turn_state", conversationId: "c1", sequence: 1, ts: 21, state: "completed" })
+    return history
+  })
+  const seen: string[] = []
+  stream.subscribe("c1", 0, event => seen.push(`${event.kind}:${event.sequence}`))
+  expect(seen).toEqual(["message_committed:2", "turn_state:1"])
+})
