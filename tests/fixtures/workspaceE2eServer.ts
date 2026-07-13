@@ -26,6 +26,15 @@ service.appendAgentMessage({
   content: "Yes. I have the responsive navigation notes ready.", state: "completed", createdAt: now(),
 }, [])
 
+const longTranscript = service.create(IDENTITY, { title: "Long transcript", primaryAgent: "architect" })
+for (let index = 1; index <= 36; index++) {
+  service.appendAgentMessage({
+    id: nextId(), conversationId: longTranscript.id, author: index % 2 ? "architect" : IDENTITY,
+    origin: index % 2 ? "agent" : "web", content: `Canonical history message ${index}`,
+    state: index % 2 ? "completed" : "committed", createdAt: now(),
+  }, [])
+}
+
 const dashboard = (): WebInput => ({
   now: clock,
   startedAt: clock - 1_000,
@@ -147,6 +156,7 @@ async function fixtureRoute(request: Request): Promise<Response | null> {
 const server = Bun.serve({
   hostname: HOST,
   port: PORT,
+  idleTimeout: 0,
   async fetch(request) {
     const fixture = await fixtureRoute(request)
     if (fixture) return fixture

@@ -66,3 +66,49 @@ Playwright totals:
 ## Concerns
 
 No blocking concern remains. The PWA cases intentionally execute once in the desktop project; responsive behavior is separately covered in every configured viewport.
+
+## Controller review follow-up
+
+Two controller-review Important findings were remediated TDD-first.
+
+### Desktop viewport containment
+
+Root-cause investigation confirmed that the desktop shell had only `min-height: 100dvh` and no constrained grid row. A long transcript therefore expanded the grid's min-content row and the document; `.transcript-body` never received a bounded height despite declaring `overflow: auto`.
+
+- RED: with a deterministic 36-message canonical conversation created through `ConversationService`, the desktop composer bottom was `3734.5px` in the exact `1440×1000` project, failing the `<= 1000px` assertion.
+- GREEN: the desktop-only shell now uses `height: 100dvh`, `min-height: 0`, and `grid-template-rows: minmax(0, 1fr)`.
+- The E2E regression proves body/document height equals the 1000px viewport, the composer is fully visible, transcript content exceeds the transcript body's client height, and changing `.transcript-body.scrollTop` produces real internal scrolling. It does not hide or clip inaccessible transcript content.
+- Tablet/mobile positioning remains unchanged; mobile additionally asserts both body and document stay within its viewport.
+
+### Open-state accessibility
+
+- Added whole-page Axe scans after the New conversation dialog is visibly open and after the tablet inspector drawer is visibly open.
+- Both states assert zero serious/critical violations.
+- Existing modal/drawer focus-boundary, Escape, and trigger-focus-return assertions remain in the focused and full gates.
+
+The longer accessibility run exposed Bun's default 10-second idle request timeout on SSE. The loopback-only E2E fixture now sets `idleTimeout: 0`, leaving Playwright/page teardown as the deterministic SSE lifecycle owner and removing the timeout warning.
+
+### Follow-up verification
+
+Focused verification:
+
+- `bun test web/client/App.test.tsx` — 31 passed, 0 failed, 99 expectations.
+- Desktop responsive/containment, tablet keyboard/open-state Axe, and mobile containment E2E selection — 6 passed, 6 intentional project skips, 0 failed.
+
+Full phase gate, run once after focused verification:
+
+1. `bun run typecheck` — exit 0.
+2. `bun test` — 924 passed, 0 failed, 2370 expectations across 121 files.
+3. `bun run build:web` — exit 0.
+4. `bun run test:e2e` — 17 passed, 16 intentional project skips, 0 failed across 33 discovered cases.
+5. `git diff --check` — exit 0; no whitespace errors (line-ending notices only).
+
+Updated Playwright totals:
+
+- Desktop: 8 passed, 3 skipped.
+- Tablet: 5 passed, 6 skipped.
+- Mobile: 4 passed, 7 skipped.
+- PWA spec: 2 passed on desktop, 4 intentionally skipped on tablet/mobile.
+- Aggregate: 17 passed, 16 skipped, 0 failed.
+
+No blocking controller-review concern remains.

@@ -92,6 +92,10 @@ test("responsive panes, drawers, touch targets, and overflow follow the project 
     expect(await page.evaluate(() => [...document.styleSheets].some(sheet =>
       [...sheet.cssRules].some(rule => rule.cssText.includes("safe-area-inset-bottom")),
     ))).toBe(true)
+    expect(await page.evaluate(() => ({
+      body: document.body.scrollHeight <= window.innerHeight,
+      document: document.documentElement.scrollHeight <= window.innerHeight,
+    }))).toEqual({ body: true, document: true })
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
     return
   }
@@ -123,6 +127,32 @@ test("responsive panes, drawers, touch targets, and overflow follow the project 
   await close.click()
   await expect(inspector).toBeHidden()
   if (testInfo.project.name === "tablet") await expect(toggle).toBeFocused()
+})
+
+test("desktop contains the document and scrolls long history inside the transcript", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "Desktop grid containment is breakpoint-specific")
+  await page.goto("/")
+  await openConversation(page, "Long transcript")
+  const composer = page.locator(".composer-shell")
+  const composerBox = await composer.boundingBox()
+  expect(composerBox).not.toBeNull()
+  expect(composerBox!.y + composerBox!.height).toBeLessThanOrEqual(1000)
+  expect(await page.evaluate(() => ({
+    body: document.body.scrollHeight,
+    document: document.documentElement.scrollHeight,
+    viewport: window.innerHeight,
+  }))).toEqual({ body: 1000, document: 1000, viewport: 1000 })
+
+  const transcriptBody = page.locator(".transcript-body")
+  const before = await transcriptBody.evaluate(element => ({
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+    scrollTop: element.scrollTop,
+  }))
+  expect(before.scrollHeight).toBeGreaterThan(before.clientHeight)
+  expect(before.scrollTop).toBe(0)
+  await transcriptBody.evaluate(element => { element.scrollTop = element.scrollHeight })
+  expect(await transcriptBody.evaluate(element => element.scrollTop)).toBeGreaterThan(0)
 })
 
 test("keyboard focus returns from dialogs and drawers, and composer honors Enter semantics", async ({ page }, testInfo) => {
@@ -164,6 +194,29 @@ test("keyboard focus returns from dialogs and drawers, and composer honors Enter
   await expect(composer).toHaveValue("line one\nline two")
   await page.keyboard.press("Enter")
   await expect(page.getByText("line one\nline two", { exact: true })).toHaveCount(1)
+})
+
+test("open conversation modal and tablet inspector have no serious or critical Axe violations", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "tablet", "Overlay accessibility is exercised at the tablet drawer breakpoint")
+  await page.goto("/")
+  const newConversation = page.getByRole("button", { name: "New conversation" })
+  await newConversation.click()
+  const dialog = page.getByRole("dialog", { name: "New conversation" })
+  await expect(dialog).toBeVisible()
+  const modalResults = await new AxeBuilder({ page }).analyze()
+  expect(modalResults.violations.filter(violation => violation.impact === "serious" || violation.impact === "critical")).toEqual([])
+  await page.keyboard.press("Escape")
+  await expect(newConversation).toBeFocused()
+
+  await openConversation(page, "Design review")
+  const details = page.getByRole("button", { name: "Conversation details", exact: true })
+  await details.click()
+  const inspector = page.getByRole("region", { name: "Conversation inspector" })
+  await expect(inspector).toBeVisible()
+  const drawerResults = await new AxeBuilder({ page }).analyze()
+  expect(drawerResults.violations.filter(violation => violation.impact === "serious" || violation.impact === "critical")).toEqual([])
+  await page.keyboard.press("Escape")
+  await expect(details).toBeFocused()
 })
 
 test("conversation list and transcript have no serious or critical Axe violations", async ({ page }) => {
