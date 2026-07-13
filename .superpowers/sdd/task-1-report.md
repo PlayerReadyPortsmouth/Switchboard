@@ -136,3 +136,39 @@ Result: exit 0; no whitespace errors. Git only emitted existing LF-to-CRLF worki
 - Bun 1.3.14 cannot build the brief's root-absolute source manifest/icon links from worktree-local inputs. With parent approval, Task 1 uses `./manifest.webmanifest` and `./icons/icon-192.png` in source plus `publicPath: "/"`. Bun emits root-safe but content-hashed paths such as `/manifest-<hash>.webmanifest` and `/icon-192-<hash>.png`.
 - Task 6 must replace the temporary manifest/icon set, implement the production 192/512/maskable assets and public-file copying, and restore exact stable output URLs `/manifest.webmanifest` and `/icons/icon-192.png`.
 - Bun currently emits JS/CSS and the compatibility assets at the output root, so the handler serves them correctly but the `/assets/*` and `/icons/*` immutable-cache rule does not apply to those emitted filenames. Task 6/build naming should reconcile stable PWA paths and hashed asset directories.
+
+## Review fix: remove broken temporary manifest icon reference
+
+Review verified that the temporary source manifest advertised `/icons/icon-192.png`, while Bun emits the HTML favicon input as a root-level hashed file such as `/icon-192-<hash>.png`. The temporary manifest now omits `icons` entirely. The HTML favicon source input and native build behavior are unchanged; Task 6 still owns the final production manifest and icon declarations.
+
+### Review-fix RED
+
+Command:
+
+```powershell
+bun test tests/buildWeb.test.ts
+```
+
+Result: `0 pass, 1 fail, 5 expect() calls`. The new emitted-manifest assertion expected `manifest.icons` to be undefined but received the broken `/icons/icon-192.png` entry.
+
+### Review-fix GREEN and verification
+
+```powershell
+bun test tests/buildWeb.test.ts
+```
+
+Result: `1 pass, 0 fail, 5 expect() calls`.
+
+```powershell
+bun run build:web
+```
+
+Result: exit 0. The emitted hashed `.webmanifest` contains no `icons` property.
+
+```powershell
+bun run typecheck
+```
+
+Result: exit 0; `tsc --noEmit` reported no diagnostics.
+
+Review-fix self-review found no changes outside `tests/buildWeb.test.ts`, `web/client/manifest.webmanifest`, and this report. The emitted temporary manifest no longer advertises a nonexistent asset, while the favicon remains available through the HTML link. Remaining Task 6 concerns are unchanged.
