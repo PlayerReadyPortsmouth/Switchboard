@@ -9,7 +9,7 @@ Implemented the typed browser API, durable local draft lifecycle, gap-first conv
 - Added client-owned conversation/session/message/link/event types.
 - Added `WorkspaceApi` with all required methods, encoded conversation IDs, JSON request headers, message idempotency headers, and safe `ApiError` handling for non-2xx responses.
 - Added `DraftStore` using `switchboard:draft:<conversationId>`, persistent client keys, change-only key rotation, empty-text deletion, and late-response-safe `markSent` behavior.
-- Added `ConversationStream` with injected gap fetch, EventSource, online state, and timers; gap-first initial/reconnect ordering; durable message-only cursors; explicit connection states; bounded retry delays; generation-based stale-work cancellation; and deterministic timer/source cleanup.
+- Added `ConversationStream` with injected gap fetch, EventSource, online state/subscription, and timers; gap-first initial/reconnect ordering; durable message-only cursors; explicit connection states; bounded retry delays; generation-based stale-work cancellation; and deterministic timer/listener/source cleanup.
 - Added `workspaceReducer` with message ID deduplication, sequence ordering, and conversation-selection cleanup of prior transcript/activity state.
 - Split live activity delivery from the durable message high-water mark so same-sequence queued/working/failed events remain live while reconnect replay remains canonical-message-only.
 
@@ -39,17 +39,35 @@ Lifecycle GREEN command:
 
 Lifecycle GREEN result: exit 0; 8 pass, 0 fail, 16 assertions.
 
+Review follow-up RED command:
+
+`bun test web/client/conversationStream.test.ts`
+
+Review follow-up RED result: exit 1; 8 pass, 3 fail. The offline stream had no online callback, `stop()` removed no connectivity listener, and synchronous `onMessages` stop still opened `/events?after=1`.
+
+Online-flap RED command:
+
+`bun test web/client/conversationStream.test.ts`
+
+Online-flap RED result: exit 1; 11 pass, 1 fail. A late error from the closed EventSource scheduled a reconnect timer during the online gap fetch; the strengthened regression also proved stale callbacks must remain inert after the replacement source opens.
+
+Review follow-up GREEN command:
+
+`bun test web/client/conversationStream.test.ts`
+
+Review follow-up GREEN result: exit 0; 12 pass, 0 fail, 24 assertions.
+
 Final focused command:
 
 `bun test web/client/api.test.ts web/client/drafts.test.ts web/client/conversationStream.test.ts tests/conversationEvents.test.ts`
 
-Final focused result: exit 0; 22 pass, 0 fail, 50 assertions.
+Final focused result: exit 0; 26 pass, 0 fail, 58 assertions.
 
 ## Verification commands
 
 - `bun run typecheck` — exit 0; `tsc --noEmit` completed without diagnostics.
 - `bun run build:web` — exit 0.
-- `bun test` — exit 0; 852 pass, 0 fail, 2147 assertions across 118 files.
+- `bun test` — exit 0; 856 pass, 0 fail, 2155 assertions across 118 files.
 - `git diff --check` — exit 0; no whitespace errors (Git only reported the repository's LF-to-CRLF checkout warning).
 
 ## Files changed
@@ -71,8 +89,10 @@ Final focused result: exit 0; 22 pass, 0 fail, 50 assertions.
 - Gap-first ordering is enforced both at initial start and every reconnect; SSE opens only after the durable history fetch and uses the post-gap cursor.
 - Only canonical `message_committed` events with a message advance the stream cursor. Turn/activity events remain visible without moving the reconnect boundary.
 - Reducer transcript ownership deduplicates history/SSE overlap by message ID and sorts by sequence.
-- Offline errors close the source, emit `offline`, and do not enqueue a reconnect; online failures emit `reconnecting` and use bounded delays `[1000, 2000, 5000, 10000]`.
-- A single reconnect timer is allowed, `stop()` closes/clears owned resources, and generation checks prevent slow stopped work from leaking into a newer selection.
+- Offline errors close the source, emit `offline`, and own one injected online listener; the online event removes that listener, emits `reconnecting`, fetches the durable gap, and only then opens SSE. Online failures use bounded delays `[1000, 2000, 5000, 10000]`.
+- A single reconnect timer/listener/in-flight connection is allowed. `stop()` closes or clears every owned source, timer, and listener; generation checks before and after gap delivery prevent slow or synchronous stopped work from leaking into a newer selection.
+- One-shot online callbacks and the in-flight generation guard prevent repeated online events or late closed-source errors from creating duplicate timers, gap fetches, or EventSources.
+- Per-EventSource attempt tokens suppress stale open/message/error callbacks both during recovery and after a replacement source becomes current.
 - Draft client keys survive retries and unchanged writes; `markSent` cannot erase newer typing after a late successful response.
 - API errors expose only JSON `{ error }` codes or the safe fallback `request_failed`; raw proxy/HTML bodies are not exposed.
 - Server replay remains history/message-only, duplicate committed messages remain suppressed by the durable high-water mark, and live same-sequence queued/working/failed states are delivered.

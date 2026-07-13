@@ -59,6 +59,7 @@ test("offline errors close the source without scheduling a reconnect", async () 
     fetchGap: async () => [],
     open: (_url, value) => (sourceHandlers = value, { close: () => { closed++ } }),
     online: () => false,
+    subscribeOnline: () => () => {},
     setTimer: () => (++timers),
     clearTimer: () => {},
   })
@@ -67,6 +68,84 @@ test("offline errors close the source without scheduling a reconnect", async () 
   expect(closed).toBe(1)
   expect(timers).toBe(0)
   expect(states).toEqual(["connecting", "offline"])
+})
+
+test("an online event resumes offline streams gap-first exactly once and releases its listener", async () => {
+  let sourceHandlers!: EventSourceHandlers
+  let online = false
+  let onlineListener!: () => void | Promise<void>
+  let listeners = 0
+  let removals = 0
+  const order: string[] = []
+  const stream = new ConversationStream({
+    fetchGap: async after => (order.push(`gap:${after}`), []),
+    open: (_url, value) => (order.push("sse"), sourceHandlers = value, { close() {} }),
+    online: () => online,
+    subscribeOnline: callback => {
+      listeners++
+      onlineListener = callback
+      return () => { removals++ }
+    },
+  })
+  await stream.start("c1", 3, { ...handlers, onState: state => order.push(state) })
+  order.length = 0
+
+  sourceHandlers.error()
+  online = true
+  order.push("online")
+  await onlineListener()
+  await onlineListener()
+
+  expect(order).toEqual(["offline", "online", "reconnecting", "gap:3", "sse"])
+  expect(listeners).toBe(1)
+  expect(removals).toBe(1)
+})
+
+test("a late source error cannot race an online gap recovery", async () => {
+  let sourceHandlers!: EventSourceHandlers
+  let online = false
+  let onlineListener!: () => void | Promise<void>
+  let resolveRecovery!: (messages: Message[]) => void
+  const recoveryGap = new Promise<Message[]>(resolve => { resolveRecovery = resolve })
+  let gaps = 0
+  let timers = 0
+  let sources = 0
+  const stream = new ConversationStream({
+    fetchGap: async () => ++gaps === 1 ? [] : recoveryGap,
+    open: (_url, value) => (sources++, sourceHandlers = value, { close() {} }),
+    online: () => online,
+    subscribeOnline: callback => (onlineListener = callback, () => {}),
+    setTimer: () => ++timers,
+    clearTimer: () => {},
+  })
+  await stream.start("c1", 0, handlers)
+  const staleHandlers = sourceHandlers
+  staleHandlers.error()
+  online = true
+  const recovery = onlineListener()
+  staleHandlers.error()
+
+  expect(timers).toBe(0)
+  resolveRecovery([])
+  await recovery
+  expect(sources).toBe(2)
+  staleHandlers.error()
+  expect(timers).toBe(0)
+})
+
+test("stop removes the owned online listener", async () => {
+  let sourceHandlers!: EventSourceHandlers
+  let removals = 0
+  const stream = new ConversationStream({
+    fetchGap: async () => [],
+    open: (_url, value) => (sourceHandlers = value, { close() {} }),
+    online: () => false,
+    subscribeOnline: () => () => { removals++ },
+  })
+  await stream.start("c1", 0, handlers)
+  sourceHandlers.error()
+  stream.stop()
+  expect(removals).toBe(1)
 })
 
 test("stop closes the source and clears a pending reconnect timer", async () => {
@@ -122,6 +201,19 @@ test("a stopped gap fetch cannot emit or open a source for a later selection", a
 
   expect(emitted).toEqual([])
   expect(opened).toEqual(["/api/conversations/c2/events?after=0"])
+})
+
+test("stopping synchronously from gap delivery prevents a stale source from opening", async () => {
+  const opened: string[] = []
+  const stream = new ConversationStream({
+    fetchGap: async () => [messageAt(1)],
+    open: url => (opened.push(url), { close() {} }),
+    online: () => true,
+  })
+
+  await stream.start("c1", 0, { ...handlers, onMessages: () => stream.stop() })
+
+  expect(opened).toEqual([])
 })
 
 test("workspaceReducer deduplicates history and SSE messages by ID and sorts by sequence", () => {
