@@ -17,7 +17,8 @@ export function Transcript({ messages, onReply }: { messages: Message[]; onReply
     <div className="transcript-record">
       {canonical.map((message, index) => {
         const previous = canonical[index - 1]
-        const grouped = Boolean(previous && previous.author === message.author && !previous.replyTo && !message.replyTo && message.createdAt - previous.createdAt <= FIVE_MINUTES)
+        const timestampDelta = previous ? message.createdAt - previous.createdAt : -1
+        const grouped = Boolean(previous && previous.author === message.author && !previous.replyTo && !message.replyTo && timestampDelta >= 0 && timestampDelta <= FIVE_MINUTES)
         return <MessageItem key={message.id} message={message} grouped={grouped} parent={message.replyTo ? byId.get(message.replyTo) : undefined} onReply={onReply} />
       })}
     </div>

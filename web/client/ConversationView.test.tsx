@@ -30,6 +30,13 @@ function draftStore(keys = ["key-1", "key-2", "key-3"]) {
   }, () => keys.shift() ?? `fallback-key-${++fallback}`, () => 123)
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason: unknown) => void
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no })
+  return { promise, resolve, reject }
+}
+
 function api(overrides: Partial<ConversationViewApi> = {}): ConversationViewApi {
   return {
     postMessage: async (_conversationId, input) => message({ id: "posted", sequence: 9, content: input.content, replyTo: input.replyTo ?? null, clientKey: input.clientKey }),
@@ -55,7 +62,7 @@ describe("canonical conversation view", () => {
     await userEvent.type(composer, "Ship it")
     await userEvent.click(screen.getByRole("button", { name: "Send message" }))
     expect((composer as HTMLTextAreaElement).value).toBe("Ship it")
-    expect(screen.getByRole("status").textContent).toContain("Message not sent")
+    expect(screen.getByRole("status", { name: "Message send status" }).textContent).toContain("Message not sent")
 
     await userEvent.click(screen.getByRole("button", { name: "Retry send" }))
     await waitFor(() => expect((composer as HTMLTextAreaElement).value).toBe(""))
@@ -209,6 +216,56 @@ describe("canonical conversation view", () => {
     expect(await screen.findByText("operator", { selector: ".transcript-header .eyebrow" })).toBeTruthy()
   })
 
+  test("restores the canonical agent, announces PATCH failure, and remains usable for retry", async () => {
+    const first = deferred<Conversation>()
+    const second = deferred<Conversation>()
+    let attempts = 0
+    render(<ConversationView api={api({ updateConversation: () => attempts++ === 0 ? first.promise : second.promise })} conversation={conversation} session={session} inspectorOpen />)
+    const selector = screen.getByRole("combobox", { name: "Primary agent" }) as HTMLSelectElement
+
+    await userEvent.selectOptions(selector, "reviewer")
+    await act(async () => first.reject(new Error("offline")))
+
+    expect(selector.value).toBe("architect")
+    expect(selector.disabled).toBe(false)
+    const error = screen.getByRole("status", { name: "Primary agent update status" })
+    expect(error.textContent).toContain("Primary agent could not be updated")
+    expect(error.getAttribute("aria-live")).toBe("polite")
+
+    await userEvent.selectOptions(selector, "reviewer")
+    await act(async () => second.resolve({ ...conversation, primaryAgent: "reviewer", updatedAt: 3 }))
+    expect(await screen.findByText("reviewer", { selector: ".transcript-header .eyebrow" })).toBeTruthy()
+    expect(error.textContent).toBe("")
+  })
+
+  test("ignores an older PATCH failure after a newer canonical success", async () => {
+    const reviewer = deferred<Conversation>()
+    const operator = deferred<Conversation>()
+    render(<ConversationView api={api({ updateConversation: (_id, input) => input.primaryAgent === "reviewer" ? reviewer.promise : operator.promise })} conversation={conversation} session={session} inspectorOpen />)
+    const selector = screen.getByRole("combobox", { name: "Primary agent" })
+
+    await userEvent.selectOptions(selector, "reviewer")
+    await userEvent.selectOptions(selector, "operator")
+    await act(async () => operator.resolve({ ...conversation, primaryAgent: "operator", updatedAt: 3 }))
+    await act(async () => reviewer.reject(new Error("late failure")))
+
+    expect(screen.getByText("operator", { selector: ".transcript-header .eyebrow" })).toBeTruthy()
+    expect(screen.getByRole("status", { name: "Primary agent update status" }).textContent).toBe("")
+  })
+
+  test("ignores PATCH failure after switching conversations", async () => {
+    const pending = deferred<Conversation>()
+    const viewApi = api({ updateConversation: () => pending.promise })
+    const { rerender } = render(<ConversationView api={viewApi} conversation={conversation} session={session} inspectorOpen />)
+    await userEvent.selectOptions(screen.getByRole("combobox", { name: "Primary agent" }), "reviewer")
+
+    rerender(<ConversationView api={viewApi} conversation={{ ...conversation, id: "c2", title: "Other conversation" }} session={session} inspectorOpen />)
+    await act(async () => pending.reject(new Error("late failure")))
+
+    expect(screen.getByRole("heading", { name: "Other conversation" })).toBeTruthy()
+    expect(screen.getByRole("status", { name: "Primary agent update status" }).textContent).toBe("")
+  })
+
   test("traps focus inside a drawer inspector", () => {
     render(<ConversationView api={api()} conversation={conversation} session={session} inspectorOpen onInspectorEscape={() => {}} />)
     const inspector = screen.getByRole("region", { name: "Conversation inspector" })
@@ -228,5 +285,30 @@ describe("canonical conversation view", () => {
     const css = await Bun.file(new URL("./styles.css", import.meta.url)).text()
     expect(css).toMatch(/\.workspace-shell:has\(\.inspector\[data-open="false"\]\)\s*\{[^}]*grid-template-columns:[^}]*0/)
     expect(css).toMatch(/\.inspector\[data-open="false"\]\s*\{[^}]*visibility:\s*hidden/)
+  })
+
+  test("groups same-author adjacent messages exactly five minutes apart", () => {
+    render(<ConversationView api={api()} conversation={conversation} messages={[message(), message({ id: "m2", sequence: 2, createdAt: 1_700_000_300_000 })]} />)
+    expect(screen.getAllByRole("article")[1].getAttribute("data-grouped")).toBe("true")
+  })
+
+  test("does not group messages over five minutes apart", () => {
+    render(<ConversationView api={api()} conversation={conversation} messages={[message(), message({ id: "m2", sequence: 2, createdAt: 1_700_000_300_001 })]} />)
+    expect(screen.getAllByRole("article")[1].getAttribute("data-grouped")).toBe("false")
+  })
+
+  test("does not group a later sequence with an earlier timestamp", () => {
+    render(<ConversationView api={api()} conversation={conversation} messages={[message(), message({ id: "m2", sequence: 2, createdAt: 1_699_999_999_999 })]} />)
+    expect(screen.getAllByRole("article")[1].getAttribute("data-grouped")).toBe("false")
+  })
+
+  test("does not group adjacent messages when the author changes", () => {
+    render(<ConversationView api={api()} conversation={conversation} messages={[message(), message({ id: "m2", sequence: 2, author: "architect", createdAt: 1_700_000_001_000 })]} />)
+    expect(screen.getAllByRole("article")[1].getAttribute("data-grouped")).toBe("false")
+  })
+
+  test("does not group adjacent replies", () => {
+    render(<ConversationView api={api()} conversation={conversation} messages={[message(), message({ id: "m2", sequence: 2, replyTo: "m1", createdAt: 1_700_000_001_000 })]} />)
+    expect(screen.getAllByRole("article")[1].getAttribute("data-grouped")).toBe("false")
   })
 })

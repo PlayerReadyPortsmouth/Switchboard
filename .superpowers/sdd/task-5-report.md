@@ -25,10 +25,10 @@ Implemented the canonical conversation transcript, text composer, live activity 
 
 ## Verification
 
-- `bun test web/client/ConversationView.test.tsx web/client/App.test.tsx` — 45 pass, 0 fail, 141 assertions.
+- `bun test web/client/ConversationView.test.tsx web/client/App.test.tsx` — 53 pass, 0 fail, 156 assertions.
 - `bun run typecheck` — exit 0 (`tsc --noEmit`).
 - `bun run build:web` — exit 0.
-- Single full-suite run: `bun test` — 900 pass, 0 fail, 2294 assertions across 120 files. The final desktop-only CSS adjustment was subsequently covered by the focused 45-test run, typecheck, and build above.
+- Review-fix full-suite run: `bun test` — 909 pass, 0 fail, 2311 assertions across 120 files.
 - `git diff --check` — exit 0; only existing LF-to-CRLF conversion warnings were emitted.
 
 ## Files
@@ -68,3 +68,13 @@ Implemented the canonical conversation transcript, text composer, live activity 
 
 - No known functional concerns.
 - Visual QA is limited to source/test inspection because the in-app browser was unavailable in this session.
+
+## Important review fixes
+
+- Primary-agent PATCH failures are no longer swallowed. The controlled selector remains on the canonical agent, a clearly named inline `aria-live="polite"` status explains the failure, and the enabled control can retry immediately.
+- Agent request generations now gate failure as well as success. An older rejected PATCH cannot roll back or announce over a newer canonical success, and a rejection from a previous conversation is ignored.
+- Transcript grouping now requires the later sequence's timestamp delta to be within the inclusive range `0..300000` milliseconds. Negative timestamps no longer group.
+- Added deferred-promise RED→GREEN coverage for failure, canonical restoration, retry success, stale failure after newer success, and failure after conversation switching.
+- Added boundary coverage for exactly five minutes, over five minutes, negative timestamp delta, changed author, and replies.
+- RED evidence: the failure/retry test could not find the required named status; the negative-delta test received `data-grouped="true"` instead of `false`.
+- GREEN evidence: focused ConversationView/App tests report 53 pass and 0 fail; typecheck and web build exit 0; the single review-fix full suite reports 909 pass and 0 fail.

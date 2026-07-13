@@ -100,6 +100,7 @@ export function ConversationView({ api, conversation: suppliedConversation, mess
   const [replyTo, setReplyTo] = useState<Message | null>(null)
   const [sending, setSending] = useState(false)
   const [sendError, setSendError] = useState("")
+  const [agentError, setAgentError] = useState("")
   const failedAttemptRef = useRef<PostMessageInput | null>(null)
   const sendingRef = useRef(false)
   const conversationIdRef = useRef(suppliedConversation.id)
@@ -120,6 +121,7 @@ export function ConversationView({ api, conversation: suppliedConversation, mess
     setSending(false)
     sendingRef.current = false
     setSendError("")
+    setAgentError("")
     failedAttemptRef.current = null
     return () => {
       conversationIdRef.current = ""
@@ -187,13 +189,15 @@ export function ConversationView({ api, conversation: suppliedConversation, mess
     if (!api.updateConversation || primaryAgent === conversation.primaryAgent) return
     const requestConversationId = conversation.id
     const request = ++agentRequestRef.current
+    setAgentError("")
     try {
       const canonical = await api.updateConversation(requestConversationId, { primaryAgent })
       if (conversationIdRef.current !== requestConversationId || request !== agentRequestRef.current) return
       setConversation(canonical)
       onConversationUpdated?.(canonical)
     } catch {
-      // Keep the canonical selection unchanged when PATCH fails.
+      if (conversationIdRef.current !== requestConversationId || request !== agentRequestRef.current) return
+      setAgentError("Primary agent could not be updated. Check the connection, then try again.")
     }
   }
 
@@ -209,7 +213,7 @@ export function ConversationView({ api, conversation: suppliedConversation, mess
       <div className="transcript-body"><Transcript messages={renderedMessages} onReply={setReplyTo} /><ActivityDisclosure events={activity} /></div>
       <Composer value={text} replyTo={replyTo} sending={sending} error={sendError} textareaRef={composerRef} onChange={changeText} onSubmit={submit} onRetry={retry} onDismissReply={() => setReplyTo(null)} />
     </section>
-    <Inspector conversation={conversation} session={session} links={links} open={inspectorOpen} closeRef={inspectorCloseRef} onClose={onCloseInspector} onEscape={onInspectorEscape} onPrimaryAgentChange={api.updateConversation ? primaryAgent => { void updatePrimaryAgent(primaryAgent) } : undefined} />
+    <Inspector conversation={conversation} session={session} links={links} primaryAgentError={agentError} open={inspectorOpen} closeRef={inspectorCloseRef} onClose={onCloseInspector} onEscape={onInspectorEscape} onPrimaryAgentChange={api.updateConversation ? primaryAgent => { void updatePrimaryAgent(primaryAgent) } : undefined} />
   </>
 }
 

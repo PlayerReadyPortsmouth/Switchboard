@@ -4,7 +4,7 @@ import type { Conversation, Session, TransportLink } from "../types"
 const syncLabels = { two_way: "Two-way sync", inbound_only: "Inbound only", outbound_only: "Outbound only", notifications_only: "Notifications only" } as const
 const formatted = (value: number) => new Date(value).toLocaleString()
 
-export function Inspector({ conversation, session, links = [], open, closeRef, onClose, onEscape, onPrimaryAgentChange }: { conversation: Conversation | null; session: Session; links?: TransportLink[]; open: boolean; closeRef?: Ref<HTMLButtonElement>; onClose(): void; onEscape?(): void; onPrimaryAgentChange?(agent: string): void }) {
+export function Inspector({ conversation, session, links = [], primaryAgentError = "", open, closeRef, onClose, onEscape, onPrimaryAgentChange }: { conversation: Conversation | null; session: Session; links?: TransportLink[]; primaryAgentError?: string; open: boolean; closeRef?: Ref<HTMLButtonElement>; onClose(): void; onEscape?(): void; onPrimaryAgentChange?(agent: string): void }) {
   const keyDown = (event: KeyboardEvent<HTMLElement>) => {
     if (event.key === "Escape" && onEscape) { event.preventDefault(); onEscape(); return }
     if (event.key !== "Tab" || !onEscape) return
@@ -23,6 +23,7 @@ export function Inspector({ conversation, session, links = [], open, closeRef, o
       {conversation ? (
         <div className="inspector-content">
         <label className="inspector-agent">Primary agent<select aria-label="Primary agent" value={conversation.primaryAgent} disabled={!onPrimaryAgentChange} onChange={event => onPrimaryAgentChange?.(event.currentTarget.value)}>{session.agents.map(agent => <option key={agent.name} value={agent.name}>{agent.name}{!agent.alive ? " — unavailable" : agent.busy ? " — busy" : ""}</option>)}</select></label>
+        <p className="inspector-error" role="status" aria-label="Primary agent update status" aria-live="polite" aria-atomic="true">{primaryAgentError}</p>
         <dl className="inspector-details">
           <div><dt>Owner</dt><dd>{conversation.createdBy}</dd></div>
           <div><dt>Workspace identity</dt><dd>{session.identity}</dd></div>

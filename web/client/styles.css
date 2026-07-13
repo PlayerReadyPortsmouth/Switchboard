@@ -164,6 +164,7 @@ button { color: inherit; }
 .inspector-content { padding-bottom: 24px; }
 .inspector-agent { display: grid; gap: 8px; margin: 18px 20px 0; color: var(--muted); font: .67rem/1 ui-monospace, SFMono-Regular, Consolas, monospace; text-transform: uppercase; letter-spacing: .08em; }
 .inspector-agent select { width: 100%; min-height: 42px; padding: 0 9px; border: 1px solid var(--line); background: var(--ink-0); color: var(--text); font-family: Inter, ui-sans-serif, system-ui, sans-serif; text-transform: none; letter-spacing: normal; }
+.inspector-error { min-height: 18px; margin: 8px 20px 0; color: var(--danger); font-size: .72rem; line-height: 1.45; }
 .inspector-details { margin: 0; padding: 12px 20px; }
 .inspector-details div { padding: 17px 0; border-bottom: 1px solid var(--line); }
 .inspector-details dt { color: var(--muted); font: .67rem/1 ui-monospace, SFMono-Regular, Consolas, monospace; text-transform: uppercase; letter-spacing: .08em; }

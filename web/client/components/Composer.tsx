@@ -36,7 +36,7 @@ export function Composer({ value, replyTo, sending, error, textareaRef, onChange
         <textarea ref={setRef} rows={1} aria-label="Message" value={value} onChange={event => onChange(event.currentTarget.value)} onKeyDown={keyDown} placeholder="Message the conversation" style={{ maxHeight: "calc(6 * 1.5em + 24px)" }} />
         <button type="button" className="send-action" disabled={sending || !value.trim()} onClick={onSubmit} aria-label="Send message">{sending ? "Sending…" : "Send"}</button>
       </div>
-      <div className="composer-status" role="status" aria-live="polite">
+      <div className="composer-status" role="status" aria-label="Message send status" aria-live="polite">
         {error ? <><span>{error}</span><button type="button" onClick={onRetry} aria-label="Retry send">Retry</button></> : sending ? <span>Sending…</span> : null}
       </div>
     </div>
