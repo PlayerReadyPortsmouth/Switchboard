@@ -46,6 +46,33 @@ test("validates creation and message input", () => {
   expect(() => service.appendUserMessage("owner", c.id, { content: "ok", clientKey: "" })).toThrow(ConversationValidationError)
 })
 
+test("owner changes the primary agent without replacing history", () => {
+  const { service, repo } = fixture()
+  const c = service.create("owner@example.com", { title: "Build", primaryAgent: "architect" })
+  const before = service.appendUserMessage("owner@example.com", c.id, { content: "hello", clientKey: "k1" })
+  const updated = service.update("owner@example.com", c.id, { primaryAgent: " qa " })
+  expect(updated).toMatchObject({ id: c.id, title: "Build", primaryAgent: "qa" })
+  expect(repo.listMessages(c.id).map(m => m.id)).toEqual([before.message.id])
+})
+
+test("viewer and member cannot change conversation ownership settings", () => {
+  const { service, repo } = fixture()
+  const c = service.create("owner@example.com", { title: "Build", primaryAgent: "architect" })
+  repo.addParticipant({ conversationId: c.id, identity: "member@example.com", kind: "user", role: "member", createdAt: 2 })
+  repo.addParticipant({ conversationId: c.id, identity: "viewer@example.com", kind: "user", role: "viewer", createdAt: 2 })
+  for (const identity of ["member@example.com", "viewer@example.com"]) {
+    expect(() => service.update(identity, c.id, { primaryAgent: "qa" })).toThrow(ConversationForbiddenError)
+  }
+})
+
+test("conversation updates reject empty patches and blank values", () => {
+  const { service } = fixture()
+  const c = service.create("owner", { title: "Build", primaryAgent: "architect" })
+  expect(() => service.update("owner", c.id, {})).toThrow(ConversationValidationError)
+  expect(() => service.update("owner", c.id, { title: " " })).toThrow(ConversationValidationError)
+  expect(() => service.update("owner", c.id, { primaryAgent: " " })).toThrow(ConversationValidationError)
+})
+
 test("validates reply targets and bounds message history pages", () => {
   const { service } = fixture()
   const first = service.create("owner", { title: "First", primaryAgent: "architect" })

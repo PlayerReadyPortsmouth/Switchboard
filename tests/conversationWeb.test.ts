@@ -15,7 +15,7 @@ function deps(overrides: Partial<WebDeps> = {}): WebDeps {
   return {
     collect: () => ({ now: 1, startedAt: 0, status: { now: 1, agents: [], overseers: [], routes: [], routeRate10m: 0, ephemerals: [] }, audit: { total: 0, byKind: {}, byOutcome: {}, costUsd: 0, actors: 0 }, recent: [], pendingApprovals: 0, pendingApprovalList: [] }),
     requireUser: req => req.headers.get("x-switchboard-user"), resolveApproval: async () => "not_found", listChannels: () => [], fetchChannelHistory: async () => [], fetchChannelTimeline: async () => [], subscribeChannel: () => () => {}, sendChannelMessage: async () => {}, runCommand: async () => null, listAgents: async () => ({}), previewAgentChange: async () => ({ error: "unused" }), confirmAgentChange: async () => ({ state: "not_found", restarted: [], fullRestart: [] }), listHubConfig: async () => ({}), previewHubConfigChange: async () => ({ error: "unused" }), confirmHubConfigChange: async () => ({ state: "not_found", fullRestart: [] }),
-    createConversation: () => conversation, listConversations: () => [conversation], getConversation: () => conversation, archiveConversation: () => conversation,
+    createConversation: () => conversation, listConversations: () => [conversation], getConversation: () => conversation, updateConversation: () => conversation, archiveConversation: () => conversation,
     appendConversationMessage: () => ({ message, inserted: true }), listConversationMessages: () => [message], addConversationLink: () => link, listConversationLinks: () => [link], subscribeConversation: () => () => {},
     ...overrides,
   }
@@ -28,6 +28,28 @@ test("conversation routes require identity and create a conversation", async () 
   const created = await handleWebRequest(req("/api/conversations", "POST", { title: "Design", primaryAgent: "architect" }), deps())
   expect(created.status).toBe(201)
   expect((await created.json()).title).toBe("Design")
+})
+
+test("workspace session uses the configured trusted header and exposes status-safe agents", async () => {
+  const response = await handleWebRequest(new Request("http://x/api/session", { headers: { "x-auth-user": "ada@example.com" } }), deps({
+    requireUser: req => req.headers.get("x-auth-user"),
+    collect: () => ({ now: 1, startedAt: 0, status: { now: 1, agents: [{ name: "qa", emoji: "Q", alive: true, busy: false, mode: "persistent", queueDepth: 0, fillPct: 0, lastActivityMs: 1 }], overseers: [], routes: [], routeRate10m: 0, ephemerals: [] }, audit: { total: 0, byKind: {}, byOutcome: {}, costUsd: 0, actors: 0 }, recent: [], pendingApprovals: 0, pendingApprovalList: [] }),
+  }))
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual({ identity: "ada@example.com", agents: [{ name: "qa", alive: true, busy: false }] })
+  expect((await handleWebRequest(new Request("http://x/api/session"), deps())).status).toBe(400)
+})
+
+test("PATCH conversation validates input and dispatches an owner update", async () => {
+  const seen: unknown[] = []
+  const d = deps({ updateConversation: (identity, id, input) => { seen.push(identity, id, input); return { ...conversation, ...input } } })
+  const response = await handleWebRequest(req("/api/conversations/c%2F1", "PATCH", { title: " Roadmap ", primaryAgent: "qa" }), d)
+  expect(response.status).toBe(200)
+  expect(seen).toEqual(["owner@example.com", "c/1", { title: " Roadmap ", primaryAgent: "qa" }])
+  for (const body of [{}, { title: 1 }, { primaryAgent: null }, { title: "ok", primaryAgent: false }]) {
+    expect((await handleWebRequest(req("/api/conversations/c1", "PATCH", body), d)).status).toBe(400)
+  }
+  expect((await handleWebRequest(new Request("http://x/api/conversations/c1", { method: "PATCH" }), d)).status).toBe(400)
 })
 
 test("conversation routes fail closed when Task 6 dependencies are not injected", async () => {
@@ -45,7 +67,7 @@ test("conversation collection and item routes dispatch decoded IDs", async () =>
   expect((await handleWebRequest(req("/api/conversations/c%2F1"), d)).status).toBe(200)
   expect((await handleWebRequest(req("/api/conversations/c%2F1", "DELETE"), d)).status).toBe(200)
   expect(seen).toEqual(["c/1", "c/1"])
-  expect((await handleWebRequest(req("/api/conversations/c%2F1", "PATCH"), d)).status).toBe(405)
+  expect((await handleWebRequest(req("/api/conversations/c%2F1", "PATCH"), d)).status).toBe(400)
 })
 
 test("posting the same Idempotency-Key returns 201 then 200 with the same message", async () => {

@@ -1,4 +1,4 @@
-import type { AppendMessageInput, Conversation, Delivery, Message, NewConversation, Participant, TransportLink } from "./types"
+import type { AppendMessageInput, Conversation, ConversationUpdate, Delivery, Message, NewConversation, Participant, TransportLink } from "./types"
 
 export class RepositoryConflictError extends Error {
   constructor(message: string) { super(message); this.name = "RepositoryConflictError" }
@@ -22,6 +22,7 @@ export interface ConversationRepository {
   createConversationWithOwner(input: NewConversation, owner: Participant): Conversation
   getConversation(id: string): Conversation | null
   listConversations(identity: string, includeArchived?: boolean): Conversation[]
+  updateConversation(id: string, changes: ConversationUpdate, now: number): Conversation
   archiveConversation(id: string, archivedAt: number): Conversation
   addParticipant(input: Participant): Participant
   getParticipant(conversationId: string, identity: string): Participant | null

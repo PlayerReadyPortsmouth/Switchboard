@@ -45,6 +45,10 @@ export function loadConfigs(dir: string): { hub: HubConfig; agents: AgentRegistr
   ) as AgentRegistry
 
   hub.discord = { ...hub.discord, enabled: hub.discord?.enabled !== false }
+  hub.webIdentityHeader = hub.webIdentityHeader?.trim() || "X-Switchboard-User"
+  if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(hub.webIdentityHeader)) {
+    throw new Error("config: webIdentityHeader must be a valid HTTP header name")
+  }
 
   hub.socketPath = expandHome(hub.socketPath)
   hub.stateDir = expandHome(hub.stateDir)

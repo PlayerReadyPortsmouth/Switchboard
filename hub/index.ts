@@ -2178,7 +2178,7 @@ function collectWeb(): WebInput {
 }
 const webDeps: WebDeps = {
   collect: collectWeb,
-  requireUser: (req) => req.headers.get("x-switchboard-user"),
+  requireUser: (req) => req.headers.get(hub.webIdentityHeader ?? "X-Switchboard-User"),
 
   resolveApproval: async (id, decision, actor) => {
     // Deliberately NOT calling the existing resolveApproval(id, decision, userId) —
@@ -2381,6 +2381,7 @@ const webDeps: WebDeps = {
   createConversation: (identity, input) => conversationService.create(identity, input),
   listConversations: (identity, includeArchived) => conversationService.list(identity, includeArchived),
   getConversation: (identity, conversationId) => conversationService.get(identity, conversationId),
+  updateConversation: (identity, conversationId, input) => conversationService.update(identity, conversationId, input),
   archiveConversation: (identity, conversationId) => conversationService.archive(identity, conversationId),
   appendConversationMessage: (identity, conversationId, input) => turnCoordinator!.submitWebTurn(identity, conversationId, input),
   listConversationMessages: (identity, conversationId, afterSequence, limit) => conversationService.history(identity, conversationId, afterSequence, limit),

@@ -22,8 +22,25 @@ test("loads and validates both files", () => {
   const { hub, agents } = loadConfigs(dir)
   expect(hub.defaultAgent).toBe("qa")
   expect(hub.discord?.enabled).toBe(true)
+  expect(hub.webIdentityHeader).toBe("X-Switchboard-User")
   expect(hub.conversationDbFile).toBeUndefined()
   expect(agents.qa.mode).toBe("ephemeral")
+})
+
+test("normalizes and validates the trusted web identity header", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sb-cfg-"))
+  const write = (webIdentityHeader: string) => writeFileSync(join(dir, "hub.config.json"), JSON.stringify({
+    discord: { enabled: false }, guildIds: [], socketPath: "s", stateDir: "d", webIdentityHeader,
+    routerModel: "m", switchThreshold: 0.7, defaultAgent: "qa", ephemeralTimeoutMs: 1, tagStyle: "prefix", chatKeyScope: "user",
+  }))
+  writeFileSync(join(dir, "agents.json"), JSON.stringify({ qa: { emoji: "x", description: "q", mode: "ephemeral", access: { roles: ["*"] }, runtime: { cwd: "." } } }))
+
+  write("  X-Auth-User  ")
+  expect(loadConfigs(dir).hub.webIdentityHeader).toBe("X-Auth-User")
+  write("   ")
+  expect(loadConfigs(dir).hub.webIdentityHeader).toBe("X-Switchboard-User")
+  write("bad header")
+  expect(() => loadConfigs(dir)).toThrow("config: webIdentityHeader must be a valid HTTP header name")
 })
 
 test("explicitly disabled Discord remains disabled", () => {

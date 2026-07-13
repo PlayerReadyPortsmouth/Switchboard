@@ -4,7 +4,7 @@ import type { TraceRecord } from "./turnTrace"
 import type { AgentConfig, HubConfig } from "./types"
 import type { AgentChangeClassification } from "./agentConfigDraft"
 import type { HubChangeClassification } from "./hubConfigDraft"
-import type { Conversation, Message, SyncMode, TransportLink } from "./conversations/types"
+import type { Conversation, ConversationUpdate, Message, SyncMode, TransportLink } from "./conversations/types"
 import type { ConversationEvent } from "./conversations/events"
 import { ConversationForbiddenError, ConversationValidationError, MAX_MESSAGES_PAGE_SIZE } from "./conversations/service"
 import { RepositoryConflictError, RepositoryNotFoundError, type AppendMessageResult } from "./conversations/repository"
@@ -39,6 +39,7 @@ export interface WebDeps {
   createConversation?: (identity: string, input: { title: string; primaryAgent: string }) => Conversation
   listConversations?: (identity: string, includeArchived?: boolean) => Conversation[]
   getConversation?: (identity: string, conversationId: string) => Conversation
+  updateConversation?: (identity: string, conversationId: string, input: ConversationUpdate) => Conversation
   archiveConversation?: (identity: string, conversationId: string) => Conversation
   appendConversationMessage?: (identity: string, conversationId: string, input: { content: string; clientKey: string; replyTo?: string }) => AppendMessageResult | Promise<AppendMessageResult>
   listConversationMessages?: (identity: string, conversationId: string, afterSequence?: number, limit?: number) => Message[]
@@ -126,6 +127,7 @@ export async function handleWebRequest(
   const hubConfigPreviewMatch = path === "/api/hub-config/preview"
   const hubConfigConfirmMatch = path === "/api/hub-config/confirm"
   const conversationsMatch = path === "/api/conversations"
+  const sessionMatch = path === "/api/session"
   const conversationItemMatch = /^\/api\/conversations\/([^/]+)$/.exec(path)
   const conversationMessagesMatch = /^\/api\/conversations\/([^/]+)\/messages$/.exec(path)
   const conversationEventsMatch = /^\/api\/conversations\/([^/]+)\/events$/.exec(path)
@@ -133,7 +135,7 @@ export async function handleWebRequest(
   const isGuardedRoute = path === "/api/channels" || approvalMatch || channelHistoryMatch ||
     channelTimelineMatch || channelStreamMatch || channelMessageMatch || commandMatch ||
     agentsMatch || agentPreviewMatch || agentConfirmMatch ||
-    hubConfigMatch || hubConfigPreviewMatch || hubConfigConfirmMatch || conversationsMatch ||
+    hubConfigMatch || hubConfigPreviewMatch || hubConfigConfirmMatch || sessionMatch || conversationsMatch ||
     conversationItemMatch || conversationMessagesMatch || conversationEventsMatch || conversationLinksMatch
 
   if (isGuardedRoute) {
@@ -143,8 +145,15 @@ export async function handleWebRequest(
     const email = deps.requireUser(req)
     if (!email) return json({ error: "missing_identity" }, 400)
 
+    if (sessionMatch && method === "GET") {
+      return json({
+        identity: email,
+        agents: deps.collect().status.agents.map(({ name, alive, busy }) => ({ name, alive, busy })),
+      })
+    }
+
     const conversationAction = (conversationsMatch && (method === "GET" || method === "POST")) ||
-      (conversationItemMatch && (method === "GET" || method === "DELETE")) ||
+      (conversationItemMatch && (method === "GET" || method === "PATCH" || method === "DELETE")) ||
       (conversationMessagesMatch && (method === "GET" || method === "POST")) ||
       (conversationEventsMatch && method === "GET") || (conversationLinksMatch && (method === "GET" || method === "POST"))
     if (conversationAction && (!deps.createConversation || !deps.listConversations || !deps.getConversation ||
@@ -167,6 +176,17 @@ export async function handleWebRequest(
 
       const decodeId = (match: RegExpExecArray) => decodeURIComponent(match[1])
       if (conversationItemMatch && method === "GET") return json(deps.getConversation!(email, decodeId(conversationItemMatch)))
+      if (conversationItemMatch && method === "PATCH") {
+        if (!deps.updateConversation) return json({ error: "conversation_service_unavailable" }, 503)
+        const body = await bodyJson(req)
+        if (!body || (body.title === undefined && body.primaryAgent === undefined) ||
+          (body.title !== undefined && typeof body.title !== "string") ||
+          (body.primaryAgent !== undefined && typeof body.primaryAgent !== "string")) return json({ error: "missing_fields" }, 400)
+        return json(deps.updateConversation!(email, decodeId(conversationItemMatch), {
+          ...(typeof body.title === "string" ? { title: body.title } : {}),
+          ...(typeof body.primaryAgent === "string" ? { primaryAgent: body.primaryAgent } : {}),
+        }))
+      }
       if (conversationItemMatch && method === "DELETE") return json(deps.archiveConversation!(email, decodeId(conversationItemMatch)))
 
       if (conversationMessagesMatch && method === "GET") {

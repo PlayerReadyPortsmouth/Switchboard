@@ -12,4 +12,5 @@ export interface TransportLink { id: string; conversationId: string; adapter: st
 export interface Delivery { id: string; messageId: string; linkId: string; eventKind: string; state: DeliveryState; attempts: number; nextAttemptAt: number | null; externalMessageId: string | null; error: string | null; leaseOwner: string | null; leaseExpiresAt: number | null; createdAt: number; updatedAt: number }
 export interface ExternalEventReceipt { adapter: string; externalEventId: string; messageId: string; receivedAt: number }
 export interface NewConversation { id: string; title: string; primaryAgent: string; createdBy: string; createdAt: number }
+export interface ConversationUpdate { title?: string; primaryAgent?: string }
 export interface AppendMessageInput { id: string; conversationId: string; author: string; origin: MessageOrigin; content: string; replyTo?: string; state?: MessageState; clientKey?: string; createdAt: number }

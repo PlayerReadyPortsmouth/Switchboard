@@ -3,7 +3,7 @@ import { afterEach, expect, test } from "bun:test"
 import { mkdtempSync, rmSync } from "fs"
 import { tmpdir } from "os"
 import { join } from "path"
-import { RepositoryConflictError } from "../hub/conversations/repository"
+import { RepositoryConflictError, RepositoryNotFoundError } from "../hub/conversations/repository"
 import { SqliteConversationRepository } from "../hub/conversations/sqliteRepository"
 
 const makeRepo = () => new SqliteConversationRepository(new Database(":memory:"))
@@ -26,6 +26,20 @@ test("persists conversations and messages across a file database reopen", () => 
   repo = new SqliteConversationRepository(db)
   expect(repo.getConversation("c1")?.title).toBe("Durable")
   expect(repo.listMessages("c1").map(({ content }) => content)).toEqual(["saved"])
+  db.close()
+})
+
+test("updates supplied conversation fields durably without replacing messages", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sb-conversations-")); tempDirs.push(dir)
+  const file = join(dir, "switchboard.sqlite")
+  let db = new Database(file, { create: true }); let repo = new SqliteConversationRepository(db)
+  repo.createConversation({ id: "c1", title: "Build", primaryAgent: "architect", createdBy: "owner", createdAt: 10 })
+  repo.appendMessage({ id: "m1", conversationId: "c1", author: "owner", origin: "web", content: "hello", createdAt: 11 })
+  expect(repo.updateConversation("c1", { primaryAgent: "qa" }, 12)).toMatchObject({ title: "Build", primaryAgent: "qa", updatedAt: 12 })
+  db.close(); db = new Database(file); repo = new SqliteConversationRepository(db)
+  expect(repo.getConversation("c1")).toMatchObject({ title: "Build", primaryAgent: "qa", updatedAt: 12 })
+  expect(repo.listMessages("c1").map(({ id }) => id)).toEqual(["m1"])
+  expect(() => repo.updateConversation("missing", { title: "No" }, 13)).toThrow(RepositoryNotFoundError)
   db.close()
 })
 

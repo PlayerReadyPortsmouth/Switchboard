@@ -1,5 +1,5 @@
 import { RepositoryConflictError, RepositoryNotFoundError, type AppendMessageResult, type ConversationRepository, type ExternalMessageLink } from "./repository"
-import type { AppendMessageInput, Conversation, Delivery, Message, SyncMode, TransportLink } from "./types"
+import type { AppendMessageInput, Conversation, ConversationUpdate, Delivery, Message, SyncMode, TransportLink } from "./types"
 import type { ConversationEventStream } from "./events"
 
 export class ConversationForbiddenError extends Error {
@@ -44,6 +44,21 @@ export class ConversationService {
     const conversation = this.requireConversation(conversationId)
     this.requireParticipant(identity, conversationId)
     return conversation
+  }
+
+  update(identity: string, conversationId: string, input: ConversationUpdate): Conversation {
+    if (input.title === undefined && input.primaryAgent === undefined) throw new ConversationValidationError("Conversation update is required")
+    const changes: ConversationUpdate = {}
+    if (input.title !== undefined) {
+      changes.title = input.title.trim()
+      if (!changes.title) throw new ConversationValidationError("Conversation title is required")
+    }
+    if (input.primaryAgent !== undefined) {
+      changes.primaryAgent = input.primaryAgent.trim()
+      if (!changes.primaryAgent) throw new ConversationValidationError("Primary agent is required")
+    }
+    this.requireRole(identity, conversationId, ["owner"])
+    return this.repo.updateConversation(conversationId, changes, this.now())
   }
 
   archive(identity: string, conversationId: string): Conversation {

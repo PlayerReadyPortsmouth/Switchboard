@@ -265,6 +265,7 @@ export interface HubConfig {
   socketPath: string
   stateDir: string
   conversationDbFile?: string
+  webIdentityHeader?: string // trusted reverse-proxy identity header; default X-Switchboard-User
   routerModel: string
   switchThreshold: number
   timezone?: string             // default tz for cron schedules (default "Europe/London")

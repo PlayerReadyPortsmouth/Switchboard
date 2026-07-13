@@ -2,7 +2,7 @@ import type { Database } from "bun:sqlite"
 import { randomUUID } from "node:crypto"
 import { runConversationMigrations } from "./migrations"
 import { RepositoryConflictError, RepositoryNotFoundError, type AppendMessageResult, type ConversationRepository, type EnsureTransportConversationInput } from "./repository"
-import type { AppendMessageInput, Conversation, Delivery, Message, NewConversation, Participant, TransportLink } from "./types"
+import type { AppendMessageInput, Conversation, ConversationUpdate, Delivery, Message, NewConversation, Participant, TransportLink } from "./types"
 
 type Row = Record<string, unknown>
 const conversation = (r: Row): Conversation => ({ id: r.id as string, title: r.title as string, primaryAgent: r.primary_agent as string, createdBy: r.created_by as string, createdAt: r.created_at as number, updatedAt: r.updated_at as number, archivedAt: r.archived_at as number | null })
@@ -30,6 +30,16 @@ export class SqliteConversationRepository implements ConversationRepository {
   getConversation(id: string): Conversation | null { const r = this.db.query<Row, [string]>("SELECT * FROM conversations WHERE id=?").get(id); return r ? conversation(r) : null }
   listConversations(identity: string, includeArchived = false): Conversation[] {
     return this.db.query<Row, [string, number]>(`SELECT c.* FROM conversations c JOIN participants p ON p.conversation_id=c.id WHERE p.identity=? AND (? OR c.archived_at IS NULL) ORDER BY c.updated_at DESC, c.id`).all(identity, includeArchived ? 1 : 0).map(conversation)
+  }
+  updateConversation(id: string, changes: ConversationUpdate, now: number): Conversation {
+    const assignments: string[] = []
+    const values: Array<string | number> = []
+    if (changes.title !== undefined) { assignments.push("title=?"); values.push(changes.title) }
+    if (changes.primaryAgent !== undefined) { assignments.push("primary_agent=?"); values.push(changes.primaryAgent) }
+    assignments.push("updated_at=?"); values.push(now, id)
+    const result = this.db.query(`UPDATE conversations SET ${assignments.join(",")} WHERE id=?`).run(...values)
+    if (!result.changes) throw new RepositoryNotFoundError(`Conversation ${id} not found`)
+    return this.getConversation(id)!
   }
   archiveConversation(id: string, archivedAt: number): Conversation {
     const result = this.db.query("UPDATE conversations SET archived_at=?, updated_at=? WHERE id=?").run(archivedAt, archivedAt, id)
