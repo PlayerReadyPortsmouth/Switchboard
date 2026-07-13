@@ -206,8 +206,11 @@ dialog input, dialog select { min-height: 44px; width: 100%; padding: 0 11px; bo
 .dialog-actions .danger-fill { border-color: var(--danger); color: var(--danger); }
 .form-error { color: var(--danger); }
 
-@media (min-width: 1200px) {
+@media (min-width: 768px) {
   .workspace-shell { height: 100dvh; min-height: 0; grid-template-rows: minmax(0, 1fr); }
+}
+
+@media (min-width: 1200px) {
   .workspace-shell:has(.inspector[data-open="false"]) { grid-template-columns: var(--rail-width) var(--list-width) minmax(0, 1fr) 0; }
   .inspector[data-open="false"] { visibility: hidden; pointer-events: none; }
   .inspector-toggle, .inspector .drawer-close { display: block; }

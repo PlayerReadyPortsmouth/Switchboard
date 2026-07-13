@@ -44,16 +44,16 @@ Commands ran from fresh shells in the required order after remediation:
 1. `bun run typecheck` — exit 0.
 2. `bun test` — 924 passed, 0 failed, 2370 expectations across 121 files.
 3. `bun run build:web` — exit 0; production workspace/PWA assets emitted.
-4. `bun run test:e2e` — 15 passed, 12 intentional project skips, 0 failed across 27 discovered cases.
+4. `bun run test:e2e` — 18 passed, 15 intentional project skips, 0 failed across 33 discovered cases.
 5. `git diff --check` — exit 0; no whitespace errors (line-ending notices only).
 
 Playwright totals:
 
-- Desktop: 7 passed, 2 skipped.
-- Tablet: 4 passed, 5 skipped.
-- Mobile: 4 passed, 5 skipped.
+- Desktop: 8 passed, 3 skipped.
+- Tablet: 6 passed, 5 skipped.
+- Mobile: 4 passed, 7 skipped.
 - PWA spec: 2 passed on desktop, 4 intentionally skipped on tablet/mobile because installability behavior is viewport-independent.
-- Aggregate: 15 passed, 12 skipped, 0 failed.
+- Aggregate: 18 passed, 15 skipped, 0 failed.
 
 ## Self-review
 
@@ -69,16 +69,17 @@ No blocking concern remains. The PWA cases intentionally execute once in the des
 
 ## Controller review follow-up
 
-Two controller-review Important findings were remediated TDD-first.
+Three controller-review Important findings were remediated TDD-first.
 
-### Desktop viewport containment
+### Desktop and tablet viewport containment
 
-Root-cause investigation confirmed that the desktop shell had only `min-height: 100dvh` and no constrained grid row. A long transcript therefore expanded the grid's min-content row and the document; `.transcript-body` never received a bounded height despite declaring `overflow: auto`.
+Root-cause investigation confirmed that the shell had only `min-height: 100dvh` and no constrained grid row outside the desktop-only rule. A long transcript therefore expanded the tablet grid's min-content row and the document; `.transcript-body` never received a bounded height despite declaring `overflow: auto`.
 
-- RED: with a deterministic 36-message canonical conversation created through `ConversationService`, the desktop composer bottom was `3734.5px` in the exact `1440×1000` project, failing the `<= 1000px` assertion.
-- GREEN: the desktop-only shell now uses `height: 100dvh`, `min-height: 0`, and `grid-template-rows: minmax(0, 1fr)`.
-- The E2E regression proves body/document height equals the 1000px viewport, the composer is fully visible, transcript content exceeds the transcript body's client height, and changing `.transcript-body.scrollTop` produces real internal scrolling. It does not hide or clip inaccessible transcript content.
-- Tablet/mobile positioning remains unchanged; mobile additionally asserts both body and document stay within its viewport.
+- RED: with a deterministic 36-message canonical conversation created through `ConversationService`, the tablet workspace was `3734.5px` tall in the exact `900×1100` project, failing the `1100px` shell-height assertion.
+- GREEN: every non-mobile shell now uses `height: 100dvh`, `min-height: 0`, and `grid-template-rows: minmax(0, 1fr)`.
+- The desktop and tablet E2E regression proves shell/body/document height equals the viewport, the composer is fully visible, transcript content exceeds the transcript body's client height, and changing `.transcript-body.scrollTop` produces real internal scrolling.
+- The regression also proves the first seeded message is visible before scrolling and the 36th/final message is visible after scrolling, ruling out hidden clipping as the containment mechanism.
+- Mobile fixed-pane positioning remains unchanged and separately asserts both body and document stay within its viewport.
 
 ### Open-state accessibility
 
@@ -90,25 +91,12 @@ The longer accessibility run exposed Bun's default 10-second idle request timeou
 
 ### Follow-up verification
 
-Focused verification:
+Focused verification before the authoritative phase gate:
 
 - `bun test web/client/App.test.tsx` — 31 passed, 0 failed, 99 expectations.
-- Desktop responsive/containment, tablet keyboard/open-state Axe, and mobile containment E2E selection — 6 passed, 6 intentional project skips, 0 failed.
+- Desktop/tablet long-history containment selection — 2 passed, 0 failed.
+- Mobile responsive containment selection — 1 passed, 0 failed.
 
-Full phase gate, run once after focused verification:
-
-1. `bun run typecheck` — exit 0.
-2. `bun test` — 924 passed, 0 failed, 2370 expectations across 121 files.
-3. `bun run build:web` — exit 0.
-4. `bun run test:e2e` — 17 passed, 16 intentional project skips, 0 failed across 33 discovered cases.
-5. `git diff --check` — exit 0; no whitespace errors (line-ending notices only).
-
-Updated Playwright totals:
-
-- Desktop: 8 passed, 3 skipped.
-- Tablet: 5 passed, 6 skipped.
-- Mobile: 4 passed, 7 skipped.
-- PWA spec: 2 passed on desktop, 4 intentionally skipped on tablet/mobile.
-- Aggregate: 17 passed, 16 skipped, 0 failed.
+The single authoritative full-gate result set is recorded in **Final phase gate** above.
 
 No blocking controller-review concern remains.

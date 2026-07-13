@@ -129,21 +129,31 @@ test("responsive panes, drawers, touch targets, and overflow follow the project 
   if (testInfo.project.name === "tablet") await expect(toggle).toBeFocused()
 })
 
-test("desktop contains the document and scrolls long history inside the transcript", async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name !== "desktop", "Desktop grid containment is breakpoint-specific")
+test("desktop and tablet contain the document and scroll complete long history inside the transcript", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name === "mobile", "Mobile uses fixed primary panes and has separate containment coverage")
   await page.goto("/")
   await openConversation(page, "Long transcript")
+  const viewportHeight = page.viewportSize()!.height
+  const workspace = page.locator(".workspace-shell")
+  const workspaceBox = await workspace.boundingBox()
+  expect(workspaceBox).not.toBeNull()
+  expect(workspaceBox!.height).toBe(viewportHeight)
   const composer = page.locator(".composer-shell")
   const composerBox = await composer.boundingBox()
   expect(composerBox).not.toBeNull()
-  expect(composerBox!.y + composerBox!.height).toBeLessThanOrEqual(1000)
+  expect(composerBox!.y + composerBox!.height).toBeLessThanOrEqual(viewportHeight)
   expect(await page.evaluate(() => ({
     body: document.body.scrollHeight,
     document: document.documentElement.scrollHeight,
     viewport: window.innerHeight,
-  }))).toEqual({ body: 1000, document: 1000, viewport: 1000 })
+  }))).toEqual({ body: viewportHeight, document: viewportHeight, viewport: viewportHeight })
 
   const transcriptBody = page.locator(".transcript-body")
+  const transcriptBox = (await transcriptBody.boundingBox())!
+  const firstMessage = page.getByText("Canonical history message 1", { exact: true })
+  const firstBox = (await firstMessage.boundingBox())!
+  expect(firstBox.y).toBeGreaterThanOrEqual(transcriptBox.y)
+  expect(firstBox.y + firstBox.height).toBeLessThanOrEqual(transcriptBox.y + transcriptBox.height)
   const before = await transcriptBody.evaluate(element => ({
     clientHeight: element.clientHeight,
     scrollHeight: element.scrollHeight,
@@ -153,6 +163,10 @@ test("desktop contains the document and scrolls long history inside the transcri
   expect(before.scrollTop).toBe(0)
   await transcriptBody.evaluate(element => { element.scrollTop = element.scrollHeight })
   expect(await transcriptBody.evaluate(element => element.scrollTop)).toBeGreaterThan(0)
+  const finalMessage = page.getByText("Canonical history message 36", { exact: true })
+  const finalBox = (await finalMessage.boundingBox())!
+  expect(finalBox.y).toBeGreaterThanOrEqual(transcriptBox.y)
+  expect(finalBox.y + finalBox.height).toBeLessThanOrEqual(transcriptBox.y + transcriptBox.height)
 })
 
 test("keyboard focus returns from dialogs and drawers, and composer honors Enter semantics", async ({ page }, testInfo) => {
