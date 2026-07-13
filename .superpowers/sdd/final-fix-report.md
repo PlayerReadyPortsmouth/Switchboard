@@ -48,3 +48,12 @@ R3 verification: focused/integrated suites passed 51/51; `tsc --noEmit` passed; 
 - Documentation now distinguishes reported coordinator ownership loss from deliberately ignored worker stale-owner conflicts.
 
 R4 verification: focused/integrated suites passed 43/43; `tsc --noEmit` passed; full suite passed 822/822 with 2,041 assertions across 112 files; `git diff --check` passed.
+
+## R5 follow-up
+
+- Added one shared production ingress gate, closed before coordinator shutdown.
+- Both Discord inbound paths now reject post-boundary ordinary and legacy-command events before migration, persistence, or dispatch.
+- Every agent reply kind and attachment/file/note callback is denied before legacy resolution or gateway I/O after the boundary.
+- Extracted regression counts ensure/persist/dispatch and every rich producer before/after close.
+
+R5 verification: focused/integrated suites passed 45/45; `tsc --noEmit` passed; full suite passed 823/823 with 2,063 assertions across 113 files; `git diff --check` passed.

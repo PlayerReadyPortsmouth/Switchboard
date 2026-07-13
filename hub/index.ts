@@ -79,7 +79,7 @@ import { publishArtifact } from "./publishLink"
 import { selectExpired } from "./publishCleanup"
 import { randomBytes, randomUUID } from "crypto"
 import { Database } from "bun:sqlite"
-import { ConversationEventStream, ConversationService, createDiscordConversationMigrator, inboundLinkRoute, LegacyDiscordCompatibilityRouter, SqliteConversationRepository, TurnCoordinator } from "./conversations"
+import { ConversationEventStream, ConversationService, createDiscordConversationMigrator, inboundLinkRoute, LegacyDiscordCompatibilityRouter, ProductionIngressGate, SqliteConversationRepository, TurnCoordinator } from "./conversations"
 import { DeliveryWorker, DiscordAdapter, SurfaceRouter } from "./surfaces"
 import { createAsyncShutdown } from "./shutdown"
 import { MemoryBrowse } from "./memoryBrowse"
@@ -175,6 +175,7 @@ const gateway = discordGateway ?? new Proxy({} as Gateway, { get: (_target, key)
 const surfaceRouter = new SurfaceRouter(discordGateway ? [new DiscordAdapter(discordGateway, token!)] : [])
 let turnCoordinator: TurnCoordinator | undefined
 let ensureDiscordConversation: ReturnType<typeof createDiscordConversationMigrator> | undefined
+const conversationIngress = new ProductionIngressGate()
 let resolveLegacyDiscordChatId = (chatId: string): string | null => chatId
 const deployApprover = hub.deployApproverUserId ?? ""
 // Approval buttons are pressable only by configured approvers (default: the
@@ -572,7 +573,7 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonT
   // frame (double-gate alongside the tool not being listed). The agent identity
   // is this transport's `name`, never taken from the frame.
   const oa = hub.outboundAttachments
-  socket.onAttach(makeAttachHandler({
+  const attachHandler = makeAttachHandler({
     enabled: !!oa?.enabled,
     resolve: (relPath) => resolveOutboxFile(relPath, {
       outboxBase: oa?.outboxDir ?? join(hub.stateDir, "outbox"),
@@ -594,7 +595,11 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonT
         chat: chatId, outcome: ok ? "ok" : "deny", detail,
       })
     },
-  }))
+  })
+  socket.onAttach(frame => {
+    const admitted = conversationIngress.tryRun(() => attachHandler(frame))
+    return admitted.accepted ? admitted.value : { ok: false, error: "Hub is shutting down" }
+  })
   if (shareLinksOn) {
     socket.onPublish(async (a) => {
       const io = {
@@ -1040,6 +1045,7 @@ function cardTraceText(card: CardSpec): string {
 /** Handle one reply from a transport: cards → Discord card (+ register buttons);
  *  text → spawn-trigger match or a plain reply; react/edit → passthrough. */
 async function onAgentReply(reply: AgentReply, key: string): Promise<void | SendOutcome> {
+  if (!conversationIngress.tryRun(() => true).accepted) return { ok: false, error: "Hub is shutting down" }
   if (toolObs) toolUsage.endTurn(reply.agent)
   // Inter-agent consult: a reply on a virtual consult channel is the answer to a
   // pending ask_agent — settle it (return the answer to the caller) and never post
@@ -1918,6 +1924,7 @@ function gatherDoctorFacts(): DoctorFacts {
   }
 }
 if (discordGateway) gateway.handleInbound((m) => {
+  if (!conversationIngress.tryRun(() => true).accepted) return
   // Control messages stay on the compatibility path. Ordinary text establishes
   // its canonical channel mapping synchronously before this multiplexer reaches
   // the legacy orchestrator branch.
@@ -2132,6 +2139,7 @@ turnCoordinator = new TurnCoordinator(
 const deliveryWorker = new DeliveryWorker(conversationRepo, surfaceRouter)
 if (discordEnabled) {
   await surfaceRouter.startAll(event => {
+    if (!conversationIngress.tryRun(() => true).accepted) return Promise.resolve()
     if (/^\s*!/.test(event.content)) return Promise.resolve()
     ensureDiscordConversation?.(event, resolvePinnedAgent(event.externalLocationId, hub.channelAgents ?? []) ?? hub.defaultAgent)
     return turnCoordinator?.acceptSurfaceEvent(event).then(() => {}) ?? Promise.resolve()
@@ -2387,7 +2395,7 @@ const webServer = startWebServer(hub.webPort ?? 0, webDeps, hub.webHost)
 if (webServer) console.error(`switchboard hub: web dashboard on ${hub.webHost ?? "127.0.0.1"}:${hub.webPort}`)
 
 const cleanupConversations = createAsyncShutdown({
-  stopAcceptingWeb: () => { webServer?.stopAccepting(); turnCoordinator!.beginShutdown() },
+  stopAcceptingWeb: () => { webServer?.stopAccepting(); conversationIngress.close(); turnCoordinator!.beginShutdown() },
   stopRetryWorker: async () => { await deliveryWorker.stop(); await turnCoordinator!.drainDeliveries() },
   stopAdapters: () => surfaceRouter.stopAll(),
   stopWeb: async () => { await webServer?.stop() },
