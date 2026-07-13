@@ -39,3 +39,12 @@ R2 verification: focused coordinator/worker/rich-compatibility tests passed; `ts
 - Legacy rich Discord resolution accepts only enabled `two_way`/`outbound_only` links, chooses one deterministically by creation time/link id, safely declines unresolved canonical conversations, and preserves raw Discord channel ids.
 
 R3 verification: focused/integrated suites passed 51/51; `tsc --noEmit` passed; full suite passed 820/820 with 2,032 assertions across 112 files; `git diff --check` passed.
+
+## R4 follow-up
+
+- Added idempotent `TurnCoordinator.beginShutdown()` as an atomic no-new-turns boundary before worker stop/drain.
+- Post-boundary web, surface, and agent callbacks are controlled and cannot persist, dispatch, schedule delivery, fall through to legacy routing, or touch a closed database.
+- Background delivery cleanup uses fully handled promise branches; reporter exceptions are swallowed and covered by an unhandled-rejection regression.
+- Documentation now distinguishes reported coordinator ownership loss from deliberately ignored worker stale-owner conflicts.
+
+R4 verification: focused/integrated suites passed 43/43; `tsc --noEmit` passed; full suite passed 822/822 with 2,041 assertions across 112 files; `git diff --check` passed.

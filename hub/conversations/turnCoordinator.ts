@@ -12,6 +12,11 @@ export interface TurnDispatcher {
 export interface TurnEventPublisher { publish(event: ConversationEvent): void }
 export interface TurnSurfaceRouter { deliver(message: Message, links: TransportLink[], kind?: "transcript" | "notification", replyToExternalIds?: ReadonlyMap<string, string>): Promise<SurfaceDeliveryResult[]> }
 export type AgentTurnResult = { message: Message; deliveries: Delivery[]; inserted: boolean }
+export type AgentTurnAcceptance = AgentTurnResult | { closed: true; message?: never; deliveries?: never; inserted?: never }
+
+export class TurnCoordinatorClosingError extends Error {
+  constructor() { super("Conversation coordinator is shutting down"); this.name = "TurnCoordinatorClosingError" }
+}
 
 type WebTurnInput = { content: string; clientKey: string; replyTo?: string }
 
@@ -25,6 +30,7 @@ export function inboundLinkRoute(link: TransportLink | null | undefined): "canon
 
 export class TurnCoordinator {
   private readonly backgroundDeliveries = new Set<Promise<void>>()
+  private closing = false
   constructor(
     private readonly service: Pick<ConversationService, "appendUserMessage" | "appendExternalMessage" | "appendAgentMessage">,
     private readonly repo: Pick<ConversationRepository, "getConversation" | "resolveTransportLink" | "listTransportLinks" | "resolveDeliveredExternalMessageId" | "createDeliveries" | "claimDeliveries" | "markDeliveryDelivered" | "markDeliveryRetry">,
@@ -37,6 +43,7 @@ export class TurnCoordinator {
   ) {}
 
   async submitWebTurn(identity: string, conversationId: string, input: WebTurnInput): Promise<AppendMessageResult> {
+    if (this.closing) throw new TurnCoordinatorClosingError()
     const result = this.service.appendUserMessage(identity, conversationId, input)
     if (result.inserted) {
       const links = this.repo.listTransportLinks(conversationId).filter(link => link.enabled && link.syncMode !== "inbound_only" && link.syncMode !== "notifications_only")
@@ -51,9 +58,10 @@ export class TurnCoordinator {
   }
 
   async acceptSurfaceEvent(event: NormalizedSurfaceEvent): Promise<AppendMessageResult | null> {
+    if (this.closing) return null
     if (![event.adapter,event.eventId,event.externalLocationId,event.externalMessageId,event.authorId,event.authorName,event.content].every(value => typeof value === "string" && value.trim()) || !Number.isFinite(event.createdAt)) {
       const error = new Error("Malformed normalized surface event")
-      this.reportError(error)
+      this.safeReport(error)
       throw error
     }
     const link = this.repo.resolveTransportLink(event.adapter, event.externalLocationId)
@@ -73,7 +81,8 @@ export class TurnCoordinator {
     return result
   }
 
-  async acceptAgentReply(reply: AgentReply): Promise<AgentTurnResult | null> {
+  async acceptAgentReply(reply: AgentReply): Promise<AgentTurnAcceptance | null> {
+    if (this.closing) return { closed: true }
     if (reply.kind !== "reply") return null
     const text = reply.text?.trim()
     if (!text) return null
@@ -130,13 +139,19 @@ export class TurnCoordinator {
   }
 
   private deliverInBackground(message: Message, deliveries: Delivery[], links: TransportLink[], replyIds?: ReadonlyMap<string,string>): void {
-    const task = Promise.resolve().then(() => this.deliverClaimed(message, deliveries, links, replyIds)).catch(this.reportError)
+    const task = Promise.resolve().then(() => this.deliverClaimed(message, deliveries, links, replyIds)).then(undefined, error => this.safeReport(error))
     this.backgroundDeliveries.add(task)
-    void task.finally(() => this.backgroundDeliveries.delete(task))
+    void task.then(() => this.backgroundDeliveries.delete(task), () => this.backgroundDeliveries.delete(task))
   }
+
+  beginShutdown(): void { this.closing = true }
 
   async drainDeliveries(): Promise<void> {
     while (this.backgroundDeliveries.size) await Promise.all([...this.backgroundDeliveries])
+  }
+
+  private safeReport(error: unknown): void {
+    try { this.reportError(error) } catch {}
   }
 
   private turnState(message: Message, state: "queued" | "working" | "failed"): void {

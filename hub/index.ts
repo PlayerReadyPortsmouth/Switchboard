@@ -2387,7 +2387,7 @@ const webServer = startWebServer(hub.webPort ?? 0, webDeps, hub.webHost)
 if (webServer) console.error(`switchboard hub: web dashboard on ${hub.webHost ?? "127.0.0.1"}:${hub.webPort}`)
 
 const cleanupConversations = createAsyncShutdown({
-  stopAcceptingWeb: () => webServer?.stopAccepting(),
+  stopAcceptingWeb: () => { webServer?.stopAccepting(); turnCoordinator!.beginShutdown() },
   stopRetryWorker: async () => { await deliveryWorker.stop(); await turnCoordinator!.drainDeliveries() },
   stopAdapters: () => surfaceRouter.stopAll(),
   stopWeb: async () => { await webServer?.stop() },

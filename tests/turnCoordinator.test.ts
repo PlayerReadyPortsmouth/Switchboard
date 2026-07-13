@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite"
 import { describe, expect, test } from "bun:test"
-import { ConversationEventStream, ConversationService, inboundLinkRoute, SqliteConversationRepository, TurnCoordinator } from "../hub/conversations"
+import { ConversationEventStream, ConversationService, inboundLinkRoute, SqliteConversationRepository, TurnCoordinator, TurnCoordinatorClosingError } from "../hub/conversations"
 import type { ConversationEvent } from "../hub/conversations/events"
 import type { InboundMessage } from "../hub/types"
 import { DiscordAdapter, SurfaceRouter, type DiscordGatewayPort, type NormalizedSurfaceEvent, type SurfaceDeliveryResult } from "../hub/surfaces"
@@ -192,6 +192,40 @@ describe("TurnCoordinator", () => {
     release(); await drain; await new Promise(resolve => setTimeout(resolve, 0))
     process.off("unhandledRejection", listener)
     expect(errors).toHaveLength(1)
+    expect(unhandled).toEqual([])
+  })
+
+  test("shutdown boundary rejects new turns while draining pre-boundary delivery", async () => {
+    const repo = new SqliteConversationRepository(new Database(":memory:"))
+    let now = 1; let release!: () => void; let sends = 0; let dispatches = 0
+    const stream = new ConversationEventStream(() => [])
+    const service = new ConversationService(repo, () => ++now, () => `id-${now}`, stream)
+    const conversation = service.create("owner", { title: "Shutdown", primaryAgent: "architect" })
+    repo.createTransportLink({ id: "link", conversationId: conversation.id, adapter: "discord", externalLocationId: "room", label: null, syncMode: "two_way", enabled: true }, 1)
+    const coordinator = new TurnCoordinator(service, repo, { dispatch: () => (++dispatches, true) }, stream, {
+      deliver: async () => { sends++; await new Promise<void>(resolve => { release = resolve }); return [{ deliveryId: "d", adapter: "discord", ok: true }] },
+    }, () => ++now, () => `turn-${now}`)
+    await coordinator.submitWebTurn("owner", conversation.id, { content: "before", clientKey: "before" })
+    await Promise.resolve(); expect(sends).toBe(1)
+    coordinator.beginShutdown(); coordinator.beginShutdown()
+    const drain = coordinator.drainDeliveries()
+    await expect(coordinator.submitWebTurn("owner", conversation.id, { content: "after", clientKey: "after" })).rejects.toBeInstanceOf(TurnCoordinatorClosingError)
+    expect(await coordinator.acceptSurfaceEvent({ adapter: "discord", eventId: "after", externalLocationId: "room", externalMessageId: "after", authorId: "u", authorName: "U", content: "after", createdAt: 3 })).toBeNull()
+    expect(await coordinator.acceptAgentReply({ agent: "architect", kind: "reply", chatId: conversation.id, correlationId: "after", text: "after" })).toEqual({ closed: true })
+    expect(repo.listMessages(conversation.id).map(message => message.content)).toEqual(["before"])
+    expect(dispatches).toBe(1); expect(sends).toBe(1)
+    release(); await drain
+  })
+
+  test("throwing background reporter cannot create an unhandled rejection", async () => {
+    const unhandled: unknown[] = []; const listener = (error: unknown) => unhandled.push(error)
+    process.on("unhandledRejection", listener)
+    const f = fixture({ reportError: () => { throw new Error("reporter failed") } })
+    f.repo.createTransportLink({ id: "link", conversationId: f.conversation.id, adapter: "discord", externalLocationId: "room", label: null, syncMode: "two_way", enabled: true }, 1)
+    ;(f.coordinator as any).router.deliver = async () => { throw new Error("send failed") }
+    await f.coordinator.submitWebTurn("owner", f.conversation.id, { content: "x", clientKey: "x" })
+    await f.coordinator.drainDeliveries(); await new Promise(resolve => setTimeout(resolve, 0))
+    process.off("unhandledRejection", listener)
     expect(unhandled).toEqual([])
   })
 
