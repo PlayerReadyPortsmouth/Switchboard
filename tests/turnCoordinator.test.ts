@@ -170,6 +170,31 @@ describe("TurnCoordinator", () => {
     expect(replyId).toBe("discord-parent")
   })
 
+  test("agent output resolves before slow delivery, reports lease loss, and drain tracks background work", async () => {
+    const unhandled: unknown[] = []; const listener = (error: unknown) => unhandled.push(error)
+    process.on("unhandledRejection", listener)
+    const repo = new SqliteConversationRepository(new Database(":memory:"))
+    let now = 1; let release!: () => void; const errors: unknown[] = []
+    const stream = new ConversationEventStream(() => [])
+    const service = new ConversationService(repo, () => ++now, () => `id-${now}`, stream)
+    const conversation = service.create("owner", { title: "Agent race", primaryAgent: "architect" })
+    repo.createTransportLink({ id: "link", conversationId: conversation.id, adapter: "discord", externalLocationId: "room", label: null, syncMode: "two_way", enabled: true }, 1)
+    const coordinator = new TurnCoordinator(service, repo, { dispatch: () => true }, stream, {
+      deliver: async () => { await new Promise<void>(resolve => { release = resolve }); return [{ deliveryId: "d", adapter: "discord", ok: true }] },
+    }, () => ++now, () => `turn-${now}`, error => errors.push(error))
+    const result = await coordinator.acceptAgentReply({ agent: "architect", kind: "reply", chatId: conversation.id, correlationId: "slow", text: "answer" })
+    expect(result?.inserted).toBe(true)
+    await Promise.resolve()
+    expect(repo.claimDueDeliveries("worker", 100_000, 130_000)).toHaveLength(1)
+    let drained = false
+    const drain = coordinator.drainDeliveries().then(() => { drained = true })
+    await Promise.resolve(); expect(drained).toBe(false)
+    release(); await drain; await new Promise(resolve => setTimeout(resolve, 0))
+    process.off("unhandledRejection", listener)
+    expect(errors).toHaveLength(1)
+    expect(unhandled).toEqual([])
+  })
+
   test("does not duplicate agent output for a repeated callback", async () => {
     const f = fixture()
     const callback = { agent: "architect", kind: "reply" as const, chatId: f.conversation.id, text: "once", correlationId: "same" }

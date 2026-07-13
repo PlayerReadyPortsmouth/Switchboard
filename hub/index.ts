@@ -175,7 +175,7 @@ const gateway = discordGateway ?? new Proxy({} as Gateway, { get: (_target, key)
 const surfaceRouter = new SurfaceRouter(discordGateway ? [new DiscordAdapter(discordGateway, token!)] : [])
 let turnCoordinator: TurnCoordinator | undefined
 let ensureDiscordConversation: ReturnType<typeof createDiscordConversationMigrator> | undefined
-let resolveLegacyDiscordChatId = (chatId: string): string => chatId
+let resolveLegacyDiscordChatId = (chatId: string): string | null => chatId
 const deployApprover = hub.deployApproverUserId ?? ""
 // Approval buttons are pressable only by configured approvers (default: the
 // deploy approver); everything else keeps the existing deploy/gated-action gate.
@@ -328,8 +328,14 @@ async function runDistill(convId: string): Promise<void> {
 
 const cardRegistry = new CardRegistry()
 const cardLifecycle = new CardLifecycle(cardRegistry, {
-  sendCard: (chatId, card) => gateway.sendCard(resolveLegacyDiscordChatId(chatId), card),
-  editCard: (chatId, messageId, card) => gateway.editCard(resolveLegacyDiscordChatId(chatId), messageId, card),
+  sendCard: (chatId, card) => {
+    const target = resolveLegacyDiscordChatId(chatId)
+    return target ? gateway.sendCard(target, card) : Promise.resolve(undefined)
+  },
+  editCard: (chatId, messageId, card) => {
+    const target = resolveLegacyDiscordChatId(chatId)
+    return target ? gateway.editCard(target, messageId, card) : Promise.resolve()
+  },
   registerButtons: (ids, key) => notifyRouter.register(ids, key),
   forgetButtons: (ids) => notifyRouter.forget(ids),
   registerModals: (card) => { for (const b of card.buttons) if (b.modal) gateway.registerModal(b.customId, b.modal) },
@@ -574,8 +580,14 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonT
       maxBytes: oa?.maxBytes ?? 8_388_608,
       allowedExtensions: (oa?.allowedExtensions ?? []).map((e) => e.toLowerCase()),
     }),
-    sendFiles: (chatId, attachments, caption) => gateway.sendFiles(resolveLegacyDiscordChatId(chatId), attachments, caption),
-    note: (chatId, text) => void gateway.sendPlain(resolveLegacyDiscordChatId(chatId), text),
+    sendFiles: (chatId, attachments, caption) => {
+      const target = resolveLegacyDiscordChatId(chatId)
+      return target ? gateway.sendFiles(target, attachments, caption) : Promise.resolve(false)
+    },
+    note: (chatId, text) => {
+      const target = resolveLegacyDiscordChatId(chatId)
+      if (target) void gateway.sendPlain(target, text)
+    },
     audit: (ok, chatId, detail) => {
       if (!auditOptedOut(name)) audit.record({
         kind: "event", actor: `agent:${name}`, action: "attach",
@@ -1068,6 +1080,10 @@ async function onAgentReply(reply: AgentReply, key: string): Promise<void | Send
   // configured links; never fall through to the legacy Discord reply path.
   if (reply.kind === "reply" && turnCoordinator && await turnCoordinator.acceptAgentReply(reply)) return
   const legacyChatId = resolveLegacyDiscordChatId(reply.chatId)
+  if (!legacyChatId) {
+    audit.record({ kind: "event", actor: `agent:${reply.agent}`, action: "legacy_discord_rich_unroutable", chat: reply.chatId, outcome: "deny", detail: { kind: reply.kind } })
+    return
+  }
   if (legacyChatId !== reply.chatId) reply = { ...reply, chatId: legacyChatId }
   if (reply.kind === "card" && reply.card) {
     trace.record({ agent: reply.agent, chat: reply.chatId, kind: "card", text: cardTraceText(reply.card) })
@@ -2372,7 +2388,7 @@ if (webServer) console.error(`switchboard hub: web dashboard on ${hub.webHost ??
 
 const cleanupConversations = createAsyncShutdown({
   stopAcceptingWeb: () => webServer?.stopAccepting(),
-  stopRetryWorker: () => deliveryWorker.stop(),
+  stopRetryWorker: async () => { await deliveryWorker.stop(); await turnCoordinator!.drainDeliveries() },
   stopAdapters: () => surfaceRouter.stopAll(),
   stopWeb: async () => { await webServer?.stop() },
   closeDatabase: () => conversationDb.close(),

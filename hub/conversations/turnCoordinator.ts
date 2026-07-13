@@ -24,6 +24,7 @@ export function inboundLinkRoute(link: TransportLink | null | undefined): "canon
 }
 
 export class TurnCoordinator {
+  private readonly backgroundDeliveries = new Set<Promise<void>>()
   constructor(
     private readonly service: Pick<ConversationService, "appendUserMessage" | "appendExternalMessage" | "appendAgentMessage">,
     private readonly repo: Pick<ConversationRepository, "getConversation" | "resolveTransportLink" | "listTransportLinks" | "resolveDeliveredExternalMessageId" | "createDeliveries" | "claimDeliveries" | "markDeliveryDelivered" | "markDeliveryRetry">,
@@ -91,7 +92,7 @@ export class TurnCoordinator {
         const externalId = this.repo.resolveDeliveredExternalMessageId(result.message.replyTo, link.id)
         if (externalId) replyIds.set(link.id, externalId)
       }
-      await this.deliverClaimed(result.message, result.deliveries, links, replyIds)
+      this.deliverInBackground(result.message, result.deliveries, links, replyIds)
     }
     return result
   }
@@ -129,7 +130,13 @@ export class TurnCoordinator {
   }
 
   private deliverInBackground(message: Message, deliveries: Delivery[], links: TransportLink[], replyIds?: ReadonlyMap<string,string>): void {
-    void Promise.resolve().then(() => this.deliverClaimed(message, deliveries, links, replyIds)).catch(this.reportError)
+    const task = Promise.resolve().then(() => this.deliverClaimed(message, deliveries, links, replyIds)).catch(this.reportError)
+    this.backgroundDeliveries.add(task)
+    void task.finally(() => this.backgroundDeliveries.delete(task))
+  }
+
+  async drainDeliveries(): Promise<void> {
+    while (this.backgroundDeliveries.size) await Promise.all([...this.backgroundDeliveries])
   }
 
   private turnState(message: Message, state: "queued" | "working" | "failed"): void {

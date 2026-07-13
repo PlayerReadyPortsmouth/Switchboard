@@ -31,3 +31,11 @@ The lease duration is 30 seconds. A process that remains alive but spends longer
 - Shutdown remains intentionally unbounded while an adapter send is active because the adapter contract has no abort signal; this is documented rather than closing SQLite while active work can still write.
 
 R2 verification: focused coordinator/worker/rich-compatibility tests passed; `tsc --noEmit` passed; integrated composition/mirror tests passed 7/7; full suite passed 817/817 with 2,007 assertions across 112 files; `git diff --check` passed.
+
+## R3 follow-up
+
+- Canonical agent output now uses the same handled, tracked background-delivery path as web and inbound messages; callback resolution is independent of slow adapters and stale-owner completion is reported.
+- `TurnCoordinator.drainDeliveries()` is wired into shutdown after the retry worker and before adapters/database close.
+- Legacy rich Discord resolution accepts only enabled `two_way`/`outbound_only` links, chooses one deterministically by creation time/link id, safely declines unresolved canonical conversations, and preserves raw Discord channel ids.
+
+R3 verification: focused/integrated suites passed 51/51; `tsc --noEmit` passed; full suite passed 820/820 with 2,032 assertions across 112 files; `git diff --check` passed.
