@@ -51,7 +51,7 @@ afterEach(cleanup)
 describe("AgentConfigEditor", () => {
   test("guided edits and valid Advanced JSON update the same draft without exposing configured values", async () => {
     const api = apiFor()
-    render(<AgentConfigEditor agent="qa" config={config} api={api} online onApplied={() => {}} onReload={() => {}} />)
+    render(<AgentConfigEditor agent="qa" config={config} baseVersion="v1" api={api} online onApplied={() => {}} onReload={() => {}} />)
 
     expect(screen.getAllByText("Configured · preserved")).toHaveLength(2)
     await userEvent.clear(screen.getByLabelText("Description"))
@@ -67,7 +67,7 @@ describe("AgentConfigEditor", () => {
   })
 
   test("invalid JSON or constructed redaction objects disable Preview without discarding the last valid draft", async () => {
-    render(<AgentConfigEditor agent="qa" config={config} api={apiFor()} online onApplied={() => {}} onReload={() => {}} />)
+    render(<AgentConfigEditor agent="qa" config={config} baseVersion="v1" api={apiFor()} online onApplied={() => {}} onReload={() => {}} />)
     await userEvent.click(screen.getByRole("button", { name: "Advanced JSON" }))
     const textarea = screen.getByLabelText("Agent configuration JSON")
     setTextarea(textarea, "{not json")
@@ -81,7 +81,7 @@ describe("AgentConfigEditor", () => {
 
   test("does not allow a configured sentinel to be constructed for an unset server value", async () => {
     const withoutSecret = { ...config, runtime: { ...config.runtime, claudeArgs: undefined } }
-    render(<AgentConfigEditor agent="qa" config={withoutSecret} api={apiFor()} online onApplied={() => {}} onReload={() => {}} />)
+    render(<AgentConfigEditor agent="qa" config={withoutSecret} baseVersion="v1" api={apiFor()} online onApplied={() => {}} onReload={() => {}} />)
     await userEvent.click(screen.getByRole("button", { name: "Advanced JSON" }))
     setTextarea(screen.getByLabelText("Agent configuration JSON"), JSON.stringify({ ...withoutSecret, runtime: { ...withoutSecret.runtime, claudeArgs: configured } }))
     expect(screen.getByRole("alert").textContent).toContain("can only preserve")
@@ -99,7 +99,7 @@ describe("AgentConfigEditor", () => {
     ["pool", { ...config, runtime: { ...config.runtime, pool: { min: 3, max: 1 } } }],
   ])("rejects malformed nested %s values before preview", async (_field, malformed) => {
     const api = apiFor()
-    render(<AgentConfigEditor agent="qa" config={config} api={api} online onApplied={() => {}} onReload={() => {}} />)
+    render(<AgentConfigEditor agent="qa" config={config} baseVersion="v1" api={api} online onApplied={() => {}} onReload={() => {}} />)
     await userEvent.click(screen.getByRole("button", { name: "Advanced JSON" }))
     setTextarea(screen.getByLabelText("Agent configuration JSON"), JSON.stringify(malformed))
     expect(screen.getByRole("alert").textContent).toContain("Configuration")
@@ -127,7 +127,7 @@ describe("AgentConfigEditor", () => {
     ["session governor strategy", { ...config, runtime: { ...config.runtime, sessionGovernor: { enabled: true, strategy: "reset" } } }],
   ])("rejects invalid editable %s shape before preview", async (_field, malformed) => {
     const api = apiFor()
-    render(<AgentConfigEditor agent="qa" config={config} api={api} online onApplied={() => {}} onReload={() => {}} />)
+    render(<AgentConfigEditor agent="qa" config={config} baseVersion="v1" api={api} online onApplied={() => {}} onReload={() => {}} />)
     await userEvent.click(screen.getByRole("button", { name: "Advanced JSON" }))
     setTextarea(screen.getByLabelText("Agent configuration JSON"), JSON.stringify(malformed))
     expect(screen.getByRole("alert").textContent).toContain("Configuration")
@@ -137,13 +137,13 @@ describe("AgentConfigEditor", () => {
 
   test("allows deliberate omission of a previously configured opaque field", async () => {
     const api = apiFor()
-    render(<AgentConfigEditor agent="qa" config={config} api={api} online onApplied={() => {}} onReload={() => {}} />)
+    render(<AgentConfigEditor agent="qa" config={config} baseVersion="v1" api={api} online onApplied={() => {}} onReload={() => {}} />)
     await userEvent.click(screen.getByRole("button", { name: "Advanced JSON" }))
     const { claudeArgs: _removed, ...runtime } = config.runtime
     setTextarea(screen.getByLabelText("Agent configuration JSON"), JSON.stringify({ ...config, runtime }))
     expect(screen.queryByRole("alert")).toBeNull()
     await userEvent.click(screen.getByRole("button", { name: "Preview changes" }))
-    expect(api.previewAgentConfig).toHaveBeenCalledWith("qa", expect.objectContaining({ runtime: expect.not.objectContaining({ claudeArgs: expect.anything() }) }))
+    expect(api.previewAgentConfig).toHaveBeenCalledWith("qa", expect.objectContaining({ runtime: expect.not.objectContaining({ claudeArgs: expect.anything() }) }), "v1")
   })
 
   test.each([
@@ -152,7 +152,7 @@ describe("AgentConfigEditor", () => {
     ["restart" as const, "Full hub restart required", "Save pending hub restart"],
   ])("uses the %s server classification for confirmation copy", async (tier, heading, button) => {
     const api = apiFor(tier)
-    render(<AgentConfigEditor agent="qa" config={config} api={api} online onApplied={() => {}} onReload={() => {}} />)
+    render(<AgentConfigEditor agent="qa" config={config} baseVersion="v1" api={api} online onApplied={() => {}} onReload={() => {}} />)
     await userEvent.click(screen.getByRole("button", { name: "Preview changes" }))
     expect(await screen.findByText(heading)).toBeTruthy()
     expect((screen.getByRole("button", { name: button }) as HTMLButtonElement).disabled).toBe(false)
@@ -165,7 +165,7 @@ describe("AgentConfigEditor", () => {
     const onReload = mock(() => {})
     const api = apiFor("safe")
     api.confirmAgentConfig = mock(async () => { throw new ApiError(409, "stale_preview") })
-    const view = render(<AgentConfigEditor agent="qa" config={config} api={api} online onApplied={() => {}} onReload={onReload} />)
+    const view = render(<AgentConfigEditor agent="qa" config={config} baseVersion="v1" api={api} online onApplied={() => {}} onReload={onReload} />)
     await userEvent.clear(screen.getByLabelText("Description"))
     await userEvent.type(screen.getByLabelText("Description"), "Keep this draft")
     await userEvent.click(screen.getByRole("button", { name: "Preview changes" }))
@@ -173,15 +173,15 @@ describe("AgentConfigEditor", () => {
     expect((await screen.findByRole("alert")).textContent).toContain("current configuration changed")
     await userEvent.click(screen.getByRole("button", { name: "Reload current configuration" }))
     expect(onReload).toHaveBeenCalledTimes(1)
-    view.rerender(<AgentConfigEditor agent="qa" config={{ ...config, description: "Server changed" }} api={api} online onApplied={() => {}} onReload={onReload} />)
+    view.rerender(<AgentConfigEditor agent="qa" config={{ ...config, description: "Server changed" }} baseVersion="v2" api={api} online onApplied={() => {}} onReload={onReload} />)
     expect((screen.getByLabelText("Description") as HTMLInputElement).value).toBe("Keep this draft")
   })
 
   test("offline mode preserves edits while disabling preview", async () => {
-    const view = render(<AgentConfigEditor agent="qa" config={config} api={apiFor()} online onApplied={() => {}} onReload={() => {}} />)
+    const view = render(<AgentConfigEditor agent="qa" config={config} baseVersion="v1" api={apiFor()} online onApplied={() => {}} onReload={() => {}} />)
     await userEvent.clear(screen.getByLabelText("Description"))
     await userEvent.type(screen.getByLabelText("Description"), "Local draft")
-    view.rerender(<AgentConfigEditor agent="qa" config={config} api={apiFor()} online={false} onApplied={() => {}} onReload={() => {}} />)
+    view.rerender(<AgentConfigEditor agent="qa" config={config} baseVersion="v1" api={apiFor()} online={false} onApplied={() => {}} onReload={() => {}} />)
     expect((screen.getByLabelText("Description") as HTMLInputElement).value).toBe("Local draft")
     expect((screen.getByRole("button", { name: "Preview changes" }) as HTMLButtonElement).disabled).toBe(true)
     await waitFor(() => expect(screen.getByText(/Reconnect to preview/)).toBeTruthy())
@@ -202,10 +202,10 @@ describe("AgentConfigEditor", () => {
 
   test("going offline after preview preserves impact but blocks confirmation", async () => {
     const api = apiFor("hard")
-    const view = render(<AgentConfigEditor agent="qa" config={config} api={api} online onApplied={() => {}} onReload={() => {}} />)
+    const view = render(<AgentConfigEditor agent="qa" config={config} baseVersion="v1" api={api} online onApplied={() => {}} onReload={() => {}} />)
     await userEvent.click(screen.getByRole("button", { name: "Preview changes" }))
     expect(await screen.findByText("Agent restart required")).toBeTruthy()
-    view.rerender(<AgentConfigEditor agent="qa" config={config} api={api} online={false} onApplied={() => {}} onReload={() => {}} />)
+    view.rerender(<AgentConfigEditor agent="qa" config={config} baseVersion="v1" api={api} online={false} onApplied={() => {}} onReload={() => {}} />)
     const confirm = screen.getByRole("button", { name: "Apply and restart agent" }) as HTMLButtonElement
     expect(confirm.disabled).toBe(true)
     expect(screen.getByText("Agent restart required")).toBeTruthy()

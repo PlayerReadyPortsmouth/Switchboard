@@ -99,12 +99,13 @@ function editable(config: AgentConfig | null): EditableAgentConfig | null {
 
 function redactedAuditConfig(config: AgentConfig | EditableAgentConfig | null): Record<string, unknown> | null {
   if (config === null) return null
-  const { claudeArgs, appendSystemPrompt, cwd: _cwd, ...runtime } = config.runtime
+  const projected = projectAgentViews({ audit: config as AgentConfig }, [], [], "operator")[0]!.config
+  const { claudeArgs, appendSystemPrompt, cwd: _cwd, ...runtime } = projected.runtime
   return {
-    emoji: config.emoji,
-    description: config.description,
-    mode: config.mode,
-    access: structuredClone(config.access),
+    emoji: projected.emoji,
+    description: projected.description,
+    mode: projected.mode,
+    access: structuredClone(projected.access),
     runtime: {
       ...structuredClone(runtime),
       cwd: "[redacted]",
@@ -126,11 +127,15 @@ function changedPaths(before: unknown, after: unknown, prefix = ""): string[] {
 function configPreviewAuditDetail(result: LegacyAgentConfigPreviewResult | AgentConfigPreviewResult): Record<string, unknown> {
   const before = redactedAuditConfig(result.before)
   const after = redactedAuditConfig(result.after)
+  const diff = changedPaths(before, after)
+  for (const key of ["claudeArgs", "appendSystemPrompt"] as const) {
+    if (JSON.stringify(result.before?.runtime[key]) !== JSON.stringify(result.after?.runtime[key])) diff.push(`runtime.${key}`)
+  }
   return {
     previewId: result.id,
     before,
     after,
-    diff: changedPaths(before, after),
+    diff: [...new Set(diff)].sort(),
     classification: structuredClone(result.classification),
     restartScope: { tier: result.classification.tier, fullRestart: [...result.classification.fullRestart] },
   }
@@ -179,10 +184,13 @@ export class AgentOperationsService {
     }, result => ({ previewId, hard, restartScope: { restarted: result.restarted, fullRestart: result.fullRestart } }))
   }
 
-  previewConfig(actor: string, agent: string, submitted: EditableAgentConfig | AgentConfig | null, expectedVersion?: string): Promise<AgentConfigPreviewResult> {
+  previewConfig(actor: string, agent: string, submitted: EditableAgentConfig | AgentConfig | null, expectedVersion: string): Promise<AgentConfigPreviewResult> {
+    let auditDetail: Record<string, unknown> | undefined
     return this.auditMutation(actor, "agent_config_preview", agent, async () => {
       this.requireOperator(actor, true)
+      if (typeof expectedVersion !== "string" || expectedVersion.trim() === "") throw new AgentOperationsError(400, "invalid_expected_version")
       const preview = this.createConfigPreview(actor, agent, submitted, expectedVersion)
+      auditDetail = configPreviewAuditDetail({ id: preview.id, before: preview.before, after: preview.after, classification: preview.classification })
       return {
         id: preview.id,
         before: editable(preview.before),
@@ -190,7 +198,7 @@ export class AgentOperationsService {
         classification: structuredClone(preview.classification),
         expiresAt: preview.expiresAt,
       }
-    }, result => configPreviewAuditDetail(result))
+    }, () => auditDetail!)
   }
 
   confirmConfig(actor: string, agent: string, previewId: string, hard: boolean): Promise<AgentConfigCommitResult> {

@@ -522,7 +522,7 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, st
   const agentsApi = useMemo(() => api.listAgents && api.getAgent ? {
     listAgents: () => api.listAgents!(),
     getAgent: (name: string) => api.getAgent!(name),
-    previewAgentConfig: (name: string, config: Parameters<WorkspaceApi["previewAgentConfig"]>[1]) => api.previewAgentConfig ? api.previewAgentConfig(name, config) : Promise.reject(new ApiError(503, "operation_unavailable")),
+    previewAgentConfig: (name: string, config: Parameters<WorkspaceApi["previewAgentConfig"]>[1], expectedVersion: string) => api.previewAgentConfig ? api.previewAgentConfig(name, config, expectedVersion) : Promise.reject(new ApiError(503, "operation_unavailable")),
     confirmAgentConfig: (name: string, previewId: string, hard: boolean) => api.confirmAgentConfig ? api.confirmAgentConfig(name, previewId, hard) : Promise.reject(new ApiError(503, "operation_unavailable")),
     previewAgentAction: (name: string, action: Parameters<WorkspaceApi["previewAgentAction"]>[1]) => api.previewAgentAction ? api.previewAgentAction(name, action) : Promise.reject(new ApiError(503, "operation_unavailable")),
     confirmAgentAction: (name: string, previewId: string, idempotencyKey: string) => api.confirmAgentAction ? api.confirmAgentAction(name, previewId, idempotencyKey) : Promise.reject(new ApiError(503, "operation_unavailable")),

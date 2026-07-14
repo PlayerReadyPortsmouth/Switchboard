@@ -12,9 +12,10 @@ export interface AgentActionApi extends AgentConfigApi {
 const title = { reset: "Reset agent context", restart: "Restart agent", remove: "Remove agent" } as const
 const confirmLabel = { reset: "Reset agent", restart: "Restart agent", remove: "Save removal pending hub restart" } as const
 
-export function AgentActionDialog({ agent, action, api, online, onCancel, onSuccess }: {
+export function AgentActionDialog({ agent, action, baseVersion, api, online, onCancel, onSuccess }: {
   agent: string
   action: AgentProtectedAction
+  baseVersion: string
   api: AgentActionApi
   online: boolean
   onCancel(): void
@@ -37,14 +38,14 @@ export function AgentActionDialog({ agent, action, api, online, onCancel, onSucc
     const generation = ++previewGeneration.current
     keyRef.current = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`
     setLoading(true); setError("")
-    const request = action === "remove" ? api.previewAgentConfig(agent, null) : api.previewAgentAction(agent, action)
+    const request = action === "remove" ? api.previewAgentConfig(agent, null, baseVersion) : api.previewAgentAction(agent, action)
     void request.then(next => { if (generation === previewGeneration.current) setPreview(next) }).catch(() => { if (generation === previewGeneration.current) setError(`Could not preview ${action}. Check the connection and try again.`) }).finally(() => { if (generation === previewGeneration.current) setLoading(false) })
   }
 
   useEffect(() => {
     loadPreview()
     return () => { previewGeneration.current++ }
-  }, [action, agent, api])
+  }, [action, agent, api, baseVersion])
 
   const confirm = async () => {
     if (!preview || pendingRef.current || !online) return

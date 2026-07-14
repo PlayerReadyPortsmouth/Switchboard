@@ -30,7 +30,7 @@ afterEach(cleanup)
 describe("AgentActionDialog", () => {
   test.each(["reset", "restart"] as const)("previews %s impact before enabling confirmation", async action => {
     const api = actionApi()
-    render(<AgentActionDialog agent="qa" action={action} api={api} online onCancel={() => {}} onSuccess={() => {}} />)
+    render(<AgentActionDialog agent="qa" action={action} baseVersion="v1" api={api} online onCancel={() => {}} onSuccess={() => {}} />)
     expect(screen.getByRole("status").textContent).toContain("Checking current impact")
     expect(await screen.findByText("Agent is busy")).toBeTruthy()
     expect(screen.getByText("4 queued requests")).toBeTruthy()
@@ -43,7 +43,7 @@ describe("AgentActionDialog", () => {
     trigger.textContent = "Restart agent"
     document.body.append(trigger)
     trigger.focus()
-    render(<AgentActionDialog agent="qa" action="restart" api={actionApi()} online onCancel={() => {}} onSuccess={() => {}} />)
+    render(<AgentActionDialog agent="qa" action="restart" baseVersion="v1" api={actionApi()} online onCancel={() => {}} onSuccess={() => {}} />)
     await screen.findByText("Agent is busy")
     await userEvent.click(screen.getByRole("button", { name: "Cancel" }))
     await waitFor(() => expect(document.activeElement).toBe(trigger))
@@ -58,7 +58,7 @@ describe("AgentActionDialog", () => {
       if (attempts === 1) throw new Error("offline")
       return { state: "applied" as const, agent: "qa", action: "restart" as const }
     })
-    render(<AgentActionDialog agent="qa" action="restart" api={api} online onCancel={() => {}} onSuccess={() => {}} />)
+    render(<AgentActionDialog agent="qa" action="restart" baseVersion="v1" api={api} online onCancel={() => {}} onSuccess={() => {}} />)
     await userEvent.click(await screen.findByRole("button", { name: "Restart agent" }))
     expect((await screen.findByRole("alert")).textContent).toContain("Restart was not confirmed")
     await userEvent.click(screen.getByRole("button", { name: "Try restart again" }))
@@ -70,7 +70,7 @@ describe("AgentActionDialog", () => {
   test.each(["runtime_failure", "action_state_changed", "preview_not_found"])("clears consumed preview after definitive %s", async code => {
     const api = actionApi()
     api.confirmAgentAction = mock(async () => { throw new ApiError(code === "runtime_failure" ? 500 : 409, code) })
-    render(<AgentActionDialog agent="qa" action="restart" api={api} online onCancel={() => {}} onSuccess={() => {}} />)
+    render(<AgentActionDialog agent="qa" action="restart" baseVersion="v1" api={api} online onCancel={() => {}} onSuccess={() => {}} />)
     await userEvent.click(await screen.findByRole("button", { name: "Restart agent" }))
     expect(await screen.findByRole("button", { name: "Preview restart again" })).toBeTruthy()
     expect(screen.queryByRole("button", { name: "Try restart again" })).toBeNull()
@@ -83,7 +83,7 @@ describe("AgentActionDialog", () => {
       if (++attempts === 1) throw new ApiError(502, "request_failed")
       return { state: "applied" as const, agent: "qa", action: "restart" as const }
     })
-    render(<AgentActionDialog agent="qa" action="restart" api={api} online onCancel={() => {}} onSuccess={() => {}} />)
+    render(<AgentActionDialog agent="qa" action="restart" baseVersion="v1" api={api} online onCancel={() => {}} onSuccess={() => {}} />)
     await userEvent.click(await screen.findByRole("button", { name: "Restart agent" }))
     await userEvent.click(await screen.findByRole("button", { name: "Try restart again" }))
     const calls = (api.confirmAgentAction as ReturnType<typeof mock>).mock.calls
@@ -92,17 +92,17 @@ describe("AgentActionDialog", () => {
 
   test("removal previews config=null and remains explicitly pending restart", async () => {
     const api = actionApi()
-    render(<AgentActionDialog agent="qa" action="remove" api={api} online onCancel={() => {}} onSuccess={() => {}} />)
+    render(<AgentActionDialog agent="qa" action="remove" baseVersion="v1" api={api} online onCancel={() => {}} onSuccess={() => {}} />)
     expect(await screen.findByText(/running agent remains until the hub restarts/)).toBeTruthy()
-    expect(api.previewAgentConfig).toHaveBeenCalledWith("qa", null)
+    expect(api.previewAgentConfig).toHaveBeenCalledWith("qa", null, "v1")
     expect((screen.getByRole("button", { name: "Save removal pending hub restart" }) as HTMLButtonElement).disabled).toBe(false)
   })
 
   test.each(["reset", "restart"] as const)("going offline after %s preview blocks confirmation", async action => {
     const api = actionApi()
-    const view = render(<AgentActionDialog agent="qa" action={action} api={api} online onCancel={() => {}} onSuccess={() => {}} />)
+    const view = render(<AgentActionDialog agent="qa" action={action} baseVersion="v1" api={api} online onCancel={() => {}} onSuccess={() => {}} />)
     expect(await screen.findByText("Agent is busy")).toBeTruthy()
-    view.rerender(<AgentActionDialog agent="qa" action={action} api={api} online={false} onCancel={() => {}} onSuccess={() => {}} />)
+    view.rerender(<AgentActionDialog agent="qa" action={action} baseVersion="v1" api={api} online={false} onCancel={() => {}} onSuccess={() => {}} />)
     const confirm = screen.getByRole("button", { name: action === "reset" ? "Reset agent" : "Restart agent" }) as HTMLButtonElement
     expect(confirm.disabled).toBe(true)
     expect(screen.getByText("Agent is busy")).toBeTruthy()
@@ -119,7 +119,7 @@ describe("AgentActionDialog", () => {
     document.body.append(trigger)
     trigger.focus()
     const onCancel = mock(() => {})
-    render(<AgentActionDialog agent="qa" action="restart" api={api} online onCancel={onCancel} onSuccess={() => {}} />)
+    render(<AgentActionDialog agent="qa" action="restart" baseVersion="v1" api={api} online onCancel={onCancel} onSuccess={() => {}} />)
     await userEvent.click(await screen.findByRole("button", { name: "Restart agent" }))
     const dialog = screen.getByRole("dialog") as HTMLDialogElement
     dialog.dispatchEvent(new Event("cancel", { bubbles: true, cancelable: true }))

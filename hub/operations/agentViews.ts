@@ -58,9 +58,11 @@ export function agentConfigVersion(config: AgentConfig | null): string {
 function editableConfig(config: AgentConfig, role: WorkspaceRole): EditableAgentConfig {
   const { claudeArgs, appendSystemPrompt, ...safeRuntime } = config.runtime
   const runtime: EditableAgentConfig["runtime"] = {
-    ...structuredClone(safeRuntime),
     cwd: role === "operator" ? safeRuntime.cwd : "[redacted]",
   }
+  const safeKeys = ["model", "allowedTools", "resumable", "useMemory", "injectContext", "overseer", "sessionGovernor", "maxQueueDepth", "coalesceBurst", "pool", "audit"] as const
+  const runtimeRecord = runtime as unknown as Record<string, unknown>
+  for (const key of safeKeys) if (safeRuntime[key] !== undefined) runtimeRecord[key] = structuredClone(safeRuntime[key])
 
   if (role === "operator") {
     if (claudeArgs !== undefined) runtime.claudeArgs = configuredValue()

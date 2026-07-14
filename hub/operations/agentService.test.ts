@@ -69,7 +69,7 @@ test("hidden users cannot enumerate agents and viewers cannot mutate", async () 
   const service = harness({ features: { agents: true }, viewers: ["viewer"], operators: ["operator"] }).service
   expect(thrown(() => service.list("hidden"))).toMatchObject({ status: 404, code: "not_found" })
   expect(service.list("viewer")[0]?.permissions.configure).toBe(false)
-  await expect(service.previewConfig("viewer", "qa", config)).rejects.toMatchObject({ status: 403 })
+  await expect(service.previewConfig("viewer", "qa", config, "not-authorized" )).rejects.toMatchObject({ status: 403 })
 })
 
 test("disabled feature is hidden even from operators", () => {
@@ -79,7 +79,7 @@ test("disabled feature is hidden even from operators", () => {
 
 test("config confirm rejects disk drift without writing", async () => {
   const h = harness()
-  const preview = await h.service.previewConfig("operator", "qa", { ...config, description: "changed" })
+  const preview = await h.service.previewConfig("operator", "qa", { ...config, description: "changed" }, h.service.get("operator", "qa").version)
   h.disk.qa = { ...config, description: "outside edit" }
   await expect(h.service.confirmConfig("operator", "qa", preview.id, false)).rejects.toMatchObject({ status: 409, code: "stale_preview" })
   expect(h.commits).toHaveLength(0)
@@ -130,7 +130,7 @@ test("one idempotency key cannot cross agent or action request scope", async () 
 test("opaque configured values preserve their live values before classification", async () => {
   const h = harness()
   const editable = h.service.get("operator", "qa").config
-  const preview = await h.service.previewConfig("operator", "qa", { ...editable, description: "changed" })
+  const preview = await h.service.previewConfig("operator", "qa", { ...editable, description: "changed" }, h.service.get("operator", "qa").version)
   expect(preview.classification.fullRestart).not.toContain("unapplied:runtime.claudeArgs")
   await h.service.confirmConfig("operator", "qa", preview.id, false)
   expect(h.commits[0]?.after?.runtime.claudeArgs).toEqual(config.runtime.claudeArgs)
@@ -142,7 +142,7 @@ test("opaque configured values require a matching live value", async () => {
   delete h.disk.qa.runtime.appendSystemPrompt
   const submitted = structuredClone(config) as unknown as EditableAgentConfig
   submitted.runtime.appendSystemPrompt = { redacted: true, configured: true }
-  await expect(h.service.previewConfig("operator", "qa", submitted)).rejects.toMatchObject({ status: 400, code: "configured_value_missing" })
+  await expect(h.service.previewConfig("operator", "qa", submitted, h.service.get("operator", "qa").version)).rejects.toMatchObject({ status: 400, code: "configured_value_missing" })
 })
 
 test("legacy operations bypass only the feature flag", async () => {
@@ -194,14 +194,15 @@ test("malformed submitted runtime is rejected as invalid_config without raw exce
   const missingRuntime = { ...structuredClone(config), runtime: undefined } as unknown as AgentConfig
   const nullRuntime = { ...structuredClone(config), runtime: null } as unknown as AgentConfig
 
-  await expect(h.service.previewConfig("operator", "qa", missingRuntime)).rejects.toMatchObject({ status: 400, code: "invalid_config" })
-  await expect(h.service.previewConfig("operator", "qa", nullRuntime)).rejects.toMatchObject({ status: 400, code: "invalid_config" })
+  const version = h.service.get("operator", "qa").version
+  await expect(h.service.previewConfig("operator", "qa", missingRuntime, version)).rejects.toMatchObject({ status: 400, code: "invalid_config" })
+  await expect(h.service.previewConfig("operator", "qa", nullRuntime, version)).rejects.toMatchObject({ status: 400, code: "invalid_config" })
 })
 
 test("mutation audit details stay sanitized on success, deny, and callback failure", async () => {
   const h = harness({ features: { agents: true }, viewers: ["viewer"], operators: ["operator"] })
-  await expect(h.service.previewConfig("viewer", "qa", config)).rejects.toBeInstanceOf(AgentOperationsError)
-  await h.service.previewConfig("operator", "qa", { ...config, description: "safe audit" })
+  await expect(h.service.previewConfig("viewer", "qa", config, "not-authorized")).rejects.toBeInstanceOf(AgentOperationsError)
+  await h.service.previewConfig("operator", "qa", { ...config, description: "safe audit" }, h.service.get("operator", "qa").version)
   const serialized = JSON.stringify(h.audits)
   expect(serialized).not.toContain("private-value")
   expect(serialized).not.toContain("private instructions")
@@ -213,7 +214,7 @@ test("validation and stale-state failures audit as errors rather than authorizat
   const submitted = structuredClone(config) as unknown as EditableAgentConfig
   submitted.runtime.appendSystemPrompt = { redacted: true, configured: true }
   delete h.disk.qa.runtime.appendSystemPrompt
-  await expect(h.service.previewConfig("operator", "qa", submitted)).rejects.toMatchObject({ code: "configured_value_missing" })
+  await expect(h.service.previewConfig("operator", "qa", submitted, h.service.get("operator", "qa").version)).rejects.toMatchObject({ code: "configured_value_missing" })
   expect(h.audits.at(-1)?.outcome).toBe("error")
 })
 
@@ -241,7 +242,7 @@ test("server rejects exhaustive malformed editable config shapes", async () => {
     { ...config, runtime: { ...config.runtime, claudeArgs: { redacted: true } } },
   ]
   for (const submitted of malformed) {
-    await expect(h.service.previewConfig("operator", "qa", submitted as never)).rejects.toMatchObject({ status: 400, code: "invalid_config" })
+    await expect(h.service.previewConfig("operator", "qa", submitted as never, h.service.get("operator", "qa").version)).rejects.toMatchObject({ status: 400, code: "invalid_config" })
   }
 })
 
@@ -250,6 +251,53 @@ test("config preview rejects a stale editor base before issuing a token", async 
   const base = h.service.get("operator", "qa").version
   h.disk.qa.description = "changed elsewhere"
   await expect(h.service.previewConfig("operator", "qa", config, base)).rejects.toMatchObject({ status: 409, code: "stale_config" })
+})
+
+test("operations config preview requires a non-empty editor base version", async () => {
+  const h = harness()
+  await expect(h.service.previewConfig("operator", "qa", config, "")).rejects.toMatchObject({ status: 400, code: "invalid_expected_version" })
+  await expect((h.service.previewConfig as any)("operator", "qa", config)).rejects.toMatchObject({ status: 400, code: "invalid_expected_version" })
+})
+
+test("server rejects unknown editable keys recursively", async () => {
+  const h = harness({ features: { agents: true }, viewers: ["viewer"], operators: ["operator"] })
+  const cases = [
+    { ...config, surprise: true },
+    { ...config, access: { ...config.access, unexpected: ["x"] } },
+    { ...config, runtime: { ...config.runtime, env: { API_TOKEN: "secret" } } },
+    { ...config, runtime: { ...config.runtime, overseer: { enabled: true, extra: true } } },
+    { ...config, runtime: { ...config.runtime, sessionGovernor: { enabled: true, extra: true } } },
+    { ...config, runtime: { ...config.runtime, pool: { min: 1, max: 2, extra: true } } },
+  ]
+  const version = h.service.get("operator", "qa").version
+  for (const submitted of cases) await expect(h.service.previewConfig("operator", "qa", submitted as never, version)).rejects.toMatchObject({ status: 400, code: "invalid_config" })
+  expect(JSON.stringify(h.audits)).not.toContain("API_TOKEN")
+  expect(JSON.stringify(h.service.get("viewer", "qa"))).not.toContain("API_TOKEN")
+})
+
+test("existing unknown runtime keys are excluded from viewer projections and audit evidence", async () => {
+  const h = harness({ features: { agents: true }, viewers: ["viewer"], operators: ["operator"] })
+  ;(h.disk.qa.runtime as unknown as Record<string, unknown>).env = { API_TOKEN: "disk-secret" }
+  expect(JSON.stringify(h.service.get("viewer", "qa"))).not.toContain("API_TOKEN")
+  const submitted = h.service.get("operator", "qa").config
+  await h.service.previewConfig("operator", "qa", submitted, h.service.get("operator", "qa").version)
+  expect(JSON.stringify(h.audits)).not.toContain("API_TOKEN")
+  expect(JSON.stringify(h.audits)).not.toContain("disk-secret")
+})
+
+test("audit classifies opaque replacements by path without storing either value", async () => {
+  const h = harness()
+  const submitted = h.service.get("operator", "qa").config
+  submitted.runtime.claudeArgs = ["--replacement-secret"]
+  submitted.runtime.appendSystemPrompt = "replacement prompt secret"
+  const preview = await h.service.previewConfig("operator", "qa", submitted, h.service.get("operator", "qa").version)
+  const audit = h.audits.find(row => row.detail?.previewId === preview.id)!
+  expect(audit.detail?.diff).toEqual(expect.arrayContaining(["runtime.claudeArgs", "runtime.appendSystemPrompt"]))
+  const serialized = JSON.stringify(audit)
+  expect(serialized).not.toContain("private-value")
+  expect(serialized).not.toContain("private instructions")
+  expect(serialized).not.toContain("replacement-secret")
+  expect(serialized).not.toContain("replacement prompt secret")
 })
 
 test("pooled runtime actions conflict without runtime work or successful audit", () => {
@@ -275,7 +323,7 @@ test("config preview and confirmation audits include redacted correlated evidenc
   const h = harness()
   const next = h.service.get("operator", "qa").config
   next.description = "audited change"
-  const preview = await h.service.previewConfig("operator", "qa", next)
+  const preview = await h.service.previewConfig("operator", "qa", next, h.service.get("operator", "qa").version)
   await h.service.confirmConfig("operator", "qa", preview.id, false)
   const serialized = JSON.stringify(h.audits)
   expect(serialized).toContain(preview.id)

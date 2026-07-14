@@ -4,7 +4,7 @@ import type { AgentConfigCommitResult, AgentConfigPreview, EditableAgentConfig, 
 import { editableAgentConfigError, isConfiguredValueSentinel } from "../../../hub/operations/editableAgentConfigValidation"
 
 export interface AgentConfigApi {
-  previewAgentConfig(agent: string, config: EditableAgentConfig | null, expectedVersion?: string): Promise<AgentConfigPreview>
+  previewAgentConfig(agent: string, config: EditableAgentConfig | null, expectedVersion: string): Promise<AgentConfigPreview>
   confirmAgentConfig(agent: string, previewId: string, hard: boolean): Promise<AgentConfigCommitResult>
 }
 
@@ -16,7 +16,7 @@ const classificationHeading = { safe: "Changes can apply live", hard: "Agent res
 export function AgentConfigEditor({ agent, config, baseVersion, api, online, onApplied, onReload }: {
   agent: string
   config: EditableAgentConfig
-  baseVersion?: string
+  baseVersion: string
   api: AgentConfigApi
   online: boolean
   onApplied(result: AgentConfigCommitResult): void
@@ -61,7 +61,7 @@ export function AgentConfigEditor({ agent, config, baseVersion, api, online, onA
   }
   const requestPreview = async () => {
     setBusy(true); setError(""); setPreview(null)
-    try { setPreview(originVersion === undefined ? await api.previewAgentConfig(agent, draft) : await api.previewAgentConfig(agent, draft, originVersion)) }
+    try { setPreview(await api.previewAgentConfig(agent, draft, originVersion)) }
     catch (cause) {
       if (cause instanceof ApiError && cause.code === "stale_config") { setStaleDraft(true); setError("") }
       else setError("Configuration preview failed. Check the connection and try again.")

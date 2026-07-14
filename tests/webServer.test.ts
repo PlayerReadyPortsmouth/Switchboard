@@ -253,6 +253,16 @@ test("agent operations routes dispatch list, detail, config, and action requests
   ])
 })
 
+test("operations config preview rejects omitted and blank expected versions", async () => {
+  const auth = { "x-switchboard-user": "a@b.com" }
+  const omitted = await handleWebRequest(post("/api/operations/agents/qa/config/preview", { config: null }, auth), fakeDeps())
+  const blank = await handleWebRequest(post("/api/operations/agents/qa/config/preview", { config: null, expectedVersion: "  " }, auth), fakeDeps())
+  expect(omitted.status).toBe(400)
+  expect(await omitted.json()).toEqual({ error: "missing_expected_version" })
+  expect(blank.status).toBe(400)
+  expect(await blank.json()).toEqual({ error: "invalid_expected_version" })
+})
+
 test("agent operations map authorization errors and hide routes before identity", async () => {
   const forbidden = await handleWebRequest(post("/api/operations/agents/qa/actions/preview", { action: "reset" }, { "x-switchboard-user": "viewer@example.com" }), fakeDeps({
     agentOperations: { ...fakeDeps().agentOperations, previewAction: () => { throw new AgentOperationsError(403, "forbidden") } },
