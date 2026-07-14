@@ -43,6 +43,22 @@ test("normalizes and validates the trusted web identity header", () => {
   expect(() => loadConfigs(dir)).toThrow("config: webIdentityHeader must be a valid HTTP header name")
 })
 
+test("rejects invalid workspace access entries", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sb-cfg-"))
+  const write = (workspace: unknown) => writeFileSync(join(dir, "hub.config.json"), JSON.stringify({
+    discord: { enabled: false }, guildIds: [], socketPath: "s", stateDir: "d", workspace,
+    routerModel: "m", switchThreshold: 0.7, defaultAgent: "qa", ephemeralTimeoutMs: 1, tagStyle: "prefix", chatKeyScope: "user",
+  }))
+  writeFileSync(join(dir, "agents.json"), JSON.stringify({ qa: { emoji: "x", description: "q", mode: "persistent", access: { roles: ["*"] }, runtime: { cwd: "." } } }))
+
+  write({ viewers: "*" })
+  expect(() => loadConfigs(dir)).toThrow("config: workspace.viewers must be a non-empty string array")
+  write({ viewers: [""] })
+  expect(() => loadConfigs(dir)).toThrow("config: workspace.viewers must be a non-empty string array")
+  write({ operators: [42] })
+  expect(() => loadConfigs(dir)).toThrow("config: workspace.operators must be a non-empty string array")
+})
+
 test("explicitly disabled Discord remains disabled", () => {
   const dir = mkdtempSync(join(tmpdir(), "sb-cfg-"))
   writeFileSync(join(dir, "hub.config.json"), JSON.stringify({

@@ -25,6 +25,14 @@ export function createDiscordRuntime<T>(
   return startup.enabled ? create(startup.token) : undefined
 }
 
+function validateWorkspaceAccess(hub: HubConfig): void {
+  for (const [name, value] of [["viewers", hub.workspace?.viewers], ["operators", hub.workspace?.operators]] as const) {
+    if (value !== undefined && (!Array.isArray(value) || value.some(entry => typeof entry !== "string" || !entry))) {
+      throw new Error(`config: workspace.${name} must be a non-empty string array`)
+    }
+  }
+}
+
 function readConfigFile(dir: string, file: string, hint: string): string {
   try {
     return readFileSync(join(dir, file), "utf8")
@@ -49,6 +57,7 @@ export function loadConfigs(dir: string): { hub: HubConfig; agents: AgentRegistr
   if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(hub.webIdentityHeader)) {
     throw new Error("config: webIdentityHeader must be a valid HTTP header name")
   }
+  validateWorkspaceAccess(hub)
 
   hub.socketPath = expandHome(hub.socketPath)
   hub.stateDir = expandHome(hub.stateDir)

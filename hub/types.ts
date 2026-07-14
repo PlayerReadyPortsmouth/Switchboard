@@ -266,6 +266,17 @@ export interface OutboundRoute {
   requireApproval?: boolean // reserved: gate behind the deploy-approver before firing (future)
 }
 
+export interface WorkspaceConfig {
+  features?: {
+    agents?: boolean
+    approvals?: boolean
+    operations?: boolean
+    settings?: boolean
+  }
+  viewers?: string[]
+  operators?: string[]
+}
+
 export interface HubConfig {
   botTokenEnv?: string
   discord?: { enabled?: boolean }
@@ -274,6 +285,7 @@ export interface HubConfig {
   stateDir: string
   conversationDbFile?: string
   webIdentityHeader?: string // trusted reverse-proxy identity header; default X-Switchboard-User
+  workspace?: WorkspaceConfig
   routerModel: string
   switchThreshold: number
   timezone?: string             // default tz for cron schedules (default "Europe/London")
