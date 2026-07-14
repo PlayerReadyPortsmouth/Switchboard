@@ -106,7 +106,9 @@ export class CodexAppServerTransport implements AgentTransport {
     let result: unknown
     if (saved) {
       try { result = await this.request("thread/resume", { threadId: saved, ...this.threadSettings() }) }
-      catch {
+      catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        if (!/(missing|not found|invalid).{0,30}thread|thread.{0,30}(missing|not found|invalid)/i.test(message)) throw error
         this.clearSession()
         result = await this.request("thread/start", this.threadSettings())
       }

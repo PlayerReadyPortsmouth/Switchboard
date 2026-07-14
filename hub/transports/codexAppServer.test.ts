@@ -104,6 +104,17 @@ describe("Codex app-server lifecycle", () => {
     expect(h.saved).toEqual(["thr-fresh"])
   })
 
+  test("does not discard a saved thread for a transient resume error", async () => {
+    const h = harness({}, { readSession: () => "thr-old" })
+    const starting = h.transport.start()
+    await tick(); h.proc.emit({ id: 1, result: {} }); await tick()
+    const resume = h.proc.last("thread/resume")
+    h.proc.emit({ id: resume.id, error: { code: -32000, message: "authentication temporarily unavailable" } })
+    await expect(starting).rejects.toThrow(/authentication/)
+    expect(h.cleared).toEqual([])
+    expect(h.proc.last("thread/start")).toBeUndefined()
+  })
+
   test("rejects startup and pending requests on process exit, and closes idempotently", async () => {
     const h = harness()
     const starting = h.transport.start()
