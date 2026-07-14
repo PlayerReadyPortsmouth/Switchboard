@@ -3,8 +3,149 @@ export type MessageState = "committed" | "queued" | "working" | "streaming" | "c
 export type SyncMode = "two_way" | "inbound_only" | "outbound_only" | "notifications_only"
 export type ConnectionState = "connecting" | "live" | "reconnecting" | "offline"
 
-export interface AgentSummary { name: string; alive: boolean; busy: boolean }
-export interface Session { identity: string; agents: AgentSummary[] }
+export interface SessionAgentSummary { name: string; alive: boolean; busy: boolean }
+export interface Session {
+  identity: string
+  agents: SessionAgentSummary[]
+  features: { agents: boolean }
+  permissions: { agents: "hidden" | "viewer" | "operator" }
+}
+
+export interface AgentPermissions {
+  configure: boolean
+  reset: boolean
+  restart: boolean
+  remove: boolean
+}
+
+export interface AgentSummary {
+  name: string
+  emoji: string
+  description: string
+  mode: "persistent" | "ephemeral"
+  status: "offline" | "idle" | "busy"
+  queueDepth: number
+  contextFill: number
+  costUsd: number
+  replicas: number
+  lastActivityMs: number
+  currentTool: string | null
+  lastTool: { name: string; error: boolean } | null
+  currentWork: { state: "prodding" | "compacting"; goal: string; round: number; max: number } | null
+  model: string | null
+  version: string
+  permissions: AgentPermissions
+}
+
+export interface AgentAccess {
+  roles: string[]
+  users?: string[]
+  consultableBy?: string[]
+  peerableBy?: string[]
+}
+
+export interface OverseerPolicy {
+  enabled: boolean
+  maxIterations?: number
+  maxWallclockMs?: number
+  model?: string
+}
+
+export interface GovernorPolicy {
+  enabled: boolean
+  softPct?: number
+  hardPct?: number
+  strategy?: "restart" | "cli"
+}
+
+export interface PoolPolicy {
+  min?: number
+  max?: number
+  scaleUpQueue?: number
+  scaleUpSustainMs?: number
+  replicaIdleMs?: number
+  isolateCwd?: boolean
+}
+
+export interface AgentRuntime {
+  cwd: string
+  model?: string
+  allowedTools?: string[]
+  claudeArgs?: string[]
+  appendSystemPrompt?: string
+  resumable?: boolean
+  useMemory?: boolean
+  injectContext?: "always" | "onSwitch" | "never"
+  overseer?: OverseerPolicy
+  sessionGovernor?: GovernorPolicy
+  maxQueueDepth?: number
+  coalesceBurst?: boolean
+  pool?: PoolPolicy
+  audit?: boolean
+}
+
+export interface AgentConfig {
+  emoji: string
+  description: string
+  mode: "persistent" | "ephemeral"
+  access: AgentAccess
+  runtime: AgentRuntime
+}
+
+export interface RedactedConfiguredValue { redacted: true; configured: true }
+
+export interface EditableAgentConfig extends Omit<AgentConfig, "runtime"> {
+  runtime: Omit<AgentRuntime, "claudeArgs" | "appendSystemPrompt"> & {
+    claudeArgs?: string[] | RedactedConfiguredValue
+    appendSystemPrompt?: string | RedactedConfiguredValue
+  }
+}
+
+export interface AgentDetail extends AgentSummary { config: EditableAgentConfig }
+export type AgentRuntimeAction = "reset" | "restart"
+export type AgentChangeTier = "safe" | "hard" | "restart"
+
+export interface AgentConfigPreview {
+  id: string
+  before: EditableAgentConfig | null
+  after: EditableAgentConfig | null
+  classification: { tier: AgentChangeTier; fullRestart: string[] }
+  expiresAt: number
+}
+
+export interface AgentActionPreview {
+  id: string
+  actor: string
+  agent: string
+  action: AgentRuntimeAction
+  statusVersion: string
+  impact: { busy: boolean; queueDepth: number }
+  expiresAt: number
+}
+
+export interface AgentConfigCommitResult { state: "applied"; restarted: string[]; fullRestart: string[] }
+export interface AgentActionResult { state: "applied"; agent: string; action: AgentRuntimeAction }
+
+export type AgentOperationsEvent = ({
+  kind: "agent_changed"
+  agent: string
+  ts: number
+} | {
+  kind: "agents_snapshot"
+  ts: number
+} | {
+  kind: "config_applied"
+  agent: string
+  ts: number
+} | {
+  kind: "action_completed"
+  agent: string
+  action: AgentRuntimeAction
+  ts: number
+} | {
+  kind: "snapshot_required"
+  ts: number
+}) & { sequence: number }
 export interface Conversation { id: string; title: string; primaryAgent: string; createdBy: string; createdAt: number; updatedAt: number; archivedAt: number | null }
 export interface ConversationInput { title: string; primaryAgent: string }
 export interface ConversationUpdate { title?: string; primaryAgent?: string }

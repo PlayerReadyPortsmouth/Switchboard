@@ -27,7 +27,12 @@ function installEvent(prompt: () => Promise<void> = async () => {}) {
 }
 
 const api: AppApi = {
-  session: async () => ({ identity: "ada@example.com", agents: [{ name: "architect", alive: true, busy: false }] }),
+  session: async () => ({
+    identity: "ada@example.com",
+    agents: [{ name: "architect", alive: true, busy: false }],
+    features: { agents: true },
+    permissions: { agents: "operator" },
+  }),
   listConversations: async () => [],
   createConversation: async () => { throw new Error("not used") },
   archiveConversation: async () => { throw new Error("not used") },

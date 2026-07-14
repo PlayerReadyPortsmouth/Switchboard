@@ -13,6 +13,8 @@ const screen = within(document.body)
 
 const session: Session = {
   identity: "ada@example.com",
+  features: { agents: true },
+  permissions: { agents: "operator" },
   agents: [
     { name: "architect", alive: true, busy: false },
     { name: "reviewer", alive: true, busy: true },

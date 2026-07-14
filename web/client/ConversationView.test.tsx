@@ -13,6 +13,8 @@ const conversation: Conversation = {
 }
 const session: Session = {
   identity: "ada@example.com",
+  features: { agents: true },
+  permissions: { agents: "operator" },
   agents: [{ name: "architect", alive: true, busy: false }, { name: "reviewer", alive: true, busy: false }, { name: "operator", alive: true, busy: false }],
 }
 const message = (overrides: Partial<Message> = {}): Message => ({

@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test"
 import { ApiError, WorkspaceApi } from "./api"
-import type { Conversation, Message, TransportLink } from "./types"
+import type { AgentConfig, Conversation, Message, TransportLink } from "./types"
 
 const conversation: Conversation = { id: "c/1", title: "Design", primaryAgent: "architect", createdBy: "owner@example.com", createdAt: 1, updatedAt: 1, archivedAt: null }
 const message: Message = { id: "m1", conversationId: "c/1", sequence: 1, author: "owner@example.com", origin: "web", content: "hello", replyTo: null, state: "committed", clientKey: "draft-1", createdAt: 2 }
@@ -51,6 +51,42 @@ test("typed conversation methods encode IDs and use documented request shapes", 
   expect(calls[2].headers.get("content-type")).toBe("application/json")
   expect(calls[3].headers.get("content-type")).toBe("application/json")
   expect(calls.every((call, index) => index === 2 || index === 3 || call.headers.get("content-type") === null)).toBe(true)
+})
+
+test("typed agent methods encode names and use documented request shapes", async () => {
+  const calls: Request[] = []
+  const config: AgentConfig = {
+    emoji: "🧪",
+    description: "Quality assurance",
+    mode: "persistent",
+    access: { roles: ["*"] },
+    runtime: { cwd: "C:/workspace", model: "test-model" },
+  }
+  const api = new WorkspaceApi(async input => {
+    calls.push(input as Request)
+    return Response.json({})
+  })
+
+  await api.listAgents()
+  await api.getAgent("qa/a")
+  await api.previewAgentConfig("qa/a", config)
+  await api.confirmAgentConfig("qa/a", "preview-1", true)
+  await api.previewAgentAction("qa/a", "reset")
+  await api.confirmAgentAction("qa/a", "action-1", "retry-key")
+
+  expect(calls.map(call => `${call.method} ${new URL(call.url).pathname}`)).toEqual([
+    "GET /api/operations/agents",
+    "GET /api/operations/agents/qa%2Fa",
+    "POST /api/operations/agents/qa%2Fa/config/preview",
+    "POST /api/operations/agents/qa%2Fa/config/confirm",
+    "POST /api/operations/agents/qa%2Fa/actions/preview",
+    "POST /api/operations/agents/qa%2Fa/actions/confirm",
+  ])
+  expect(await calls[2].json()).toEqual({ config })
+  expect(await calls[3].json()).toEqual({ id: "preview-1", hard: true })
+  expect(await calls[4].json()).toEqual({ action: "reset" })
+  expect(await calls[5].json()).toEqual({ id: "action-1" })
+  expect(calls[5].headers.get("idempotency-key")).toBe("retry-key")
 })
 
 test("non-JSON error responses become safe ApiErrors", async () => {

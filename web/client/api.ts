@@ -1,4 +1,21 @@
-import type { Conversation, ConversationInput, ConversationUpdate, Message, PostMessageInput, Session, TransportLink } from "./types"
+import type {
+  AgentActionPreview,
+  AgentActionResult,
+  AgentConfig,
+  AgentConfigCommitResult,
+  AgentConfigPreview,
+  AgentDetail,
+  EditableAgentConfig,
+  AgentRuntimeAction,
+  AgentSummary,
+  Conversation,
+  ConversationInput,
+  ConversationUpdate,
+  Message,
+  PostMessageInput,
+  Session,
+  TransportLink,
+} from "./types"
 
 export class ApiError extends Error {
   constructor(readonly status: number, readonly code: string) {
@@ -50,6 +67,43 @@ export class WorkspaceApi {
 
   listLinks(conversationId: string): Promise<TransportLink[]> {
     return this.request(`/api/conversations/${encodeURIComponent(conversationId)}/links`)
+  }
+
+  listAgents(): Promise<AgentSummary[]> {
+    return this.request("/api/operations/agents")
+  }
+
+  getAgent(agent: string): Promise<AgentDetail> {
+    return this.request(`/api/operations/agents/${encodeURIComponent(agent)}`)
+  }
+
+  previewAgentConfig(agent: string, config: EditableAgentConfig | AgentConfig | null): Promise<AgentConfigPreview> {
+    return this.request(`/api/operations/agents/${encodeURIComponent(agent)}/config/preview`, {
+      method: "POST",
+      json: { config },
+    })
+  }
+
+  confirmAgentConfig(agent: string, previewId: string, hard: boolean): Promise<AgentConfigCommitResult> {
+    return this.request(`/api/operations/agents/${encodeURIComponent(agent)}/config/confirm`, {
+      method: "POST",
+      json: { id: previewId, hard },
+    })
+  }
+
+  previewAgentAction(agent: string, action: AgentRuntimeAction): Promise<AgentActionPreview> {
+    return this.request(`/api/operations/agents/${encodeURIComponent(agent)}/actions/preview`, {
+      method: "POST",
+      json: { action },
+    })
+  }
+
+  confirmAgentAction(agent: string, previewId: string, idempotencyKey: string): Promise<AgentActionResult> {
+    return this.request(`/api/operations/agents/${encodeURIComponent(agent)}/actions/confirm`, {
+      method: "POST",
+      json: { id: previewId },
+      headers: { "idempotency-key": idempotencyKey },
+    })
   }
 
   private async request<T>(path: string, options: { method?: string; json?: unknown; headers?: HeadersInit } = {}): Promise<T> {

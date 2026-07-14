@@ -109,7 +109,12 @@ export function ConversationView({ api, conversation: suppliedConversation, mess
   const requestGenerationRef = useRef(0)
   const agentRequestRef = useRef(0)
   const renderedMessages = canonicalMessages(messages ?? localMessages)
-  const session = suppliedSession ?? { identity: suppliedConversation.createdBy, agents: [{ name: conversation.primaryAgent, alive: true, busy: false }] }
+  const session = suppliedSession ?? {
+    identity: suppliedConversation.createdBy,
+    agents: [{ name: conversation.primaryAgent, alive: true, busy: false }],
+    features: { agents: false },
+    permissions: { agents: "hidden" as const },
+  }
   const links = suppliedLinks ?? loadedLinks
 
   useLayoutEffect(() => {
@@ -282,7 +287,10 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, st
       if (pwa?.state().online === false && offlineConversationId && drafts.read(offlineConversationId)) {
         offlineFallbackRef.current = offlineConversationId
         const now = Date.now()
-        dispatch({ type: "session/loaded", session: { identity: "", agents: [] } })
+        dispatch({
+          type: "session/loaded",
+          session: { identity: "", agents: [], features: { agents: false }, permissions: { agents: "hidden" } },
+        })
         if (!current()) return
         dispatch({ type: "conversations/loaded", conversations: [{
           id: offlineConversationId, title: offlineConversationId, primaryAgent: "", createdBy: "", createdAt: now, updatedAt: now, archivedAt: null,
