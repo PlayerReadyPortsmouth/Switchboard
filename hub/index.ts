@@ -18,6 +18,8 @@ import { ThreadStateStore } from "./threadState"
 import { bunGitExec } from "./threadGit"
 import { Dispatcher, type AgentTransport } from "./transports/index"
 import { StreamJsonTransport, makeBunProcessSpawner } from "./transports/streamJson"
+import { CodexAppServerTransport } from "./transports/codexAppServer"
+import { agentProvider, sessionPathFor } from "./transports/provider"
 import { ReplicaPool } from "./agentPool"
 import { ShimSocketServer } from "./transports/shimSocket"
 import { makeRouterRunner } from "./transports/spawnClaude"
@@ -223,7 +225,8 @@ const SHIM_PATH = join(import.meta.dir, "..", "shim", "server.ts")
 const notifyRouter = new NotifyRouter()
 
 // key → live transport (persistent agent name, or jobId for spawned workers).
-const transports = new Map<string, StreamJsonTransport>()
+type ProcessAgentTransport = StreamJsonTransport | CodexAppServerTransport
+const transports = new Map<string, ProcessAgentTransport>()
 
 // Recent-message cache (per Discord channel), persisted so it survives restarts
 // and feeds the background distiller. Source for "where relevant" context injection.
@@ -480,8 +483,8 @@ async function spawnConsultClone(targetName: string, question: string): Promise<
   })
 }
 
-/** Build (but do not start) a StreamJsonTransport and register it under `key`. */
-function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonTransport {
+/** Build (but do not start) the configured provider transport and register it under `key`. */
+function makeTransport(name: string, key: string, cfg: AgentConfig): ProcessAgentTransport {
   const socketPath = join(hub.stateDir, `${key}.sock`)
   const socket = new ShimSocketServer(socketPath)
   // Agent-initiated memory: `remember` writes a note (scope defaults to this
@@ -619,20 +622,17 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonT
       return r.ok ? { url: r.url } : { error: r.reason }
     })
   }
-  const t = new StreamJsonTransport(name, cfg, {
-    spawner,
-    socket,
-    shimPath: SHIM_PATH,
-    socketPath,
-    mcpConfigPath: join(hub.stateDir, `${key}.mcp.json`),
+  const provider = agentProvider(cfg.runtime)
+  const common = {
+    socket, shimPath: SHIM_PATH, socketPath,
     resumable: cfg.runtime.resumable === true,
-    sessionPath: join(hub.stateDir, `${key}.session`),
+    sessionPath: sessionPathFor(hub.stateDir, key, provider),
     consultEnabled: !!hub.consult?.enabled,
     attachEnabled: !!hub.outboundAttachments?.enabled,
     publishEnabled: shareLinksOn,
     peeringEnabled: peeringOn,
     receiptsEnabled: !!hub.receipts?.enabled,
-    onOverflow: (inbound) => {
+    onOverflow: (inbound: InboundMessage) => {
       // Consults in the retry loop own their own retry/settle lifecycle — don't
       // short-circuit them here, just drop the overflow silently.
       if (consultRegistry.isConsultChannel(inbound.chatId)) {
@@ -648,7 +648,13 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): StreamJsonT
       }
       void gateway.sendPlain(inbound.chatId, `${cfg.emoji} ${name} is busy — please resend in a moment.`)
     },
-  })
+    reportError: (error: unknown) => process.stderr.write(`${provider} transport callback failed: ${error}\n`),
+  }
+  const t = provider === "codex"
+    ? new CodexAppServerTransport(name, cfg, { ...common, spawner: makeBunProcessSpawner("codex") })
+    : new StreamJsonTransport(name, cfg, {
+        ...common, spawner, mcpConfigPath: join(hub.stateDir, `${key}.mcp.json`),
+      })
   t.onReply((reply) => onAgentReply(reply, key))
   t.onToolUse((tools) => {
     const chat = lastChatByAgent.get(name) ?? ""
@@ -1178,7 +1184,7 @@ function buildSpawnCard(s: SpawnCardUpdate, groups: string[], jobId: string): Ca
 }
 
 /** Tear down a spawned worker once its process has exited, then run teardownCommand. */
-function scheduleTeardown(jobId: string, t: StreamJsonTransport, teardownCmd: () => string | undefined): void {
+function scheduleTeardown(jobId: string, t: ProcessAgentTransport, teardownCmd: () => string | undefined): void {
   const tick = setInterval(() => {
     if (!t.isAvailable()) {
       clearInterval(tick)
@@ -1339,7 +1345,7 @@ async function resetAgentSession(
 ): Promise<void> {
   const cfg = agents[name]
   if (!cfg) return
-  try { unlinkSync(join(hub.stateDir, `${name}.session`)) } catch {}
+  try { unlinkSync(sessionPathFor(hub.stateDir, name, agentProvider(cfg.runtime))) } catch {}
   const old = transports.get(name)
   if (old) { await old.close(); transports.delete(name) }
   const fresh = makeTransport(name, name, cfg)   // resumable, but the session file is now gone → fresh session

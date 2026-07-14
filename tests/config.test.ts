@@ -25,6 +25,41 @@ test("loads and validates both files", () => {
   expect(hub.webIdentityHeader).toBe("X-Switchboard-User")
   expect(hub.conversationDbFile).toBeUndefined()
   expect(agents.qa.mode).toBe("persistent")
+  expect(agents.qa.runtime.provider).toBe("claude")
+})
+
+test("accepts a codex provider and sandbox", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sb-cfg-"))
+  writeFileSync(join(dir, "hub.config.json"), JSON.stringify({
+    discord: { enabled: false }, guildIds: [], socketPath: "s", stateDir: "d",
+    routerModel: "m", switchThreshold: 0.7, defaultAgent: "qa",
+    ephemeralTimeoutMs: 1, tagStyle: "prefix", chatKeyScope: "user",
+  }))
+  writeFileSync(join(dir, "agents.json"), JSON.stringify({
+    qa: { emoji: "x", description: "q", mode: "persistent", access: { roles: ["*"] },
+      runtime: { cwd: ".", provider: "codex", codexSandbox: "workspace-write", codexArgs: ["--search"] } },
+  }))
+
+  const { agents } = loadConfigs(dir)
+  expect(agents.qa.runtime.provider).toBe("codex")
+  expect(agents.qa.runtime.codexSandbox).toBe("workspace-write")
+  expect(agents.qa.runtime.codexArgs).toEqual(["--search"])
+})
+
+test.each([
+  ["provider", { provider: "other" }],
+  ["codexSandbox", { provider: "codex", codexSandbox: "root" }],
+])("rejects an unknown %s", (field, runtime) => {
+  const dir = mkdtempSync(join(tmpdir(), "sb-cfg-"))
+  writeFileSync(join(dir, "hub.config.json"), JSON.stringify({
+    discord: { enabled: false }, guildIds: [], socketPath: "s", stateDir: "d",
+    routerModel: "m", switchThreshold: 0.7, defaultAgent: "qa",
+    ephemeralTimeoutMs: 1, tagStyle: "prefix", chatKeyScope: "user",
+  }))
+  writeFileSync(join(dir, "agents.json"), JSON.stringify({
+    qa: { emoji: "x", description: "q", mode: "persistent", access: { roles: ["*"] }, runtime: { cwd: ".", ...runtime } },
+  }))
+  expect(() => loadConfigs(dir)).toThrow(field)
 })
 
 test("normalizes and validates the trusted web identity header", () => {

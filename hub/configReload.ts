@@ -3,7 +3,7 @@
  *  A SAFE reload hot-swaps values that every consumer reads at call time — the
  *  router/fallback models, `commands` / `directCommands`, and per-agent `access`
  *  — WITHOUT touching any running agent process. A HARD reload additionally
- *  respawns the persistent agents whose spawn-affecting config (model, claudeArgs,
+ *  respawns the persistent agents whose spawn-affecting config (provider, model, provider args,
  *  cwd, resumable, mode, appendSystemPrompt, allowedTools) changed. Some changes
  *  can be applied by NEITHER reload and need a full hub restart: ports/host binds,
  *  the socket path, the state dir, the default agent, adding/removing an agent,
@@ -16,12 +16,15 @@ import type { HubConfig, AgentConfig, AgentRegistry } from "./types"
 const j = (v: unknown): string => JSON.stringify(v ?? null)
 
 /** The spawn-affecting fingerprint of one agent: the fields baked into its
- *  `claude` process at spawn. A change here can only take effect via a respawn. */
+ *  provider process at spawn. A change here can only take effect via a respawn. */
 export function agentSpawnSignature(cfg: AgentConfig): string {
   return j({
     mode: cfg.mode,
+    provider: cfg.runtime?.provider ?? "claude",
     model: cfg.runtime?.model,
     claudeArgs: cfg.runtime?.claudeArgs,
+    codexArgs: cfg.runtime?.codexArgs,
+    codexSandbox: cfg.runtime?.codexSandbox,
     cwd: cfg.runtime?.cwd,
     resumable: cfg.runtime?.resumable,
     appendSystemPrompt: cfg.runtime?.appendSystemPrompt,

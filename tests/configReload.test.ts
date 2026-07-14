@@ -26,6 +26,9 @@ test("agentSpawnSignature changes when model/args/cwd change", () => {
   expect(agentSpawnSignature(agent({ runtime: { cwd: "/w", model: "haiku" } }))).not.toBe(agentSpawnSignature(base))
   expect(agentSpawnSignature(agent({ runtime: { cwd: "/w", model: "opus", claudeArgs: ["-x"] } }))).not.toBe(agentSpawnSignature(base))
   expect(agentSpawnSignature(agent({ runtime: { cwd: "/other", model: "opus" } }))).not.toBe(agentSpawnSignature(base))
+  expect(agentSpawnSignature(agent({ runtime: { cwd: "/w", model: "opus", provider: "codex" } }))).not.toBe(agentSpawnSignature(base))
+  expect(agentSpawnSignature(agent({ runtime: { cwd: "/w", model: "opus", codexSandbox: "workspace-write" } }))).not.toBe(agentSpawnSignature(base))
+  expect(agentSpawnSignature(agent({ runtime: { cwd: "/w", model: "opus", codexArgs: ["--search"] } }))).not.toBe(agentSpawnSignature(base))
 })
 
 test("access-only change needs no proc restart and no full restart", () => {

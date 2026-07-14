@@ -10,7 +10,10 @@ const config: AgentConfig = {
   access: { roles: ["engineering"] },
   runtime: {
     cwd: "~",
-    model: "claude-sonnet-4-5",
+    provider: "codex",
+    model: "gpt-test",
+    codexSandbox: "workspace-write",
+    codexArgs: ["--search"],
     claudeArgs: ["--permission-prompt-tool", "secret-looking-value"],
     appendSystemPrompt: "private operator instructions",
   },
@@ -47,6 +50,7 @@ test("operator projections retain editable non-secret config without revealing s
   expect(view.config.runtime.cwd).toBe("~")
   expect(view.config.runtime.claudeArgs).toEqual({ redacted: true, configured: true })
   expect(view.config.runtime.appendSystemPrompt).toEqual({ redacted: true, configured: true })
+  expect(view.config.runtime).toMatchObject({ provider: "codex", codexSandbox: "workspace-write", codexArgs: ["--search"] })
   expect(view.permissions.configure).toBe(true)
   expect(view.version).toBe(agentConfigVersion(config))
 })

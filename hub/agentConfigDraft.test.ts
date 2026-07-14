@@ -1,6 +1,6 @@
 import { test, expect } from "bun:test"
 import { classifyAgentChange } from "./agentConfigDraft"
-import type { AgentConfig, HubConfig } from "./types"
+import type { AgentConfig, AgentRuntime, HubConfig } from "./types"
 
 const hub = { defaultAgent: "qa" } as HubConfig
 
@@ -17,6 +17,15 @@ test("access-only change classifies as safe", () => {
 
 test("spawn-signature change on a persistent non-pooled agent classifies as hard", () => {
   const after: AgentConfig = { ...base, runtime: { ...base.runtime, model: "claude-sonnet-4-6" } }
+  expect(classifyAgentChange("a", base, after, hub)).toEqual({ tier: "hard", fullRestart: [] })
+})
+
+test.each<[string, Partial<AgentRuntime>]>([
+  ["provider", { provider: "codex" }],
+  ["codex sandbox", { codexSandbox: "workspace-write" }],
+  ["codex args", { codexArgs: ["--search"] }],
+])("a %s change classifies as hard", (_field, runtime) => {
+  const after: AgentConfig = { ...base, runtime: { ...base.runtime, ...runtime } }
   expect(classifyAgentChange("a", base, after, hub)).toEqual({ tier: "hard", fullRestart: [] })
 })
 
