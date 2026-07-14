@@ -4,9 +4,11 @@ import { config as loadEnv } from "./env"
 import { createDiscordRuntime, loadConfigs, resolveDiscordStartup } from "./config"
 import { escalatedRuntime, countErrors, RateCap } from "./escalation"
 import { planReload } from "./configReload"
-import { classifyAgentChange, invalidAgentConfigShape, type AgentChangeClassification } from "./agentConfigDraft"
-import { AgentConfigPreviewRegistry, agentConfigPreviewMissState } from "./agentConfigPreview"
-import { agentConfigVersion } from "./operations/agentViews"
+import { AgentConfigPreviewRegistry } from "./agentConfigPreview"
+import { AgentOperationsError, AgentOperationsService, type AgentActionResult } from "./operations/agentService"
+import { AgentEventStream } from "./operations/agentEvents"
+import { AgentActionPreviewRegistry, IdempotencyRegistry } from "./operations/operationPreview"
+import { agentsFeatureEnabled, resolveWorkspaceRole } from "./operations/access"
 import { classifyHubChange, invalidSafeFieldValue, type HubChangeClassification } from "./hubConfigDraft"
 import { HubConfigPreviewRegistry } from "./hubConfigPreview"
 import { BaseGate } from "./baseGate"
@@ -791,6 +793,14 @@ const agentConfigPreviews = new AgentConfigPreviewRegistry(
   () => `agentprev-${++agentPreviewCounter}`,
   5 * 60_000,   // 5 minute TTL — a stale preview must be re-generated, not silently confirmed
 )
+let agentActionPreviewCounter = 0
+const agentActionPreviews = new AgentActionPreviewRegistry(
+  () => Date.now(),
+  () => `agentaction-${++agentActionPreviewCounter}`,
+  5 * 60_000,
+)
+const agentActionIdempotency = new IdempotencyRegistry<AgentActionResult>(() => Date.now(), 5 * 60_000)
+const agentEvents = new AgentEventStream()
 let hubPreviewCounter = 0
 const hubConfigPreviews = new HubConfigPreviewRegistry(
   () => Date.now(),
@@ -1322,7 +1332,11 @@ dispatcher.onTurnOutcome((outcome) => { turnCoordinator?.acceptTurnOutcome(outco
 
 /** Clear a persistent agent's context: drop its session file + respawn fresh.
  *  `reason` distinguishes a manual reset from a governor auto-compaction. */
-async function resetAgentSession(name: string, channelId: string, reason = "manual"): Promise<void> {
+async function resetAgentSession(
+  name: string,
+  reason: "manual" | "compact",
+  context?: { actor?: string; channelId?: string },
+): Promise<void> {
   const cfg = agents[name]
   if (!cfg) return
   try { unlinkSync(join(hub.stateDir, `${name}.session`)) } catch {}
@@ -1332,9 +1346,9 @@ async function resetAgentSession(name: string, channelId: string, reason = "manu
   await fresh.start()
   dispatcher.replace(name, fresh)
   if (!auditOptedOut(name)) audit.record({
-    kind: "session", actor: "hub", action: "reset", target: name, chat: channelId, detail: { reason },
+    kind: "session", actor: context?.actor ?? "hub", action: "reset", target: name, chat: context?.channelId, detail: { reason },
   })
-  void gateway.sendPlain(channelId, "🧹 context cleared — fresh session.")
+  if (context?.channelId) void gateway.sendPlain(context.channelId, "🧹 context cleared — fresh session.")
 }
 
 /** Hot-swap the one field !reload's safe tier ever applies live: per-agent
@@ -1412,7 +1426,7 @@ const governor = new SessionGovernor({
     deliverToAgent(agent, convId, "governor:checkpoint", text)
   },
   notify: (convId, text) => { void gateway.sendPlain(convId, text) },
-  reset: (agent, convId) => resetAgentSession(agent, convId, "compact"),
+  reset: (agent, convId) => resetAgentSession(agent, "compact", { channelId: convId }),
   recordHandoff: (agent, convId, summary) =>
     messageCache.record(convId, { role: "agent", text: summary, ts: Date.now(), agent }),
 })
@@ -1485,14 +1499,87 @@ function buildOverseerRows(): OverseerStatus[] {
   }))
   return [...prodding, ...compacting]
 }
+let publicAgentStatusFingerprint: string | undefined
+function refreshAgentStatus(): void {
+  const rows = buildAgentRows()
+  statusRegistry.setAgents(rows)
+  const fingerprint = JSON.stringify(rows)
+  if (fingerprint !== publicAgentStatusFingerprint) {
+    publicAgentStatusFingerprint = fingerprint
+    agentEvents.publish({ kind: "agents_snapshot", ts: Date.now() })
+  }
+}
+function refreshStatuses(): void {
+  refreshAgentStatus()
+  statusRegistry.setOverseers(buildOverseerRows())
+}
+
+const agentOperations = new AgentOperationsService({
+  workspace: hub.workspace,
+  hub,
+  readAgents: readAgentsJson,
+  statuses: () => {
+    const snapshot = statusRegistry.snapshot(Date.now())
+    return { agents: snapshot.agents, overseers: snapshot.overseers }
+  },
+  commitConfig: async ({ agent, before, after, classification, hard }) => {
+    const current = readAgentsJson()
+    if (JSON.stringify(current[agent] ?? null) !== JSON.stringify(before)) {
+      throw new AgentOperationsError(409, "stale_preview")
+    }
+    const next = { ...current }
+    if (after) next[agent] = after
+    else delete next[agent]
+    writeAgentsJson(next)
+
+    const restarted: string[] = []
+    const fullRestart = [...classification.fullRestart]
+    if (after) {
+      applySafeAgentFields(agent, after)
+      if (hard && classification.tier === "hard") {
+        try {
+          agents[agent] = { ...after, runtime: { ...after.runtime, cwd: expandHome(after.runtime.cwd) } }
+          await respawnAgent(agent)
+          restarted.push(agent)
+        } catch (error) {
+          process.stderr.write(`agent config confirm: respawn ${agent} failed: ${error}\n`)
+          fullRestart.push(`respawn-failed:${agent}`)
+        }
+      }
+    }
+    refreshAgentStatus()
+    return { state: "applied", restarted, fullRestart }
+  },
+  runAction: async ({ actor, agent, action }) => {
+    if (action === "restart") await respawnAgent(agent)
+    else await resetAgentSession(agent, "manual", { actor: `web:${actor}` })
+    refreshAgentStatus()
+    return { state: "applied", agent, action }
+  },
+  audit: ({ actor, action, target, outcome, detail }) => audit.record({
+    kind: "event", actor: `web:${actor}`, action, target, outcome, detail,
+  }),
+  now: () => Date.now(),
+  events: agentEvents,
+  configPreviews: agentConfigPreviews,
+  actionPreviews: agentActionPreviews,
+  idempotency: agentActionIdempotency,
+})
+
+const statusRefresh = hub.statusRefreshMs ?? 15_000
+if (agentsFeatureEnabled(hub.workspace)) {
+  refreshStatuses()
+  setInterval(refreshStatuses, statusRefresh).unref()
+}
 if (hub.statusChannelId) {
-  const refresh = hub.statusRefreshMs ?? 15_000
   setInterval(() => {
-    statusRegistry.setAgents(buildAgentRows())
-    statusRegistry.setOverseers(buildOverseerRows())
+    if (!agentsFeatureEnabled(hub.workspace)) refreshStatuses()
     requestBoardUpdate()
-  }, refresh).unref()
-  setTimeout(() => { statusRegistry.setAgents(buildAgentRows()); requestBoardUpdate() }, 2_000).unref()
+  }, statusRefresh).unref()
+  setTimeout(() => {
+    if (!agentsFeatureEnabled(hub.workspace)) refreshStatuses()
+    requestBoardUpdate()
+  }, 2_000).unref()
 }
 
 const toolBoardChannel = hub.toolObservability?.channelId ?? hub.statusChannelId
@@ -1611,7 +1698,7 @@ if (discordGateway) gateway.onModalSubmit((customId, userId, fields) => {
 if (discordGateway) gateway.onReaction((emojiName, userId, channelId /* , messageId */) => {
   if (!baseGate.listAllowed().includes(userId)) return
   const agentName = clearReactionAgent(channelId, emojiName, hub.channelAgents ?? [])
-  if (agentName) void resetAgentSession(agentName, channelId)
+  if (agentName) void resetAgentSession(agentName, "manual", { channelId })
 })
 
 // A Discord thread archived or deleted → hard-clean up its dedicated agent
@@ -2095,8 +2182,7 @@ if (discordGateway) gateway.handleInbound((m) => {
   // On-demand status snapshot (operator-only): renders the live board here & now.
   if (/^!(status|usage|health)\b/i.test(trimmed)) {
     if (!baseGate.listAllowed().includes(m.userId)) return
-    statusRegistry.setAgents(buildAgentRows())
-    statusRegistry.setOverseers(buildOverseerRows())
+    refreshStatuses()
     void gateway.sendCard(m.chatId, renderBoard(statusRegistry.snapshot(Date.now())))
     return
   }
@@ -2160,8 +2246,7 @@ setInterval(() => {
 // Prometheus /metrics scrape and a /health probe (and the !metrics command).
 // Off unless metricsPort is set. Serves only aggregated, non-secret numbers.
 function collectMetrics(): MetricsInput {
-  statusRegistry.setAgents(buildAgentRows())
-  statusRegistry.setOverseers(buildOverseerRows())
+  refreshStatuses()
   const now = Date.now()
   return {
     now, startedAt,
@@ -2254,80 +2339,11 @@ const webDeps: WebDeps = {
     return null
   },
 
-  listAgents: async (): Promise<Record<string, AgentConfig>> => {
-    return readAgentsJson()
-  },
-
-  previewAgentChange: async (name, config, actor) => {
-    if (config) {
-      const shapeError = invalidAgentConfigShape(config)
-      if (shapeError) return { error: shapeError }
-    }
-    const current = readAgentsJson()
-    const before = current[name] ?? null
-    const classification = classifyAgentChange(name, before, config, hub)
-    const preview = agentConfigPreviews.create(actor, name, agentConfigVersion(before), before, config, classification)
-    return { id: preview.id, before: preview.before, after: preview.after, classification: preview.classification }
-  },
-
-  confirmAgentChange: async (name, id, hard, actor) => {
-    const current = readAgentsJson()
-    const liveBefore = current[name] ?? null
-    const liveVersion = agentConfigVersion(liveBefore)
-    const pending = agentConfigPreviews.get(id)
-    const preview = agentConfigPreviews.consume(id, actor, name, liveVersion)
-    if (!preview) {
-      const state = agentConfigPreviewMissState(pending, actor, name, liveVersion, Date.now())
-      return { state, restarted: [], fullRestart: [] }
-    }
-
-    // Drift check: re-read disk fresh and compare against what the preview
-    // captured as `before` — if someone else already changed this agent since
-    // the preview was generated, refuse rather than silently clobber it.
-    if (JSON.stringify(liveBefore) !== JSON.stringify(preview.before)) {
-      return { state: "conflict", restarted: [], fullRestart: [] }
-    }
-
-    // Write to disk: add/replace/remove this one agent's entry.
-    const next = { ...current }
-    if (preview.after) next[name] = preview.after
-    else delete next[name]
-    writeAgentsJson(next)
-
-    const restarted: string[] = []
-    const fullRestart = [...preview.classification.fullRestart]
-    if (preview.after) {
-      // access is always safe to hot-swap regardless of this edit's overall tier.
-      applySafeAgentFields(name, preview.after)
-      if (hard && preview.classification.tier === "hard") {
-        try {
-          // The live `agents` registry always holds EXPANDED cwds (loadConfigs
-          // expands `~` for every agent at boot) — but `preview.after` came from
-          // readAgentsJson's raw on-disk shape (cwd still literally "~" when
-          // that's what's on disk), by design, so the web editor's diff never
-          // sees an expansion mismatch. Expand here, for the in-memory object
-          // only, before it's used to respawn a live process — Bun.spawn does
-          // NOT expand `~`, so passing the raw value through would spawn with a
-          // nonexistent cwd (ENOENT) after the old process is already closed,
-          // leaving the agent dead. Disk (already written above via
-          // writeAgentsJson) correctly keeps the raw `~` form.
-          agents[name] = { ...preview.after, runtime: { ...preview.after.runtime, cwd: expandHome(preview.after.runtime.cwd) } }
-          await respawnAgent(name)
-          restarted.push(name)
-        } catch (e) {
-          process.stderr.write(`agent config confirm: respawn ${name} failed: ${e}\n`)
-          fullRestart.push(`respawn-failed:${name}`)
-        }
-      }
-    }
-
-    audit.record({
-      kind: "event", actor: `web:${actor}`, action: "agent_config_change", target: name, outcome: "ok",
-      detail: { before: preview.before, after: preview.after, classification: preview.classification },
-    })
-
-    return { state: "applied", restarted, fullRestart }
-  },
+  agentOperations,
+  agentSessionAccess: actor => ({
+    feature: agentsFeatureEnabled(hub.workspace),
+    role: resolveWorkspaceRole(actor, hub.workspace),
+  }),
 
   listHubConfig: async (): Promise<Partial<HubConfig>> => {
     return redactHubConfig(readHubConfig())

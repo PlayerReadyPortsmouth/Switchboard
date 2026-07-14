@@ -4,6 +4,7 @@ import type { WebInput, DashboardJson } from "../hub/web"
 import type { WebDeps } from "../hub/webServer"
 import type { AgentConfig } from "../hub/types"
 import type { WorkspaceAssetHandler } from "../hub/webAssets"
+import { AgentOperationsError } from "../hub/operations/agentService"
 
 const baseInput = (): WebInput => ({
   now: 1000, startedAt: 0,
@@ -23,9 +24,19 @@ function fakeDeps(overrides: Partial<WebDeps> = {}): WebDeps {
     subscribeChannel: () => () => {},
     sendChannelMessage: async () => {},
     runCommand: async () => null,
-    listAgents: async () => ({}),
-    previewAgentChange: async () => ({ id: "prev-1", before: null, after: null, classification: { tier: "safe", fullRestart: [] } }),
-    confirmAgentChange: async () => ({ state: "not_found", restarted: [], fullRestart: [] }),
+    agentOperations: {
+      list: () => [],
+      get: () => { throw new AgentOperationsError(404, "not_found") },
+      listLegacyConfigs: () => ({}),
+      previewLegacyConfig: async () => ({ id: "prev-1", before: null, after: null, classification: { tier: "safe", fullRestart: [] } }),
+      confirmLegacyConfig: async () => { throw new AgentOperationsError(409, "preview_not_found") },
+      previewConfig: async () => ({ id: "prev-1", before: null, after: null, classification: { tier: "safe", fullRestart: [] }, expiresAt: 1_000 }),
+      confirmConfig: async () => ({ state: "applied", restarted: [], fullRestart: [] }),
+      previewAction: () => ({ id: "action-1", actor: "a@b.com", agent: "qa", action: "reset", statusVersion: "v1", impact: { busy: false, queueDepth: 0 }, expiresAt: 1_000 }),
+      confirmAction: async () => ({ state: "applied", agent: "qa", action: "reset" }),
+      subscribe: () => ({ unsubscribe() {} }),
+    },
+    agentSessionAccess: () => ({ feature: true, role: "operator" }),
     listHubConfig: async () => ({ routerModel: "claude-haiku-4-5" }),
     previewHubConfigChange: async () => ({ id: "hubprev-1", before: {}, after: {}, classification: { tier: "safe", fullRestart: [] } }),
     confirmHubConfigChange: async () => ({ state: "not_found", fullRestart: [] }),
@@ -150,7 +161,7 @@ test("POST /api/command/:name → 200 with text, unknown command → 404", async
 
 test("GET /api/agents → 200 JSON registry", async () => {
   const agentCfg: AgentConfig = { emoji: "🤖", description: "d", mode: "persistent", access: { roles: ["*"] }, runtime: { cwd: "~" } }
-  const deps = fakeDeps({ listAgents: async () => ({ qa: agentCfg }) })
+  const deps = fakeDeps({ agentOperations: { ...fakeDeps().agentOperations, listLegacyConfigs: () => ({ qa: agentCfg }) } })
   const res = await handleWebRequest(get("/api/agents", { "x-switchboard-user": "a@b.com" }), deps)
   expect(res.status).toBe(200)
   expect(await res.json()).toEqual({ qa: agentCfg })
@@ -166,10 +177,10 @@ test("POST /api/agents/:name/preview → 200, forwards name, config, and authent
   // collapse the read below to the closure-unreachable `null` initializer type.
   const called: { v: [string, unknown, string] | null } = { v: null }
   const deps = fakeDeps({
-    previewAgentChange: async (name, config, actor) => {
+    agentOperations: { ...fakeDeps().agentOperations, previewLegacyConfig: async (actor, name, config) => {
       called.v = [name, config, actor]
       return { id: "prev-1", before: null, after: config as any, classification: { tier: "restart", fullRestart: ["+agent:qa"] } }
-    },
+    } },
   })
   const res = await handleWebRequest(post("/api/agents/qa/preview", { config: { emoji: "🤖" } }, { "x-switchboard-user": "a@b.com" }), deps)
   expect(res.status).toBe(200)
@@ -177,19 +188,19 @@ test("POST /api/agents/:name/preview → 200, forwards name, config, and authent
   expect(await res.json()).toEqual({ id: "prev-1", before: null, after: { emoji: "🤖" }, classification: { tier: "restart", fullRestart: ["+agent:qa"] } })
 })
 
-test("POST /api/agents/:name/preview → 400 when previewAgentChange reports a shape error", async () => {
+test("POST /api/agents/:name/preview → maps service shape errors", async () => {
   const deps = fakeDeps({
-    previewAgentChange: async () => ({ error: "runtime.cwd must be a string" }),
+    agentOperations: { ...fakeDeps().agentOperations, previewLegacyConfig: async () => { throw new AgentOperationsError(400, "invalid_config") } },
   })
   const res = await handleWebRequest(post("/api/agents/qa/preview", { config: { emoji: "🤖" } }, { "x-switchboard-user": "a@b.com" }), deps)
   expect(res.status).toBe(400)
-  expect(await res.json()).toEqual({ error: "runtime.cwd must be a string" })
+  expect(await res.json()).toEqual({ error: "invalid_config" })
 })
 
 test("POST /api/agents/:name/confirm → 200 on applied, forwards id, hard, and the caller's email as actor", async () => {
   const called: { v: [string, string, boolean, string] | null } = { v: null }
   const deps = fakeDeps({
-    confirmAgentChange: async (name, id, hard, actor) => { called.v = [name, id, hard, actor]; return { state: "applied", restarted: [], fullRestart: [] } },
+    agentOperations: { ...fakeDeps().agentOperations, confirmLegacyConfig: async (actor, name, id, hard) => { called.v = [name, id, hard, actor]; return { state: "applied", restarted: [], fullRestart: [] } } },
   })
   const res = await handleWebRequest(post("/api/agents/qa/confirm", { id: "prev-1", hard: true }, { "x-switchboard-user": "a@b.com" }), deps)
   expect(res.status).toBe(200)
@@ -198,11 +209,11 @@ test("POST /api/agents/:name/confirm → 200 on applied, forwards id, hard, and 
 })
 
 test("POST /api/agents/:name/confirm → 409 on not_found or conflict", async () => {
-  const notFound = fakeDeps({ confirmAgentChange: async () => ({ state: "not_found", restarted: [], fullRestart: [] }) })
+  const notFound = fakeDeps({ agentOperations: { ...fakeDeps().agentOperations, confirmLegacyConfig: async () => { throw new AgentOperationsError(409, "preview_not_found") } } })
   const res1 = await handleWebRequest(post("/api/agents/qa/confirm", { id: "x", hard: false }, { "x-switchboard-user": "a@b.com" }), notFound)
   expect(res1.status).toBe(409)
 
-  const conflict = fakeDeps({ confirmAgentChange: async () => ({ state: "conflict", restarted: [], fullRestart: [] }) })
+  const conflict = fakeDeps({ agentOperations: { ...fakeDeps().agentOperations, confirmLegacyConfig: async () => { throw new AgentOperationsError(409, "stale_preview") } } })
   const res2 = await handleWebRequest(post("/api/agents/qa/confirm", { id: "x", hard: false }, { "x-switchboard-user": "a@b.com" }), conflict)
   expect(res2.status).toBe(409)
 })
@@ -210,6 +221,84 @@ test("POST /api/agents/:name/confirm → 409 on not_found or conflict", async ()
 test("DELETE /api/agents with valid identity header → 405 (known guarded path, wrong method)", async () => {
   const res = await handleWebRequest(del("/api/agents", { "x-switchboard-user": "a@b.com" }), fakeDeps())
   expect(res.status).toBe(405)
+})
+
+test("agent operations routes dispatch list, detail, config, and action requests", async () => {
+  const calls: unknown[] = []
+  const operations = {
+    ...fakeDeps().agentOperations,
+    list: (actor: string) => { calls.push(["list", actor]); return [{ name: "qa" } as any] },
+    get: (actor: string, name: string) => { calls.push(["get", actor, name]); return { name } as any },
+    previewConfig: async (actor: string, name: string, config: any) => { calls.push(["config-preview", actor, name, config]); return { id: "cp", before: null, after: config, classification: { tier: "safe" as const, fullRestart: [] }, expiresAt: 2 } },
+    confirmConfig: async (actor: string, name: string, id: string, hard: boolean) => { calls.push(["config-confirm", actor, name, id, hard]); return { state: "applied" as const, restarted: [], fullRestart: [] } },
+    previewAction: (actor: string, name: string, action: "reset" | "restart") => { calls.push(["action-preview", actor, name, action]); return { id: "ap", actor, agent: name, action, statusVersion: "v", impact: { busy: false, queueDepth: 0 }, expiresAt: 2 } },
+    confirmAction: async (actor: string, name: string, id: string, key: string) => { calls.push(["action-confirm", actor, name, id, key]); return { state: "applied" as const, agent: name, action: "reset" as const } },
+  }
+  const deps = fakeDeps({ agentOperations: operations })
+  const auth = { "x-switchboard-user": "a@b.com" }
+
+  const list = await handleWebRequest(get("/api/operations/agents", auth), deps)
+  expect((await list.json())[0].name).toBe("qa")
+  expect((await (await handleWebRequest(get("/api/operations/agents/qa", auth), deps)).json()).name).toBe("qa")
+  expect((await handleWebRequest(post("/api/operations/agents/qa/config/preview", { config: null }, auth), deps)).status).toBe(200)
+  expect((await handleWebRequest(post("/api/operations/agents/qa/config/confirm", { id: "cp", hard: true }, auth), deps)).status).toBe(200)
+  expect((await handleWebRequest(post("/api/operations/agents/qa/actions/preview", { action: "reset" }, auth), deps)).status).toBe(200)
+  const confirmRequest = post("/api/operations/agents/qa/actions/confirm", { id: "ap" }, { ...auth, "idempotency-key": "idem-1" })
+  expect(confirmRequest.headers.get("idempotency-key")).toBeTruthy()
+  expect((await handleWebRequest(confirmRequest, deps)).status).toBe(200)
+  expect(calls).toEqual([
+    ["list", "a@b.com"], ["get", "a@b.com", "qa"],
+    ["config-preview", "a@b.com", "qa", null], ["config-confirm", "a@b.com", "qa", "cp", true],
+    ["action-preview", "a@b.com", "qa", "reset"], ["action-confirm", "a@b.com", "qa", "ap", "idem-1"],
+  ])
+})
+
+test("agent operations map authorization errors and hide routes before identity", async () => {
+  const forbidden = await handleWebRequest(post("/api/operations/agents/qa/actions/preview", { action: "reset" }, { "x-switchboard-user": "viewer@example.com" }), fakeDeps({
+    agentOperations: { ...fakeDeps().agentOperations, previewAction: () => { throw new AgentOperationsError(403, "forbidden") } },
+  }))
+  expect(forbidden.status).toBe(403)
+  expect(await forbidden.json()).toEqual({ error: "forbidden" })
+  const hidden = await handleWebRequest(get("/api/operations/agents/qa", { "x-switchboard-user": "hidden@example.com" }), fakeDeps({
+    agentOperations: { ...fakeDeps().agentOperations, get: () => { throw new AgentOperationsError(404, "not_found") } },
+  }))
+  expect(hidden.status).toBe(404)
+  expect((await handleWebRequest(del("/api/operations/agents/qa"), fakeDeps())).status).toBe(400)
+  expect((await handleWebRequest(del("/api/operations/agents/qa", { "x-switchboard-user": "a@b.com" }), fakeDeps())).status).toBe(405)
+})
+
+test("agent operations reject malformed names and missing action idempotency keys", async () => {
+  const auth = { "x-switchboard-user": "a@b.com" }
+  expect((await handleWebRequest(get("/api/operations/agents/%E0%A4%A", auth), fakeDeps())).status).toBe(400)
+  const missing = await handleWebRequest(post("/api/operations/agents/qa/actions/confirm", { id: "ap" }, auth), fakeDeps())
+  expect(missing.status).toBe(400)
+  expect(await missing.json()).toEqual({ error: "missing_idempotency_key" })
+})
+
+test("GET agent operation events emits SSE IDs, honors after, and unsubscribes on cancel", async () => {
+  let seenAfter = -1
+  let unsubscribed = false
+  const deps = fakeDeps({ agentOperations: {
+    ...fakeDeps().agentOperations,
+    subscribe: (after, callback) => {
+      seenAfter = after
+      callback({ kind: "agents_snapshot", ts: 10, sequence: 5 })
+      return { unsubscribe: () => { unsubscribed = true } }
+    },
+  } })
+  const events = await handleWebRequest(get("/api/operations/agents/events?after=4", { "x-switchboard-user": "a@b.com" }), deps)
+  expect(events.headers.get("content-type")).toContain("text/event-stream")
+  const reader = events.body!.getReader()
+  const frame = new TextDecoder().decode((await reader.read()).value)
+  expect(frame).toContain("id: 5\ndata:")
+  expect(seenAfter).toBe(4)
+  await reader.cancel()
+  expect(unsubscribed).toBeTrue()
+
+  const resumed = await handleWebRequest(get("/api/operations/agents/events", { "x-switchboard-user": "a@b.com", "last-event-id": "8" }), deps)
+  expect(resumed.status).toBe(200)
+  expect(seenAfter).toBe(8)
+  await resumed.body!.cancel()
 })
 
 test("GET /api/hub-config → 200 JSON config", async () => {

@@ -2,8 +2,10 @@ import { DASHBOARD_HTML, renderDashboardJson, type WebInput } from "./web"
 import type { ChannelEvent } from "./channelStream"
 import type { TraceRecord } from "./turnTrace"
 import type { AgentConfig, HubConfig } from "./types"
-import type { AgentChangeClassification } from "./agentConfigDraft"
 import type { HubChangeClassification } from "./hubConfigDraft"
+import { AgentOperationsError, type AgentOperationsService } from "./operations/agentService"
+import type { AgentOperationsEvent } from "./operations/agentEvents"
+import type { WorkspaceRole } from "./operations/access"
 import type { Conversation, ConversationUpdate, Message, SyncMode, TransportLink } from "./conversations/types"
 import type { ConversationEvent } from "./conversations/events"
 import { ConversationForbiddenError, ConversationValidationError, MAX_MESSAGES_PAGE_SIZE } from "./conversations/service"
@@ -22,13 +24,10 @@ export interface WebDeps {
   subscribeChannel: (channelId: string, cb: (evt: ChannelEvent) => void) => () => void
   sendChannelMessage: (channelId: string, email: string, text: string) => Promise<void>
   runCommand: (name: string, channelId: string) => Promise<string | null>
-  listAgents: () => Promise<Record<string, AgentConfig>>
-  previewAgentChange: (name: string, config: AgentConfig | null, actor: string) => Promise<{
-    id: string; before: AgentConfig | null; after: AgentConfig | null; classification: AgentChangeClassification
-  } | { error: string }>
-  confirmAgentChange: (name: string, id: string, hard: boolean, actor: string) => Promise<{
-    state: "applied" | "not_found" | "conflict"; restarted: string[]; fullRestart: string[]
-  }>
+  agentOperations: Pick<AgentOperationsService,
+    "list" | "get" | "listLegacyConfigs" | "previewLegacyConfig" | "confirmLegacyConfig" |
+    "previewConfig" | "confirmConfig" | "previewAction" | "confirmAction" | "subscribe">
+  agentSessionAccess: (actor: string) => { feature: boolean; role: WorkspaceRole }
   listHubConfig: () => Promise<Partial<HubConfig>>
   previewHubConfigChange: (config: HubConfig) => Promise<{
     id: string; before: Partial<HubConfig>; after: Partial<HubConfig>; classification: HubChangeClassification
@@ -69,6 +68,21 @@ function conversationSseResponse(subscribe: (cb: (event: ConversationEvent) => v
     start(controller) {
       const enc = new TextEncoder()
       unsubscribe = subscribe(event => controller.enqueue(enc.encode(`id: ${event.sequence}\ndata: ${JSON.stringify(event)}\n\n`)))
+    },
+    cancel() { unsubscribe() },
+  })
+  return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream", "cache-control": "no-cache" } })
+}
+
+function agentOperationsSseResponse(subscribe: (cb: (event: AgentOperationsEvent) => void) => { unsubscribe(): void }): Response {
+  let unsubscribe: () => void = () => {}
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      const encoder = new TextEncoder()
+      const subscription = subscribe(event => {
+        controller.enqueue(encoder.encode(`id: ${event.sequence}\ndata: ${JSON.stringify(event)}\n\n`))
+      })
+      unsubscribe = () => subscription.unsubscribe()
     },
     cancel() { unsubscribe() },
   })
@@ -123,6 +137,13 @@ export async function handleWebRequest(
   const agentsMatch = path === "/api/agents"
   const agentPreviewMatch = /^\/api\/agents\/([^/]+)\/preview$/.exec(path)
   const agentConfirmMatch = /^\/api\/agents\/([^/]+)\/confirm$/.exec(path)
+  const operationsAgentsMatch = path === "/api/operations/agents"
+  const operationsAgentEventsMatch = path === "/api/operations/agents/events"
+  const operationsAgentDetailMatch = /^\/api\/operations\/agents\/([^/]+)$/.exec(path)
+  const operationsAgentConfigPreviewMatch = /^\/api\/operations\/agents\/([^/]+)\/config\/preview$/.exec(path)
+  const operationsAgentConfigConfirmMatch = /^\/api\/operations\/agents\/([^/]+)\/config\/confirm$/.exec(path)
+  const operationsAgentActionPreviewMatch = /^\/api\/operations\/agents\/([^/]+)\/actions\/preview$/.exec(path)
+  const operationsAgentActionConfirmMatch = /^\/api\/operations\/agents\/([^/]+)\/actions\/confirm$/.exec(path)
   const hubConfigMatch = path === "/api/hub-config"
   const hubConfigPreviewMatch = path === "/api/hub-config/preview"
   const hubConfigConfirmMatch = path === "/api/hub-config/confirm"
@@ -134,7 +155,9 @@ export async function handleWebRequest(
   const conversationLinksMatch = /^\/api\/conversations\/([^/]+)\/links$/.exec(path)
   const isGuardedRoute = path === "/api/channels" || approvalMatch || channelHistoryMatch ||
     channelTimelineMatch || channelStreamMatch || channelMessageMatch || commandMatch ||
-    agentsMatch || agentPreviewMatch || agentConfirmMatch ||
+    agentsMatch || agentPreviewMatch || agentConfirmMatch || operationsAgentsMatch || operationsAgentEventsMatch ||
+    operationsAgentDetailMatch || operationsAgentConfigPreviewMatch || operationsAgentConfigConfirmMatch ||
+    operationsAgentActionPreviewMatch || operationsAgentActionConfirmMatch ||
     hubConfigMatch || hubConfigPreviewMatch || hubConfigConfirmMatch || sessionMatch || conversationsMatch ||
     conversationItemMatch || conversationMessagesMatch || conversationEventsMatch || conversationLinksMatch
 
@@ -146,9 +169,12 @@ export async function handleWebRequest(
     if (!email) return json({ error: "missing_identity" }, 400)
 
     if (sessionMatch && method === "GET") {
+      const access = deps.agentSessionAccess(email)
       return json({
         identity: email,
         agents: deps.collect().status.agents.filter(({ mode }) => mode === "persistent").map(({ name, alive, busy }) => ({ name, alive, busy })),
+        features: { agents: access.feature },
+        permissions: { agents: access.role },
       })
     }
 
@@ -264,22 +290,58 @@ export async function handleWebRequest(
       return text === null ? json({ error: "unknown_command" }, 404) : json({ text })
     }
 
-    if (method === "GET" && agentsMatch) {
-      return json(await deps.listAgents())
-    }
+    try {
+      const decodeAgent = (match: RegExpExecArray): string => decodeURIComponent(match[1])
 
-    if (method === "POST" && agentPreviewMatch) {
-      const body = (await req.json().catch(() => null)) as { config?: AgentConfig | null } | null
-      if (body?.config === undefined) return json({ error: "missing_config" }, 400)
-      const preview = await deps.previewAgentChange(agentPreviewMatch[1], body.config, email)
-      return "error" in preview ? json(preview, 400) : json(preview)
-    }
+      if (method === "GET" && agentsMatch) return json(deps.agentOperations.listLegacyConfigs(email))
+      if (method === "POST" && agentPreviewMatch) {
+        const body = (await req.json().catch(() => null)) as { config?: AgentConfig | null } | null
+        if (body?.config === undefined) return json({ error: "missing_config" }, 400)
+        return json(await deps.agentOperations.previewLegacyConfig(email, decodeAgent(agentPreviewMatch), body.config))
+      }
+      if (method === "POST" && agentConfirmMatch) {
+        const body = (await req.json().catch(() => null)) as { id?: string; hard?: boolean } | null
+        if (!body?.id) return json({ error: "missing_id" }, 400)
+        return json(await deps.agentOperations.confirmLegacyConfig(email, decodeAgent(agentConfirmMatch), body.id, body.hard === true))
+      }
 
-    if (method === "POST" && agentConfirmMatch) {
-      const body = (await req.json().catch(() => null)) as { id?: string; hard?: boolean } | null
-      if (!body?.id) return json({ error: "missing_id" }, 400)
-      const result = await deps.confirmAgentChange(agentConfirmMatch[1], body.id, body.hard === true, email)
-      return result.state === "applied" ? json(result) : json(result, 409)
+      if (method === "GET" && operationsAgentsMatch) return json(deps.agentOperations.list(email))
+      if (method === "GET" && operationsAgentEventsMatch) {
+        const cursorText = url.searchParams.has("after") ? url.searchParams.get("after") : req.headers.get("last-event-id")
+        const after = nonNegativeInteger(cursorText, 0)
+        if (after === null) return json({ error: "invalid_after" }, 400)
+        deps.agentOperations.list(email)
+        return agentOperationsSseResponse(callback => deps.agentOperations.subscribe(after, callback))
+      }
+      if (method === "GET" && operationsAgentDetailMatch) {
+        return json(deps.agentOperations.get(email, decodeAgent(operationsAgentDetailMatch)))
+      }
+      if (method === "POST" && operationsAgentConfigPreviewMatch) {
+        const body = await bodyJson(req)
+        if (body?.config === undefined) return json({ error: "missing_config" }, 400)
+        return json(await deps.agentOperations.previewConfig(email, decodeAgent(operationsAgentConfigPreviewMatch), body.config as AgentConfig | null))
+      }
+      if (method === "POST" && operationsAgentConfigConfirmMatch) {
+        const body = await bodyJson(req)
+        if (typeof body?.id !== "string" || !body.id) return json({ error: "missing_id" }, 400)
+        return json(await deps.agentOperations.confirmConfig(email, decodeAgent(operationsAgentConfigConfirmMatch), body.id, body.hard === true))
+      }
+      if (method === "POST" && operationsAgentActionPreviewMatch) {
+        const body = await bodyJson(req)
+        if (body?.action !== "reset" && body?.action !== "restart") return json({ error: "invalid_action" }, 400)
+        return json(deps.agentOperations.previewAction(email, decodeAgent(operationsAgentActionPreviewMatch), body.action))
+      }
+      if (method === "POST" && operationsAgentActionConfirmMatch) {
+        const body = await bodyJson(req)
+        if (typeof body?.id !== "string" || !body.id) return json({ error: "missing_id" }, 400)
+        const idempotencyKey = req.headers.get("idempotency-key")
+        if (!idempotencyKey) return json({ error: "missing_idempotency_key" }, 400)
+        return json(await deps.agentOperations.confirmAction(email, decodeAgent(operationsAgentActionConfirmMatch), body.id, idempotencyKey))
+      }
+    } catch (error) {
+      if (error instanceof AgentOperationsError) return json({ error: error.code }, error.status)
+      if (error instanceof URIError) return json({ error: "malformed_agent_name" }, 400)
+      throw error
     }
 
     if (method === "GET" && hubConfigMatch) {

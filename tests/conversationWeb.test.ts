@@ -6,6 +6,7 @@ import { SqliteConversationRepository } from "../hub/conversations/sqliteReposit
 import { RepositoryConflictError, RepositoryNotFoundError } from "../hub/conversations/repository"
 import type { ConversationEvent } from "../hub/conversations/events"
 import type { Conversation, Message, TransportLink } from "../hub/conversations/types"
+import { AgentOperationsError } from "../hub/operations/agentService"
 
 const conversation: Conversation = { id: "c/1", title: "Design", primaryAgent: "architect", createdBy: "owner@example.com", createdAt: 1, updatedAt: 1, archivedAt: null }
 const message: Message = { id: "m1", conversationId: "c/1", sequence: 1, author: "owner@example.com", origin: "web", content: "hello", replyTo: null, state: "committed", clientKey: "key-1", createdAt: 2 }
@@ -14,7 +15,9 @@ const link: TransportLink = { id: "l1", conversationId: "c/1", adapter: "discord
 function deps(overrides: Partial<WebDeps> = {}): WebDeps {
   return {
     collect: () => ({ now: 1, startedAt: 0, status: { now: 1, agents: [], overseers: [], routes: [], routeRate10m: 0, ephemerals: [] }, audit: { total: 0, byKind: {}, byOutcome: {}, costUsd: 0, actors: 0 }, recent: [], pendingApprovals: 0, pendingApprovalList: [] }),
-    requireUser: req => req.headers.get("x-switchboard-user"), resolveApproval: async () => "not_found", listChannels: () => [], fetchChannelHistory: async () => [], fetchChannelTimeline: async () => [], subscribeChannel: () => () => {}, sendChannelMessage: async () => {}, runCommand: async () => null, listAgents: async () => ({}), previewAgentChange: async () => ({ error: "unused" }), confirmAgentChange: async () => ({ state: "not_found", restarted: [], fullRestart: [] }), listHubConfig: async () => ({}), previewHubConfigChange: async () => ({ error: "unused" }), confirmHubConfigChange: async () => ({ state: "not_found", fullRestart: [] }),
+    requireUser: req => req.headers.get("x-switchboard-user"), resolveApproval: async () => "not_found", listChannels: () => [], fetchChannelHistory: async () => [], fetchChannelTimeline: async () => [], subscribeChannel: () => () => {}, sendChannelMessage: async () => {}, runCommand: async () => null,
+    agentOperations: { list: () => [], get: () => { throw new AgentOperationsError(404, "not_found") }, listLegacyConfigs: () => ({}), previewLegacyConfig: async () => { throw new AgentOperationsError(400, "unused") }, confirmLegacyConfig: async () => { throw new AgentOperationsError(409, "unused") }, previewConfig: async () => { throw new AgentOperationsError(400, "unused") }, confirmConfig: async () => { throw new AgentOperationsError(409, "unused") }, previewAction: () => { throw new AgentOperationsError(400, "unused") }, confirmAction: async () => { throw new AgentOperationsError(409, "unused") }, subscribe: () => ({ unsubscribe() {} }) },
+    agentSessionAccess: () => ({ feature: true, role: "operator" }), listHubConfig: async () => ({}), previewHubConfigChange: async () => ({ error: "unused" }), confirmHubConfigChange: async () => ({ state: "not_found", fullRestart: [] }),
     createConversation: () => conversation, listConversations: () => [conversation], getConversation: () => conversation, updateConversation: () => conversation, archiveConversation: () => conversation,
     appendConversationMessage: () => ({ message, inserted: true }), listConversationMessages: () => [message], addConversationLink: () => link, listConversationLinks: () => [link], subscribeConversation: () => () => {},
     ...overrides,
@@ -39,7 +42,7 @@ test("workspace session uses the configured trusted header and exposes status-sa
     ], overseers: [], routes: [], routeRate10m: 0, ephemerals: [] }, audit: { total: 0, byKind: {}, byOutcome: {}, costUsd: 0, actors: 0 }, recent: [], pendingApprovals: 0, pendingApprovalList: [] }),
   }))
   expect(response.status).toBe(200)
-  expect(await response.json()).toEqual({ identity: "ada@example.com", agents: [{ name: "qa", alive: true, busy: false }] })
+  expect(await response.json()).toEqual({ identity: "ada@example.com", agents: [{ name: "qa", alive: true, busy: false }], features: { agents: true }, permissions: { agents: "operator" } })
   expect((await handleWebRequest(new Request("http://x/api/session"), deps())).status).toBe(400)
 })
 

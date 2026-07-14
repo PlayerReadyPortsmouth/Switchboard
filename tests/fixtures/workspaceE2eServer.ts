@@ -3,6 +3,7 @@ import { createBuiltWorkspaceAssets } from "../../hub/webAssets"
 import { handleWebRequest, type WebDeps } from "../../hub/webServer"
 import { ConversationEventStream, ConversationService, SqliteConversationRepository } from "../../hub/conversations"
 import type { WebInput } from "../../hub/web"
+import { AgentOperationsError } from "../../hub/operations/agentService"
 
 const HOST = "127.0.0.1"
 const PORT = 4173
@@ -60,9 +61,8 @@ const deps: WebDeps = {
   subscribeChannel: () => () => {},
   sendChannelMessage: async () => {},
   runCommand: async () => null,
-  listAgents: async () => ({}),
-  previewAgentChange: async () => ({ id: "fixture", before: null, after: null, classification: { tier: "safe", fullRestart: [] } }),
-  confirmAgentChange: async () => ({ state: "not_found", restarted: [], fullRestart: [] }),
+  agentOperations: { list: () => [], get: () => { throw new AgentOperationsError(404, "not_found") }, listLegacyConfigs: () => ({}), previewLegacyConfig: async () => { throw new AgentOperationsError(400, "unused") }, confirmLegacyConfig: async () => { throw new AgentOperationsError(409, "unused") }, previewConfig: async () => { throw new AgentOperationsError(400, "unused") }, confirmConfig: async () => { throw new AgentOperationsError(409, "unused") }, previewAction: () => { throw new AgentOperationsError(400, "unused") }, confirmAction: async () => { throw new AgentOperationsError(409, "unused") }, subscribe: () => ({ unsubscribe() {} }) },
+  agentSessionAccess: () => ({ feature: true, role: "operator" }),
   listHubConfig: async () => ({}),
   previewHubConfigChange: async () => ({ id: "fixture", before: {}, after: {}, classification: { tier: "safe", fullRestart: [] } }),
   confirmHubConfigChange: async () => ({ state: "not_found", fullRestart: [] }),
