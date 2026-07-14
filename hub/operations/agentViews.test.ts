@@ -89,3 +89,11 @@ test("projected editable config does not expose mutable source or shared referen
   expect(sourceStatus.lastTool).toEqual({ name: "Read", error: false })
   expect(view.config.runtime.claudeArgs).not.toBe(secondView.config.runtime.claudeArgs)
 })
+
+test("pooled agents never advertise single-process reset or restart controls", () => {
+  const pooled = structuredClone(config)
+  pooled.runtime.pool = { min: 1, max: 3 }
+  const view = projectAgentViews({ qa: pooled }, [], [], "operator")[0]!
+  expect(view.permissions.reset).toBe(false)
+  expect(view.permissions.restart).toBe(false)
+})

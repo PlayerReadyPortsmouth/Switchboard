@@ -187,6 +187,19 @@ describe("AgentConfigEditor", () => {
     await waitFor(() => expect(screen.getByText(/Reconnect to preview/)).toBeTruthy())
   })
 
+  test("same-agent refresh preserves and flags a dirty draft until deliberate reload", async () => {
+    const api = apiFor()
+    const view = render(<AgentConfigEditor agent="qa" config={config} baseVersion="v1" api={api} online onApplied={() => {}} onReload={() => {}} />)
+    await userEvent.clear(screen.getByLabelText("Description"))
+    await userEvent.type(screen.getByLabelText("Description"), "Local draft")
+    view.rerender(<AgentConfigEditor agent="qa" config={{ ...config, description: "Server update" }} baseVersion="v2" api={api} online onApplied={() => {}} onReload={() => {}} />)
+    expect((screen.getByLabelText("Description") as HTMLInputElement).value).toBe("Local draft")
+    expect(screen.getByRole("alert").textContent).toContain("local draft is preserved")
+    expect((screen.getByRole("button", { name: "Preview changes" }) as HTMLButtonElement).disabled).toBe(true)
+    await userEvent.click(screen.getByRole("button", { name: "Reload current configuration" }))
+    expect((screen.getByLabelText("Description") as HTMLInputElement).value).toBe("Server update")
+  })
+
   test("going offline after preview preserves impact but blocks confirmation", async () => {
     const api = apiFor("hard")
     const view = render(<AgentConfigEditor agent="qa" config={config} api={api} online onApplied={() => {}} onReload={() => {}} />)

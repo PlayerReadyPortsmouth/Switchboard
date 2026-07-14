@@ -1,89 +1,22 @@
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { ApiError } from "../api"
 import type { AgentConfigCommitResult, AgentConfigPreview, EditableAgentConfig, RedactedConfiguredValue } from "../types"
+import { editableAgentConfigError, isConfiguredValueSentinel } from "../../../hub/operations/editableAgentConfigValidation"
 
 export interface AgentConfigApi {
-  previewAgentConfig(agent: string, config: EditableAgentConfig | null): Promise<AgentConfigPreview>
+  previewAgentConfig(agent: string, config: EditableAgentConfig | null, expectedVersion?: string): Promise<AgentConfigPreview>
   confirmAgentConfig(agent: string, previewId: string, hard: boolean): Promise<AgentConfigCommitResult>
 }
 
-const configuredSentinel = (value: unknown): value is RedactedConfiguredValue => {
-  if (!value || typeof value !== "object") return false
-  const record = value as Record<string, unknown>
-  return Object.keys(record).length === 2 && record.redacted === true && record.configured === true
-}
-
-const stringArray = (value: unknown): value is string[] => Array.isArray(value) && value.every(item => typeof item === "string")
-const recordValue = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === "object" && !Array.isArray(value)
-const nonNegativeInteger = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && Number.isInteger(value) && value >= 0
-const unitInterval = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1
-
-function configValidationError(value: unknown, original: EditableAgentConfig): string | null {
-  if (!value || typeof value !== "object") return "Configuration must match the documented agent shape."
-  const config = value as Record<string, unknown>
-  if (typeof config.emoji !== "string" || typeof config.description !== "string" || !["persistent", "ephemeral"].includes(String(config.mode))) return "Configuration must match the documented agent shape."
-  if (!recordValue(config.access)) return "Configuration access must be an object."
-  const access = config.access
-  for (const key of ["roles", "users", "consultableBy", "peerableBy"] as const) {
-    if ((key === "roles" || access[key] !== undefined) && !stringArray(access[key])) return `Configuration access ${key} must be a string array.`
-  }
-  if (!config.runtime || typeof config.runtime !== "object") return "Configuration must match the documented agent shape."
-  const runtime = config.runtime as Record<string, unknown>
-  if (typeof runtime.cwd !== "string") return "Configuration must match the documented agent shape."
-  if (runtime.model !== undefined && typeof runtime.model !== "string") return "Configuration runtime model must be a string."
-  if (runtime.allowedTools !== undefined && !stringArray(runtime.allowedTools)) return "Configuration allowed tools must be a string array."
-  if (runtime.resumable !== undefined && typeof runtime.resumable !== "boolean") return "Configuration resumable must be true or false."
-  if (runtime.useMemory !== undefined && typeof runtime.useMemory !== "boolean") return "Configuration memory must be true or false."
-  if (runtime.injectContext !== undefined && !["always", "onSwitch", "never"].includes(String(runtime.injectContext))) return "Configuration context injection must be always, onSwitch, or never."
-  if (runtime.coalesceBurst !== undefined && typeof runtime.coalesceBurst !== "boolean") return "Configuration burst coalescing must be true or false."
-  if (runtime.audit !== undefined && typeof runtime.audit !== "boolean") return "Configuration audit must be true or false."
-  if (runtime.maxQueueDepth !== undefined && (!Number.isFinite(runtime.maxQueueDepth) || !Number.isInteger(runtime.maxQueueDepth) || Number(runtime.maxQueueDepth) < 0)) return "Configuration queue depth must be a non-negative integer."
-  if (runtime.overseer !== undefined) {
-    if (!recordValue(runtime.overseer)) return "Configuration overseer must be an object."
-    const overseer = runtime.overseer
-    if (typeof overseer.enabled !== "boolean") return "Configuration overseer enabled must be true or false."
-    for (const key of ["maxIterations", "maxWallclockMs"] as const) {
-      if (overseer[key] !== undefined && !nonNegativeInteger(overseer[key])) return `Configuration overseer ${key} must be a non-negative integer.`
-    }
-    if (overseer.model !== undefined && typeof overseer.model !== "string") return "Configuration overseer model must be a string."
-  }
-  if (runtime.sessionGovernor !== undefined) {
-    if (!recordValue(runtime.sessionGovernor)) return "Configuration session governor must be an object."
-    const governor = runtime.sessionGovernor
-    if (typeof governor.enabled !== "boolean") return "Configuration session governor enabled must be true or false."
-    for (const key of ["softPct", "hardPct"] as const) {
-      if (governor[key] !== undefined && !unitInterval(governor[key])) return `Configuration session governor ${key} must be between 0 and 1.`
-    }
-    if (governor.strategy !== undefined && !["restart", "cli"].includes(String(governor.strategy))) return "Configuration session governor strategy must be restart or cli."
-    const soft = typeof governor.softPct === "number" ? governor.softPct : 0.75
-    const hard = typeof governor.hardPct === "number" ? governor.hardPct : 0.9
-    if (soft > hard) return "Configuration session governor soft threshold cannot exceed the hard threshold."
-  }
-  if (runtime.pool !== undefined) {
-    if (!runtime.pool || typeof runtime.pool !== "object" || Array.isArray(runtime.pool)) return "Configuration pool must be an object."
-    const pool = runtime.pool as Record<string, unknown>
-    for (const key of ["min", "max", "scaleUpQueue", "scaleUpSustainMs", "replicaIdleMs"] as const) {
-      const entry = pool[key]
-      if (entry !== undefined && (!Number.isFinite(entry) || !Number.isInteger(entry) || Number(entry) < 0)) return `Configuration pool ${key} must be a non-negative integer.`
-    }
-    if (pool.isolateCwd !== undefined && typeof pool.isolateCwd !== "boolean") return "Configuration pool isolateCwd must be true or false."
-    if (typeof pool.min === "number" && typeof pool.max === "number" && pool.min > pool.max) return "Configuration pool minimum cannot exceed maximum."
-  }
-  const args = runtime.claudeArgs
-  if (configuredSentinel(args) && !configuredSentinel(original.runtime.claudeArgs)) return "Configured values can only preserve a value already configured on the server."
-  if (args !== undefined && !configuredSentinel(args) && !(Array.isArray(args) && args.every(item => typeof item === "string"))) return "Claude arguments must be a string array or the unchanged configured value."
-  const prompt = runtime.appendSystemPrompt
-  if (configuredSentinel(prompt) && !configuredSentinel(original.runtime.appendSystemPrompt)) return "Configured values can only preserve a value already configured on the server."
-  if (prompt !== undefined && !configuredSentinel(prompt) && typeof prompt !== "string") return "Appended system prompt must be a string or the unchanged configured value."
-  return null
-}
+const configuredSentinel = isConfiguredValueSentinel as (value: unknown) => value is RedactedConfiguredValue
 
 const confirmCopy = { safe: "Apply changes", hard: "Apply and restart agent", restart: "Save pending hub restart" } as const
 const classificationHeading = { safe: "Changes can apply live", hard: "Agent restart required", restart: "Full hub restart required" } as const
 
-export function AgentConfigEditor({ agent, config, api, online, onApplied, onReload }: {
+export function AgentConfigEditor({ agent, config, baseVersion, api, online, onApplied, onReload }: {
   agent: string
   config: EditableAgentConfig
+  baseVersion?: string
   api: AgentConfigApi
   online: boolean
   onApplied(result: AgentConfigCommitResult): void
@@ -96,28 +29,43 @@ export function AgentConfigEditor({ agent, config, api, online, onApplied, onRel
   const [preview, setPreview] = useState<AgentConfigPreview | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
+  const [staleDraft, setStaleDraft] = useState(false)
+  const [originVersion, setOriginVersion] = useState(baseVersion)
+  const sourceRef = useRef(config)
+  const draftRef = useRef(config)
 
   useEffect(() => {
+    sourceRef.current = config; draftRef.current = config; setOriginVersion(baseVersion); setStaleDraft(false)
     setDraft(config); setJson(JSON.stringify(config, null, 2)); setJsonError(""); setPreview(null); setError("")
   }, [agent])
 
+  useEffect(() => {
+    if (baseVersion === originVersion) return
+    if (JSON.stringify(draftRef.current) !== JSON.stringify(sourceRef.current)) { setStaleDraft(true); setPreview(null); return }
+    sourceRef.current = config; draftRef.current = config; setOriginVersion(baseVersion); setStaleDraft(false)
+    setDraft(config); setJson(JSON.stringify(config, null, 2)); setPreview(null)
+  }, [baseVersion, config, originVersion])
+
   const replaceDraft = (next: EditableAgentConfig) => {
-    setDraft(next); setJson(JSON.stringify(next, null, 2)); setJsonError(""); setPreview(null); setError("")
+    draftRef.current = next; setDraft(next); setJson(JSON.stringify(next, null, 2)); setJsonError(""); setPreview(null); setError("")
   }
   const runtime = (next: Partial<EditableAgentConfig["runtime"]>) => replaceDraft({ ...draft, runtime: { ...draft.runtime, ...next } })
   const changeJson = (next: string) => {
     setJson(next); setPreview(null); setError("")
     try {
       const parsed: unknown = JSON.parse(next)
-      const validationError = configValidationError(parsed, config)
+      const validationError = editableAgentConfigError(parsed, sourceRef.current)
       if (validationError) { setJsonError(validationError); return }
-      setDraft(parsed as EditableAgentConfig); setJsonError("")
+      draftRef.current = parsed as EditableAgentConfig; setDraft(parsed as EditableAgentConfig); setJsonError("")
     } catch { setJsonError("Enter valid JSON before previewing changes.") }
   }
   const requestPreview = async () => {
     setBusy(true); setError(""); setPreview(null)
-    try { setPreview(await api.previewAgentConfig(agent, draft)) }
-    catch { setError("Configuration preview failed. Check the connection and try again.") }
+    try { setPreview(originVersion === undefined ? await api.previewAgentConfig(agent, draft) : await api.previewAgentConfig(agent, draft, originVersion)) }
+    catch (cause) {
+      if (cause instanceof ApiError && cause.code === "stale_config") { setStaleDraft(true); setError("") }
+      else setError("Configuration preview failed. Check the connection and try again.")
+    }
     finally { setBusy(false) }
   }
   const confirm = async () => {
@@ -156,9 +104,10 @@ export function AgentConfigEditor({ agent, config, api, online, onApplied, onRel
       <label className="config-wide">Appended system prompt{promptConfigured ? <span className="configured-sentinel">Configured · preserved</span> : null}<textarea aria-label="Appended system prompt" placeholder={promptConfigured ? "Enter a replacement to change the configured value" : "Optional prompt"} value={typeof draft.runtime.appendSystemPrompt === "string" ? draft.runtime.appendSystemPrompt : ""} onChange={event => runtime({ appendSystemPrompt: event.currentTarget.value || (promptConfigured ? draft.runtime.appendSystemPrompt : undefined) })} /></label>
     </div> : <label className="config-json-label">Agent configuration JSON<textarea aria-label="Agent configuration JSON" spellCheck={false} value={json} onInput={event => changeJson(event.currentTarget.value)} /></label>}
     {jsonError ? <p className="form-error" role="alert">{jsonError}</p> : null}
+    {staleDraft ? <div className="config-recovery" role="alert"><p>The server configuration changed. Your local draft is preserved; reload deliberately before previewing.</p><button type="button" onClick={() => { sourceRef.current = config; draftRef.current = config; setDraft(config); setJson(JSON.stringify(config, null, 2)); setOriginVersion(baseVersion); setStaleDraft(false); setError(""); onReload() }}>Reload current configuration</button></div> : null}
     {error ? <div className="config-recovery" role="alert"><p>{error}</p>{error.includes("current configuration changed") ? <button type="button" onClick={onReload}>Reload current configuration</button> : null}</div> : null}
     {!online ? <p className="config-offline">Reconnect to preview and apply this local draft.</p> : null}
-    <div className="config-editor-actions"><button type="button" disabled={!online || Boolean(jsonError) || busy} onClick={() => void requestPreview()}>{busy && !preview ? "Previewing…" : "Preview changes"}</button></div>
+    <div className="config-editor-actions"><button type="button" disabled={!online || Boolean(jsonError) || busy || staleDraft} onClick={() => void requestPreview()}>{busy && !preview ? "Previewing…" : "Preview changes"}</button></div>
     {preview ? <section className="config-impact-ledger" aria-label="Configuration impact">
       <header><p className="eyebrow">Server classification</p><h4>{classificationHeading[preview.classification.tier]}</h4></header>
       <div className="config-diff"><div><strong>Before</strong><pre>{JSON.stringify(preview.before, null, 2)}</pre></div><div><strong>After</strong><pre>{JSON.stringify(preview.after, null, 2)}</pre></div></div>

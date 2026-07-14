@@ -68,6 +68,25 @@ test("snapshot-required advances the cursor and invalidates cached views", async
   expect(urls[1]).toBe("/api/operations/agents/events?after=9")
 })
 
+test("accepts a lower snapshot reset after the hub restarts", async () => {
+  const opened: EventSourceHandlers[] = []
+  const timers: Array<() => void | Promise<void>> = []
+  const urls: string[] = []
+  let invalidations = 0
+  const stream = new AgentStream({
+    open: (url, sourceHandlers) => (urls.push(url), opened.push(sourceHandlers), { close() {} }),
+    online: () => true,
+    setTimer: callback => (timers.push(callback), timers.length),
+    clearTimer: () => {},
+  })
+  await stream.start(99, { ...handlers, onInvalidate: () => { invalidations++ } })
+  opened[0].message(JSON.stringify({ kind: "snapshot_required", sequence: 1, ts: 1 } satisfies AgentOperationsEvent))
+  opened[0].error()
+  await timers[0]()
+  expect(invalidations).toBe(1)
+  expect(urls.at(-1)).toContain("after=1")
+})
+
 test("reports connecting, live, and reconnecting states", async () => {
   let sourceHandlers!: EventSourceHandlers
   const states: string[] = []

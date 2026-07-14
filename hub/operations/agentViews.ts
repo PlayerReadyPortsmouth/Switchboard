@@ -99,7 +99,7 @@ export function projectAgentViews(
       ? null
       : { state: overseer.state, goal: overseer.goal, round: overseer.round, max: overseer.max }
     const operator = role === "operator"
-    const persistentOperator = operator && config.mode === "persistent"
+    const persistentOperator = operator && config.mode === "persistent" && config.runtime.pool === undefined
 
     return {
       name,

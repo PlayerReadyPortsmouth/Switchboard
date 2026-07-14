@@ -77,10 +77,10 @@ export class WorkspaceApi {
     return this.request(`/api/operations/agents/${encodeURIComponent(agent)}`)
   }
 
-  previewAgentConfig(agent: string, config: EditableAgentConfig | AgentConfig | null): Promise<AgentConfigPreview> {
+  previewAgentConfig(agent: string, config: EditableAgentConfig | AgentConfig | null, expectedVersion?: string): Promise<AgentConfigPreview> {
     return this.request(`/api/operations/agents/${encodeURIComponent(agent)}/config/preview`, {
       method: "POST",
-      json: { config },
+      json: { config, expectedVersion },
     })
   }
 

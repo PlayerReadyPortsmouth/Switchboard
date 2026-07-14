@@ -19,7 +19,7 @@ const config: AgentConfig = {
   },
 }
 
-function harness(workspace: WorkspaceConfig = { features: { agents: true }, operators: ["operator"] }) {
+function harness(workspace: WorkspaceConfig = { features: { agents: true }, operators: ["operator"] }, failAction = false) {
   let now = 100
   let previewId = 0
   const disk: AgentRegistry = { qa: structuredClone(config) }
@@ -47,6 +47,7 @@ function harness(workspace: WorkspaceConfig = { features: { agents: true }, oper
     },
     runAction: async input => {
       actions.push(input)
+      if (failAction) throw new Error("runtime failed")
       return { state: "applied", agent: input.agent, action: input.action }
     },
     audit: input => audits.push(input),
@@ -214,4 +215,72 @@ test("validation and stale-state failures audit as errors rather than authorizat
   delete h.disk.qa.runtime.appendSystemPrompt
   await expect(h.service.previewConfig("operator", "qa", submitted)).rejects.toMatchObject({ code: "configured_value_missing" })
   expect(h.audits.at(-1)?.outcome).toBe("error")
+})
+
+test("legacy list redacts viewer and operator secrets and hides unauthorized users", () => {
+  const h = harness({ features: { agents: false }, viewers: ["viewer"], operators: ["operator"] })
+  const viewer = h.service.listLegacyConfigs("viewer").qa!
+  const operator = h.service.listLegacyConfigs("operator").qa!
+  expect(viewer.runtime.cwd).toBe("[redacted]")
+  expect(viewer.runtime).not.toHaveProperty("claudeArgs")
+  expect(viewer.runtime).not.toHaveProperty("appendSystemPrompt")
+  expect(operator.runtime.cwd).toBe("~")
+  expect(operator.runtime.claudeArgs).toEqual({ redacted: true, configured: true })
+  expect(operator.runtime.appendSystemPrompt).toEqual({ redacted: true, configured: true })
+  expect(thrown(() => h.service.listLegacyConfigs("hidden"))).toMatchObject({ status: 404 })
+})
+
+test("server rejects exhaustive malformed editable config shapes", async () => {
+  const h = harness()
+  const malformed = [
+    { ...config, access: { roles: "*" } },
+    { ...config, access: { roles: ["ok"], users: [1] } },
+    { ...config, runtime: { ...config.runtime, injectContext: "sometimes" } },
+    { ...config, runtime: { ...config.runtime, maxQueueDepth: -1 } },
+    { ...config, runtime: { ...config.runtime, pool: { min: 3, max: 1 } } },
+    { ...config, runtime: { ...config.runtime, claudeArgs: { redacted: true } } },
+  ]
+  for (const submitted of malformed) {
+    await expect(h.service.previewConfig("operator", "qa", submitted as never)).rejects.toMatchObject({ status: 400, code: "invalid_config" })
+  }
+})
+
+test("config preview rejects a stale editor base before issuing a token", async () => {
+  const h = harness()
+  const base = h.service.get("operator", "qa").version
+  h.disk.qa.description = "changed elsewhere"
+  await expect(h.service.previewConfig("operator", "qa", config, base)).rejects.toMatchObject({ status: 409, code: "stale_config" })
+})
+
+test("pooled runtime actions conflict without runtime work or successful audit", () => {
+  const h = harness()
+  h.disk.qa.runtime.pool = { min: 1, max: 2 }
+  expect(thrown(() => h.service.previewAction("operator", "qa", "restart"))).toMatchObject({ status: 409, code: "action_unavailable" })
+  expect(h.actions).toHaveLength(0)
+  expect(h.audits.at(-1)?.outcome).not.toBe("ok")
+})
+
+test("definitive runtime failure consumes the preview without completion evidence", async () => {
+  const h = harness(undefined, true)
+  const events: string[] = []
+  h.service.subscribe(0, event => events.push(event.kind))
+  const preview = h.service.previewAction("operator", "qa", "restart")
+  await expect(h.service.confirmAction("operator", "qa", preview.id, "runtime-failure")).rejects.toMatchObject({ status: 500, code: "runtime_failure" })
+  await expect(h.service.confirmAction("operator", "qa", preview.id, "new-request")).rejects.toMatchObject({ status: 409, code: "preview_not_found" })
+  expect(events).not.toContain("action_completed")
+  expect(h.audits.filter(row => row.action === "agent_action_confirm").map(row => row.outcome)).toEqual(["error", "error"])
+})
+
+test("config preview and confirmation audits include redacted correlated evidence", async () => {
+  const h = harness()
+  const next = h.service.get("operator", "qa").config
+  next.description = "audited change"
+  const preview = await h.service.previewConfig("operator", "qa", next)
+  await h.service.confirmConfig("operator", "qa", preview.id, false)
+  const serialized = JSON.stringify(h.audits)
+  expect(serialized).toContain(preview.id)
+  expect(serialized).toContain("description")
+  expect(serialized).toContain("classification")
+  expect(serialized).not.toContain("private-value")
+  expect(serialized).not.toContain("private instructions")
 })

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { AgentEventStream } from "./agentEvents"
+import { AgentEventStream, type AgentOperationsEvent } from "./agentEvents"
 
 test("events are ordered and replay after a cursor", () => {
   const stream = new AgentEventStream(3)
@@ -112,4 +112,12 @@ test("one subscriber cannot mutate the event delivered to another subscriber", (
   stream.publish({ kind: "agents_snapshot", ts: 1 })
 
   expect(seen).toEqual([1])
+})
+
+test("a cursor ahead of a restarted hub receives an explicit reset snapshot", () => {
+  const stream = new AgentEventStream()
+  const events: AgentOperationsEvent[] = []
+  stream.publish({ kind: "agents_snapshot", ts: 1 })
+  stream.subscribe(99, event => events.push(event)).unsubscribe()
+  expect(events).toEqual([{ kind: "snapshot_required", ts: expect.any(Number), sequence: 1 }])
 })

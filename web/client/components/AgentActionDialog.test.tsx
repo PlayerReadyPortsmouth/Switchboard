@@ -3,6 +3,7 @@ import { afterEach, describe, expect, mock, test } from "bun:test"
 import { act, cleanup, render, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import type { AgentActionPreview, AgentConfigPreview } from "../types"
+import { ApiError } from "../api"
 import { AgentActionDialog, type AgentActionApi } from "./AgentActionDialog"
 
 const screen = within(document.body)
@@ -62,6 +63,29 @@ describe("AgentActionDialog", () => {
     expect((await screen.findByRole("alert")).textContent).toContain("Restart was not confirmed")
     await userEvent.click(screen.getByRole("button", { name: "Try restart again" }))
     await waitFor(() => expect(api.confirmAgentAction).toHaveBeenCalledTimes(2))
+    const calls = (api.confirmAgentAction as ReturnType<typeof mock>).mock.calls
+    expect(calls[0]?.[2]).toBe(calls[1]?.[2])
+  })
+
+  test.each(["runtime_failure", "action_state_changed", "preview_not_found"])("clears consumed preview after definitive %s", async code => {
+    const api = actionApi()
+    api.confirmAgentAction = mock(async () => { throw new ApiError(code === "runtime_failure" ? 500 : 409, code) })
+    render(<AgentActionDialog agent="qa" action="restart" api={api} online onCancel={() => {}} onSuccess={() => {}} />)
+    await userEvent.click(await screen.findByRole("button", { name: "Restart agent" }))
+    expect(await screen.findByRole("button", { name: "Preview restart again" })).toBeTruthy()
+    expect(screen.queryByRole("button", { name: "Try restart again" })).toBeNull()
+  })
+
+  test("keeps the preview and idempotency key for an ambiguous proxy failure", async () => {
+    const api = actionApi()
+    let attempts = 0
+    api.confirmAgentAction = mock(async () => {
+      if (++attempts === 1) throw new ApiError(502, "request_failed")
+      return { state: "applied" as const, agent: "qa", action: "restart" as const }
+    })
+    render(<AgentActionDialog agent="qa" action="restart" api={api} online onCancel={() => {}} onSuccess={() => {}} />)
+    await userEvent.click(await screen.findByRole("button", { name: "Restart agent" }))
+    await userEvent.click(await screen.findByRole("button", { name: "Try restart again" }))
     const calls = (api.confirmAgentAction as ReturnType<typeof mock>).mock.calls
     expect(calls[0]?.[2]).toBe(calls[1]?.[2])
   })

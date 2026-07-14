@@ -138,7 +138,7 @@ describe("responsive workspace shell", () => {
     const api = fakeApi()
     api.listAgents = async () => [{
       name: "qa", emoji: "🧪", description: "Release verification", mode: "persistent", status: "idle", queueDepth: 0,
-      contextFill: 10, costUsd: 0, replicas: 1, lastActivityMs: 1, currentTool: null, lastTool: null, currentWork: null,
+      contextFill: .1, costUsd: 0, replicas: 1, lastActivityMs: 1, currentTool: null, lastTool: null, currentWork: null,
       model: "gpt-5", version: "v1", permissions: { configure: false, reset: false, restart: false, remove: false },
     }]
     api.getAgent = async () => ({ ...(await api.listAgents!())[0], config: { emoji: "🧪", description: "Release verification", mode: "persistent", access: { roles: [] }, runtime: { cwd: "/qa" } } })

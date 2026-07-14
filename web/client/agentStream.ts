@@ -105,10 +105,14 @@ export class AgentStream {
     if (!this.isCurrent(generation) || sourceAttempt !== this.sourceAttempt) return
     try {
       const event = JSON.parse(data) as AgentOperationsEvent
+      if (event.kind === "snapshot_required" && Number.isSafeInteger(event.sequence)) {
+        this.cursor = event.sequence
+        this.handlers!.onInvalidate()
+        return
+      }
       if (!Number.isSafeInteger(event.sequence) || event.sequence <= this.cursor) return
       this.cursor = event.sequence
-      if (event.kind === "snapshot_required") this.handlers!.onInvalidate()
-      else this.handlers!.onEvent(event)
+      this.handlers!.onEvent(event)
     } catch {
       // Ignore malformed payloads; the cursor remains on the last valid event.
     }

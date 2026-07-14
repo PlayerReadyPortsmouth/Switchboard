@@ -7,6 +7,7 @@ import { agentsFeatureEnabled, resolveWorkspaceRole, type WorkspaceRole } from "
 import type { AgentEventStream, AgentOperationsEvent } from "./agentEvents"
 import { agentConfigVersion, projectAgentViews, type AgentDetailView, type AgentSummaryView, type EditableAgentConfig, type RedactedConfiguredValue } from "./agentViews"
 import { agentActionPreviewMissState, type AgentActionPreview, type AgentActionPreviewRegistry, type AgentRuntimeAction, type IdempotencyRegistry } from "./operationPreview"
+import { editableAgentConfigError, isConfiguredValueSentinel } from "./editableAgentConfigValidation"
 
 export class AgentOperationsError extends Error {
   constructor(public readonly status: number, public readonly code: string) {
@@ -70,12 +71,6 @@ export interface AgentOperationsDeps {
   idempotency: IdempotencyRegistry<AgentActionResult>
 }
 
-const configuredSentinel = (value: unknown): value is RedactedConfiguredValue => {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return false
-  const record = value as Record<string, unknown>
-  return record.redacted === true && record.configured === true
-}
-
 const cloneConfig = (config: AgentConfig | null): AgentConfig | null =>
   config === null ? null : structuredClone(config)
 
@@ -102,6 +97,45 @@ function editable(config: AgentConfig | null): EditableAgentConfig | null {
   return projectAgentViews({ preview: config }, [], [], "operator")[0]!.config
 }
 
+function redactedAuditConfig(config: AgentConfig | EditableAgentConfig | null): Record<string, unknown> | null {
+  if (config === null) return null
+  const { claudeArgs, appendSystemPrompt, cwd: _cwd, ...runtime } = config.runtime
+  return {
+    emoji: config.emoji,
+    description: config.description,
+    mode: config.mode,
+    access: structuredClone(config.access),
+    runtime: {
+      ...structuredClone(runtime),
+      cwd: "[redacted]",
+      claudeArgsConfigured: claudeArgs !== undefined,
+      appendSystemPromptConfigured: appendSystemPrompt !== undefined,
+    },
+  }
+}
+
+function changedPaths(before: unknown, after: unknown, prefix = ""): string[] {
+  if (JSON.stringify(before) === JSON.stringify(after)) return []
+  if (before && after && typeof before === "object" && typeof after === "object" && !Array.isArray(before) && !Array.isArray(after)) {
+    const left = before as Record<string, unknown>, right = after as Record<string, unknown>
+    return [...new Set([...Object.keys(left), ...Object.keys(right)])].sort().flatMap(key => changedPaths(left[key], right[key], prefix ? `${prefix}.${key}` : key))
+  }
+  return [prefix || "config"]
+}
+
+function configPreviewAuditDetail(result: LegacyAgentConfigPreviewResult | AgentConfigPreviewResult): Record<string, unknown> {
+  const before = redactedAuditConfig(result.before)
+  const after = redactedAuditConfig(result.after)
+  return {
+    previewId: result.id,
+    before,
+    after,
+    diff: changedPaths(before, after),
+    classification: structuredClone(result.classification),
+    restartScope: { tier: result.classification.tier, fullRestart: [...result.classification.fullRestart] },
+  }
+}
+
 export class AgentOperationsService {
   constructor(private readonly deps: AgentOperationsDeps) {}
 
@@ -119,9 +153,10 @@ export class AgentOperationsService {
     return projectAgentViews({ [agent]: registry[agent] }, agents, overseers, role)[0]!
   }
 
-  listLegacyConfigs(actor: string): AgentRegistry {
-    this.requireVisible(actor, false)
-    return structuredClone(this.deps.readAgents())
+  listLegacyConfigs(actor: string): Record<string, EditableAgentConfig> {
+    const role = this.requireVisible(actor, false)
+    const registry = this.deps.readAgents()
+    return Object.fromEntries(projectAgentViews(registry, [], [], role).map(view => [view.name, view.config]))
   }
 
   previewLegacyConfig(actor: string, agent: string, submitted: EditableAgentConfig | AgentConfig | null): Promise<LegacyAgentConfigPreviewResult> {
@@ -134,20 +169,20 @@ export class AgentOperationsService {
         after: cloneConfig(preview.after),
         classification: structuredClone(preview.classification),
       }
-    })
+    }, result => configPreviewAuditDetail(result))
   }
 
   confirmLegacyConfig(actor: string, agent: string, previewId: string, hard: boolean): Promise<AgentConfigCommitResult> {
     return this.auditMutation(actor, "agent_config_confirm", agent, async () => {
       this.requireOperator(actor, false)
       return this.applyConfigPreview(actor, agent, previewId, hard)
-    }, { hard })
+    }, result => ({ previewId, hard, restartScope: { restarted: result.restarted, fullRestart: result.fullRestart } }))
   }
 
-  previewConfig(actor: string, agent: string, submitted: EditableAgentConfig | AgentConfig | null): Promise<AgentConfigPreviewResult> {
+  previewConfig(actor: string, agent: string, submitted: EditableAgentConfig | AgentConfig | null, expectedVersion?: string): Promise<AgentConfigPreviewResult> {
     return this.auditMutation(actor, "agent_config_preview", agent, async () => {
       this.requireOperator(actor, true)
-      const preview = this.createConfigPreview(actor, agent, submitted)
+      const preview = this.createConfigPreview(actor, agent, submitted, expectedVersion)
       return {
         id: preview.id,
         before: editable(preview.before),
@@ -155,14 +190,14 @@ export class AgentOperationsService {
         classification: structuredClone(preview.classification),
         expiresAt: preview.expiresAt,
       }
-    })
+    }, result => configPreviewAuditDetail(result))
   }
 
   confirmConfig(actor: string, agent: string, previewId: string, hard: boolean): Promise<AgentConfigCommitResult> {
     return this.auditMutation(actor, "agent_config_confirm", agent, async () => {
       this.requireOperator(actor, true)
       return this.applyConfigPreview(actor, agent, previewId, hard)
-    }, { hard })
+    }, result => ({ previewId, hard, restartScope: { restarted: result.restarted, fullRestart: result.fullRestart } }))
   }
 
   previewAction(actor: string, agent: string, action: AgentRuntimeAction): AgentActionPreview {
@@ -170,7 +205,7 @@ export class AgentOperationsService {
       this.requireOperator(actor, true)
       const config = this.deps.readAgents()[agent]
       if (!config) throw new AgentOperationsError(404, "not_found")
-      if (config.mode !== "persistent") throw new AgentOperationsError(409, "action_unavailable")
+      if (config.mode !== "persistent" || config.runtime.pool !== undefined) throw new AgentOperationsError(409, "action_unavailable")
       const current = this.findStatus(agent)
       const snapshot = statusSnapshot(current)
       return this.deps.actionPreviews.create(actor, agent, action, statusVersion(current), {
@@ -186,7 +221,7 @@ export class AgentOperationsService {
       if (!idempotencyKey) throw new AgentOperationsError(400, "missing_idempotency_key")
       const config = this.deps.readAgents()[agent]
       if (!config) throw new AgentOperationsError(404, "not_found")
-      if (config.mode !== "persistent") throw new AgentOperationsError(409, "action_unavailable")
+      if (config.mode !== "persistent" || config.runtime.pool !== undefined) throw new AgentOperationsError(409, "action_unavailable")
     } catch (error) {
       this.deps.audit({
         actor,
@@ -208,7 +243,12 @@ export class AgentOperationsService {
           const state = agentActionPreviewMissState(pending, actor, agent, currentVersion, this.deps.now())
           throw new AgentOperationsError(409, state === "state_changed" ? "action_state_changed" : "preview_not_found")
         }
-        const result = await this.deps.runAction({ actor, agent, action: preview.action })
+        let result: AgentActionResult
+        try {
+          result = await this.deps.runAction({ actor, agent, action: preview.action })
+        } catch {
+          throw new AgentOperationsError(500, "runtime_failure")
+        }
         this.deps.events.publish({ kind: "action_completed", agent, action: preview.action, ts: this.deps.now() })
         return result
       }),
@@ -223,8 +263,10 @@ export class AgentOperationsService {
     actor: string,
     agent: string,
     submitted: EditableAgentConfig | AgentConfig | null,
+    expectedVersion?: string,
   ): AgentConfigPreview {
     const liveBefore = cloneConfig(this.deps.readAgents()[agent] ?? null)
+    if (expectedVersion !== undefined && expectedVersion !== agentConfigVersion(liveBefore)) throw new AgentOperationsError(409, "stale_config")
     const after = this.resolveSubmittedConfig(submitted, liveBefore)
     if (after !== null) {
       const shapeError = invalidAgentConfigShape(after)
@@ -267,18 +309,24 @@ export class AgentOperationsService {
     liveBefore: AgentConfig | null,
   ): AgentConfig | null {
     if (submitted === null) return null
+    const original = editable(liveBefore)
+    if (typeof submitted === "object" && submitted !== null && "runtime" in submitted && submitted.runtime && typeof submitted.runtime === "object") {
+      const submittedRuntime = submitted.runtime as Record<string, unknown>
+      if (isConfiguredValueSentinel(submittedRuntime.claudeArgs) && liveBefore?.runtime.claudeArgs === undefined) throw new AgentOperationsError(400, "configured_value_missing")
+      if (isConfiguredValueSentinel(submittedRuntime.appendSystemPrompt) && liveBefore?.runtime.appendSystemPrompt === undefined) throw new AgentOperationsError(400, "configured_value_missing")
+    }
+    if (editableAgentConfigError(submitted, original) !== null) throw new AgentOperationsError(400, "invalid_config")
     const after = structuredClone(submitted) as AgentConfig
-    if (invalidAgentConfigShape(after) !== null) throw new AgentOperationsError(400, "invalid_config")
     const runtime = after.runtime as AgentConfig["runtime"] & {
       claudeArgs?: AgentConfig["runtime"]["claudeArgs"] | RedactedConfiguredValue
       appendSystemPrompt?: AgentConfig["runtime"]["appendSystemPrompt"] | RedactedConfiguredValue
     }
 
-    if (configuredSentinel(runtime.claudeArgs)) {
+    if (isConfiguredValueSentinel(runtime.claudeArgs)) {
       if (liveBefore?.runtime.claudeArgs === undefined) throw new AgentOperationsError(400, "configured_value_missing")
       runtime.claudeArgs = structuredClone(liveBefore.runtime.claudeArgs)
     }
-    if (configuredSentinel(runtime.appendSystemPrompt)) {
+    if (isConfiguredValueSentinel(runtime.appendSystemPrompt)) {
       if (liveBefore?.runtime.appendSystemPrompt === undefined) throw new AgentOperationsError(400, "configured_value_missing")
       runtime.appendSystemPrompt = liveBefore.runtime.appendSystemPrompt
     }
@@ -306,14 +354,14 @@ export class AgentOperationsService {
     action: string,
     target: string,
     operation: () => Result,
-    detail?: Record<string, unknown>,
+    detail?: Record<string, unknown> | ((result: Result) => Record<string, unknown>),
   ): Result {
     try {
       const result = operation()
-      this.deps.audit({ actor, action, target, outcome: "ok", detail })
+      this.deps.audit({ actor, action, target, outcome: "ok", detail: typeof detail === "function" ? detail(result) : detail })
       return result
     } catch (error) {
-      this.deps.audit({ actor, action, target, outcome: auditFailureOutcome(error), detail })
+      this.deps.audit({ actor, action, target, outcome: auditFailureOutcome(error), detail: typeof detail === "function" ? undefined : detail })
       throw error
     }
   }
@@ -323,14 +371,14 @@ export class AgentOperationsService {
     action: string,
     target: string,
     operation: () => Promise<Result> | Result,
-    detail?: Record<string, unknown>,
+    detail?: Record<string, unknown> | ((result: Result) => Record<string, unknown>),
   ): Promise<Result> {
     try {
       const result = await operation()
-      this.deps.audit({ actor, action, target, outcome: "ok", detail })
+      this.deps.audit({ actor, action, target, outcome: "ok", detail: typeof detail === "function" ? detail(result) : detail })
       return result
     } catch (error) {
-      this.deps.audit({ actor, action, target, outcome: auditFailureOutcome(error), detail })
+      this.deps.audit({ actor, action, target, outcome: auditFailureOutcome(error), detail: typeof detail === "function" ? undefined : detail })
       throw error
     }
   }

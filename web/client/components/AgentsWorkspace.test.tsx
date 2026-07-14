@@ -18,7 +18,7 @@ const session: Session = {
 
 const summary = (overrides: Partial<AgentSummary> = {}): AgentSummary => ({
   name: "qa", emoji: "🧪", description: "Release verification", mode: "persistent",
-  status: "busy", queueDepth: 2, contextFill: 41, costUsd: 1.25, replicas: 1,
+  status: "busy", queueDepth: 2, contextFill: .41, costUsd: 1.25, replicas: 1,
   lastActivityMs: 1_700_000_000_000, currentTool: "bun test",
   lastTool: { name: "typecheck", error: false },
   currentWork: { state: "prodding", goal: "Verify release", round: 2, max: 4 },
@@ -69,6 +69,7 @@ describe("AgentsWorkspace", () => {
     expect(screen.queryByRole("button", { name: "Open writer" })).toBeNull()
     await userEvent.click(screen.getByRole("button", { name: "Open qa" }))
     expect(await screen.findByRole("heading", { name: "qa" })).toBeTruthy()
+    expect(screen.getByText("41%")).toBeTruthy()
     expect(screen.getByText("Verify release")).toBeTruthy()
     expect(screen.queryByRole("button", { name: "Restart agent" })).toBeNull()
   })

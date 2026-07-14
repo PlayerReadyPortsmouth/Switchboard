@@ -69,7 +69,7 @@ test("typed agent methods encode names and use documented request shapes", async
 
   await api.listAgents()
   await api.getAgent("qa/a")
-  await api.previewAgentConfig("qa/a", config)
+  await api.previewAgentConfig("qa/a", config, "version-7")
   await api.confirmAgentConfig("qa/a", "preview-1", true)
   await api.previewAgentAction("qa/a", "reset")
   await api.confirmAgentAction("qa/a", "action-1", "retry-key")
@@ -82,7 +82,7 @@ test("typed agent methods encode names and use documented request shapes", async
     "POST /api/operations/agents/qa%2Fa/actions/preview",
     "POST /api/operations/agents/qa%2Fa/actions/confirm",
   ])
-  expect(await calls[2].json()).toEqual({ config })
+  expect(await calls[2].json()).toEqual({ config, expectedVersion: "version-7" })
   expect(await calls[3].json()).toEqual({ id: "preview-1", hard: true })
   expect(await calls[4].json()).toEqual({ action: "reset" })
   expect(await calls[5].json()).toEqual({ id: "action-1" })

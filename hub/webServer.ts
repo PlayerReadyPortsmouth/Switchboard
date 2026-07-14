@@ -319,7 +319,8 @@ export async function handleWebRequest(
       if (method === "POST" && operationsAgentConfigPreviewMatch) {
         const body = await bodyJson(req)
         if (body?.config === undefined) return json({ error: "missing_config" }, 400)
-        return json(await deps.agentOperations.previewConfig(email, decodeAgent(operationsAgentConfigPreviewMatch), body.config as AgentConfig | null))
+        if (body.expectedVersion !== undefined && typeof body.expectedVersion !== "string") return json({ error: "invalid_expected_version" }, 400)
+        return json(await deps.agentOperations.previewConfig(email, decodeAgent(operationsAgentConfigPreviewMatch), body.config as AgentConfig | null, body.expectedVersion))
       }
       if (method === "POST" && operationsAgentConfigConfirmMatch) {
         const body = await bodyJson(req)

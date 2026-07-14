@@ -229,7 +229,7 @@ test("agent operations routes dispatch list, detail, config, and action requests
     ...fakeDeps().agentOperations,
     list: (actor: string) => { calls.push(["list", actor]); return [{ name: "qa" } as any] },
     get: (actor: string, name: string) => { calls.push(["get", actor, name]); return { name } as any },
-    previewConfig: async (actor: string, name: string, config: any) => { calls.push(["config-preview", actor, name, config]); return { id: "cp", before: null, after: config, classification: { tier: "safe" as const, fullRestart: [] }, expiresAt: 2 } },
+    previewConfig: async (actor: string, name: string, config: any, expectedVersion?: string) => { calls.push(["config-preview", actor, name, config, expectedVersion]); return { id: "cp", before: null, after: config, classification: { tier: "safe" as const, fullRestart: [] }, expiresAt: 2 } },
     confirmConfig: async (actor: string, name: string, id: string, hard: boolean) => { calls.push(["config-confirm", actor, name, id, hard]); return { state: "applied" as const, restarted: [], fullRestart: [] } },
     previewAction: (actor: string, name: string, action: "reset" | "restart") => { calls.push(["action-preview", actor, name, action]); return { id: "ap", actor, agent: name, action, statusVersion: "v", impact: { busy: false, queueDepth: 0 }, expiresAt: 2 } },
     confirmAction: async (actor: string, name: string, id: string, key: string) => { calls.push(["action-confirm", actor, name, id, key]); return { state: "applied" as const, agent: name, action: "reset" as const } },
@@ -240,7 +240,7 @@ test("agent operations routes dispatch list, detail, config, and action requests
   const list = await handleWebRequest(get("/api/operations/agents", auth), deps)
   expect((await list.json())[0].name).toBe("qa")
   expect((await (await handleWebRequest(get("/api/operations/agents/qa", auth), deps)).json()).name).toBe("qa")
-  expect((await handleWebRequest(post("/api/operations/agents/qa/config/preview", { config: null }, auth), deps)).status).toBe(200)
+  expect((await handleWebRequest(post("/api/operations/agents/qa/config/preview", { config: null, expectedVersion: "version-7" }, auth), deps)).status).toBe(200)
   expect((await handleWebRequest(post("/api/operations/agents/qa/config/confirm", { id: "cp", hard: true }, auth), deps)).status).toBe(200)
   expect((await handleWebRequest(post("/api/operations/agents/qa/actions/preview", { action: "reset" }, auth), deps)).status).toBe(200)
   const confirmRequest = post("/api/operations/agents/qa/actions/confirm", { id: "ap" }, { ...auth, "idempotency-key": "idem-1" })
@@ -248,7 +248,7 @@ test("agent operations routes dispatch list, detail, config, and action requests
   expect((await handleWebRequest(confirmRequest, deps)).status).toBe(200)
   expect(calls).toEqual([
     ["list", "a@b.com"], ["get", "a@b.com", "qa"],
-    ["config-preview", "a@b.com", "qa", null], ["config-confirm", "a@b.com", "qa", "cp", true],
+    ["config-preview", "a@b.com", "qa", null, "version-7"], ["config-confirm", "a@b.com", "qa", "cp", true],
     ["action-preview", "a@b.com", "qa", "reset"], ["action-confirm", "a@b.com", "qa", "ap", "idem-1"],
   ])
 })

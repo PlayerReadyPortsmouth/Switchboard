@@ -53,7 +53,7 @@ export class AgentEventStream {
 
     this.subscribers.add(subscriber)
     try {
-      if (retainedFloor !== undefined && after < retainedFloor - 1) {
+      if (after > replayThrough || (retainedFloor !== undefined && after < retainedFloor - 1)) {
         callback({ kind: "snapshot_required", ts: Date.now(), sequence: replayThrough })
       } else {
         for (const event of replay) callback(eventCopy(event))
