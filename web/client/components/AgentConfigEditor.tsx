@@ -13,19 +13,52 @@ const configuredSentinel = (value: unknown): value is RedactedConfiguredValue =>
   return Object.keys(record).length === 2 && record.redacted === true && record.configured === true
 }
 
+const stringArray = (value: unknown): value is string[] => Array.isArray(value) && value.every(item => typeof item === "string")
+const recordValue = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === "object" && !Array.isArray(value)
+const nonNegativeInteger = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && Number.isInteger(value) && value >= 0
+const unitInterval = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1
+
 function configValidationError(value: unknown, original: EditableAgentConfig): string | null {
   if (!value || typeof value !== "object") return "Configuration must match the documented agent shape."
   const config = value as Record<string, unknown>
   if (typeof config.emoji !== "string" || typeof config.description !== "string" || !["persistent", "ephemeral"].includes(String(config.mode))) return "Configuration must match the documented agent shape."
-  if (!config.access || typeof config.access !== "object" || !Array.isArray((config.access as { roles?: unknown }).roles) || !(config.access as { roles: unknown[] }).roles.every(role => typeof role === "string")) return "Configuration access roles must be a string array."
+  if (!recordValue(config.access)) return "Configuration access must be an object."
+  const access = config.access
+  for (const key of ["roles", "users", "consultableBy", "peerableBy"] as const) {
+    if ((key === "roles" || access[key] !== undefined) && !stringArray(access[key])) return `Configuration access ${key} must be a string array.`
+  }
   if (!config.runtime || typeof config.runtime !== "object") return "Configuration must match the documented agent shape."
   const runtime = config.runtime as Record<string, unknown>
   if (typeof runtime.cwd !== "string") return "Configuration must match the documented agent shape."
   if (runtime.model !== undefined && typeof runtime.model !== "string") return "Configuration runtime model must be a string."
+  if (runtime.allowedTools !== undefined && !stringArray(runtime.allowedTools)) return "Configuration allowed tools must be a string array."
   if (runtime.resumable !== undefined && typeof runtime.resumable !== "boolean") return "Configuration resumable must be true or false."
   if (runtime.useMemory !== undefined && typeof runtime.useMemory !== "boolean") return "Configuration memory must be true or false."
   if (runtime.injectContext !== undefined && !["always", "onSwitch", "never"].includes(String(runtime.injectContext))) return "Configuration context injection must be always, onSwitch, or never."
+  if (runtime.coalesceBurst !== undefined && typeof runtime.coalesceBurst !== "boolean") return "Configuration burst coalescing must be true or false."
+  if (runtime.audit !== undefined && typeof runtime.audit !== "boolean") return "Configuration audit must be true or false."
   if (runtime.maxQueueDepth !== undefined && (!Number.isFinite(runtime.maxQueueDepth) || !Number.isInteger(runtime.maxQueueDepth) || Number(runtime.maxQueueDepth) < 0)) return "Configuration queue depth must be a non-negative integer."
+  if (runtime.overseer !== undefined) {
+    if (!recordValue(runtime.overseer)) return "Configuration overseer must be an object."
+    const overseer = runtime.overseer
+    if (typeof overseer.enabled !== "boolean") return "Configuration overseer enabled must be true or false."
+    for (const key of ["maxIterations", "maxWallclockMs"] as const) {
+      if (overseer[key] !== undefined && !nonNegativeInteger(overseer[key])) return `Configuration overseer ${key} must be a non-negative integer.`
+    }
+    if (overseer.model !== undefined && typeof overseer.model !== "string") return "Configuration overseer model must be a string."
+  }
+  if (runtime.sessionGovernor !== undefined) {
+    if (!recordValue(runtime.sessionGovernor)) return "Configuration session governor must be an object."
+    const governor = runtime.sessionGovernor
+    if (typeof governor.enabled !== "boolean") return "Configuration session governor enabled must be true or false."
+    for (const key of ["softPct", "hardPct"] as const) {
+      if (governor[key] !== undefined && !unitInterval(governor[key])) return `Configuration session governor ${key} must be between 0 and 1.`
+    }
+    if (governor.strategy !== undefined && !["restart", "cli"].includes(String(governor.strategy))) return "Configuration session governor strategy must be restart or cli."
+    const soft = typeof governor.softPct === "number" ? governor.softPct : 0.75
+    const hard = typeof governor.hardPct === "number" ? governor.hardPct : 0.9
+    if (soft > hard) return "Configuration session governor soft threshold cannot exceed the hard threshold."
+  }
   if (runtime.pool !== undefined) {
     if (!runtime.pool || typeof runtime.pool !== "object" || Array.isArray(runtime.pool)) return "Configuration pool must be an object."
     const pool = runtime.pool as Record<string, unknown>

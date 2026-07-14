@@ -107,6 +107,34 @@ describe("AgentConfigEditor", () => {
     expect(api.previewAgentConfig).toHaveBeenCalledTimes(0)
   })
 
+  test.each([
+    ["users", { ...config, access: { ...config.access, users: [1] } }],
+    ["consultableBy", { ...config, access: { ...config.access, consultableBy: [false] } }],
+    ["peerableBy", { ...config, access: { ...config.access, peerableBy: [null] } }],
+    ["allowedTools", { ...config, runtime: { ...config.runtime, allowedTools: [1] } }],
+    ["coalesceBurst", { ...config, runtime: { ...config.runtime, coalesceBurst: "yes" } }],
+    ["audit", { ...config, runtime: { ...config.runtime, audit: "yes" } }],
+    ["overseer object", { ...config, runtime: { ...config.runtime, overseer: [] } }],
+    ["overseer enabled", { ...config, runtime: { ...config.runtime, overseer: { enabled: "yes" } } }],
+    ["overseer iterations", { ...config, runtime: { ...config.runtime, overseer: { enabled: true, maxIterations: 1.5 } } }],
+    ["overseer wallclock", { ...config, runtime: { ...config.runtime, overseer: { enabled: true, maxWallclockMs: -1 } } }],
+    ["overseer model", { ...config, runtime: { ...config.runtime, overseer: { enabled: true, model: 4 } } }],
+    ["session governor object", { ...config, runtime: { ...config.runtime, sessionGovernor: "enabled" } }],
+    ["session governor enabled", { ...config, runtime: { ...config.runtime, sessionGovernor: { enabled: 1 } } }],
+    ["session governor soft threshold", { ...config, runtime: { ...config.runtime, sessionGovernor: { enabled: true, softPct: 1.1 } } }],
+    ["session governor hard threshold", { ...config, runtime: { ...config.runtime, sessionGovernor: { enabled: true, hardPct: -0.1 } } }],
+    ["session governor threshold order", { ...config, runtime: { ...config.runtime, sessionGovernor: { enabled: true, softPct: 0.9, hardPct: 0.8 } } }],
+    ["session governor strategy", { ...config, runtime: { ...config.runtime, sessionGovernor: { enabled: true, strategy: "reset" } } }],
+  ])("rejects invalid editable %s shape before preview", async (_field, malformed) => {
+    const api = apiFor()
+    render(<AgentConfigEditor agent="qa" config={config} api={api} online onApplied={() => {}} onReload={() => {}} />)
+    await userEvent.click(screen.getByRole("button", { name: "Advanced JSON" }))
+    setTextarea(screen.getByLabelText("Agent configuration JSON"), JSON.stringify(malformed))
+    expect(screen.getByRole("alert").textContent).toContain("Configuration")
+    expect((screen.getByRole("button", { name: "Preview changes" }) as HTMLButtonElement).disabled).toBe(true)
+    expect(api.previewAgentConfig).toHaveBeenCalledTimes(0)
+  })
+
   test("allows deliberate omission of a previously configured opaque field", async () => {
     const api = apiFor()
     render(<AgentConfigEditor agent="qa" config={config} api={api} online onApplied={() => {}} onReload={() => {}} />)
