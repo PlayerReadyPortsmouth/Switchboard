@@ -69,9 +69,12 @@ export interface PoolPolicy {
 
 export interface AgentRuntime {
   cwd: string
+  provider?: "claude" | "codex"
   model?: string
   allowedTools?: string[]
   claudeArgs?: string[]
+  codexArgs?: string[]
+  codexSandbox?: "read-only" | "workspace-write" | "danger-full-access"
   appendSystemPrompt?: string
   resumable?: boolean
   useMemory?: boolean

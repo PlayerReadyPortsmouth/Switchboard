@@ -80,7 +80,9 @@ Top-level keys are agent names → `AgentConfig` (`hub/types.ts:136-142`):
 
 - `emoji`, `description`, `mode` (`"persistent"|"ephemeral"`)
 - `access`: `{ roles: string[] ("*" = any), users?: string[], consultableBy?: string[], peerableBy?: string[] }`
-- `runtime`: `cwd` (**required**, `~` expanded), `model?`, `allowedTools?` (ephemeral only), `claudeArgs?`, `appendSystemPrompt?`, `resumable?`, `useMemory?`, `injectContext?` (`"always"|"onSwitch"|"never"`), `overseer?` `{enabled,maxIterations?,maxWallclockMs?,model?}`, `sessionGovernor?` `{enabled,softPct?,hardPct?,strategy?}`, `maxQueueDepth?` (default 8), `coalesceBurst?`, `pool?` `{min,max,scaleUpQueue,scaleUpSustainMs,replicaIdleMs}`, `audit?`
+- `runtime`: `cwd` (**required**, `~` expanded), `provider?` (`"claude"|"codex"`, default `"claude"`), `model?`, `allowedTools?` (Claude ephemeral only), `claudeArgs?`, `codexArgs?`, `codexSandbox?` (`"read-only"|"workspace-write"|"danger-full-access"`, Codex default `"danger-full-access"`), `appendSystemPrompt?`, `resumable?`, `useMemory?`, `injectContext?` (`"always"|"onSwitch"|"never"`), `overseer?` `{enabled,maxIterations?,maxWallclockMs?,model?}`, `sessionGovernor?` `{enabled,softPct?,hardPct?,strategy?}`, `maxQueueDepth?` (default 8), `coalesceBurst?`, `pool?` `{min,max,scaleUpQueue,scaleUpSustainMs,replicaIdleMs}`, `audit?`
+
+`claudeArgs` are appended to Claude CLI invocations. `codexArgs` are inserted as Codex global arguments before `app-server`. Changing the provider, model, provider-specific arguments, Codex sandbox, cwd, resumability, appended prompt, or allowed tools is a hard-reload change for a non-pooled persistent agent.
 
 `loadConfigs()` throws at boot if `defaultAgent` isn't registered, or any agent's `mode` isn't `persistent`/`ephemeral`.
 

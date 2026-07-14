@@ -125,11 +125,17 @@ export interface PoolPolicy {
   isolateCwd?: boolean      // give each replica its own worktree (writers; default false)
 }
 
+export type AgentProvider = "claude" | "codex"
+export type CodexSandbox = "read-only" | "workspace-write" | "danger-full-access"
+
 export interface AgentRuntime {
   cwd: string
+  provider?: AgentProvider
   model?: string
   allowedTools?: string[]      // ephemeral only
   claudeArgs?: string[]        // extra flags appended to the agent's `claude` invocation
+  codexArgs?: string[]         // extra global flags inserted before `codex app-server`
+  codexSandbox?: CodexSandbox  // defaults to danger-full-access in the Codex transport
   appendSystemPrompt?: string
   resumable?: boolean        // persistent agent: persist + --resume its CLI session
   useMemory?: boolean        // inject relevant memory-vault notes as context

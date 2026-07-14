@@ -65,7 +65,19 @@ export function loadConfigs(dir: string): { hub: HubConfig; agents: AgentRegistr
   if (hub.outboundAttachments?.outboxDir)
     hub.outboundAttachments.outboxDir = expandHome(hub.outboundAttachments.outboxDir)
   if (hub.shareLinks?.artifactsDir) hub.shareLinks.artifactsDir = expandHome(hub.shareLinks.artifactsDir)
-  for (const a of Object.values(agents)) a.runtime.cwd = expandHome(a.runtime.cwd)
+  for (const [name, a] of Object.entries(agents)) {
+    a.runtime.cwd = expandHome(a.runtime.cwd)
+    if (a.runtime.provider !== undefined && a.runtime.provider !== "claude" && a.runtime.provider !== "codex") {
+      throw new Error(`config: agent "${name}" has invalid runtime.provider "${a.runtime.provider}"`)
+    }
+    if (a.runtime.codexSandbox !== undefined && !["read-only", "workspace-write", "danger-full-access"].includes(a.runtime.codexSandbox)) {
+      throw new Error(`config: agent "${name}" has invalid runtime.codexSandbox "${a.runtime.codexSandbox}"`)
+    }
+    if (a.runtime.codexArgs !== undefined && (!Array.isArray(a.runtime.codexArgs) || a.runtime.codexArgs.some(arg => typeof arg !== "string"))) {
+      throw new Error(`config: agent "${name}" runtime.codexArgs must be a string array`)
+    }
+    a.runtime.provider ??= "claude"
+  }
 
   if (!agents[hub.defaultAgent]) {
     throw new Error(`config: defaultAgent "${hub.defaultAgent}" is not in the agent registry`)

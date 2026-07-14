@@ -31,10 +31,13 @@ export function editableAgentConfigError(value: unknown, original?: unknown): st
   }
   if (!record(value.runtime) || typeof value.runtime.cwd !== "string") return "Configuration runtime cwd must be a string."
   const runtime = value.runtime
-  const runtimeUnknown = unknownKey(runtime, ["cwd", "model", "allowedTools", "claudeArgs", "appendSystemPrompt", "resumable", "useMemory", "injectContext", "overseer", "sessionGovernor", "maxQueueDepth", "coalesceBurst", "pool", "audit"], "runtime")
+  const runtimeUnknown = unknownKey(runtime, ["cwd", "provider", "model", "allowedTools", "claudeArgs", "codexArgs", "codexSandbox", "appendSystemPrompt", "resumable", "useMemory", "injectContext", "overseer", "sessionGovernor", "maxQueueDepth", "coalesceBurst", "pool", "audit"], "runtime")
   if (runtimeUnknown) return runtimeUnknown
+  if (runtime.provider !== undefined && runtime.provider !== "claude" && runtime.provider !== "codex") return "Configuration runtime provider must be claude or codex."
   if (runtime.model !== undefined && typeof runtime.model !== "string") return "Configuration runtime model must be a string."
   if (runtime.allowedTools !== undefined && !strings(runtime.allowedTools)) return "Configuration allowed tools must be a string array."
+  if (runtime.codexArgs !== undefined && !strings(runtime.codexArgs)) return "Configuration Codex arguments must be a string array."
+  if (runtime.codexSandbox !== undefined && runtime.codexSandbox !== "read-only" && runtime.codexSandbox !== "workspace-write" && runtime.codexSandbox !== "danger-full-access") return "Configuration Codex sandbox must be read-only, workspace-write, or danger-full-access."
   for (const key of ["resumable", "useMemory", "coalesceBurst", "audit"] as const) {
     if (runtime[key] !== undefined && typeof runtime[key] !== "boolean") return `Configuration runtime ${key} must be true or false.`
   }
