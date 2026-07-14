@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type FormEvent, type Ref } from "react"
 import { ApiError, WorkspaceApi } from "./api"
 import { ConversationStream } from "./conversationStream"
+import { AgentStream } from "./agentStream"
 import { DraftStore } from "./drafts"
+import { AgentsWorkspace } from "./components/AgentsWorkspace"
 import { AppRail } from "./components/AppRail"
 import { ConversationList } from "./components/ConversationList"
 import { Inspector } from "./components/Inspector"
@@ -12,6 +14,7 @@ import { MobileNav, type MobilePane } from "./components/MobileNav"
 import { initialWorkspaceState, workspaceReducer } from "./state"
 import type { ConnectionState, Conversation, ConversationEvent, ConversationInput, ConversationUpdate, Message, PostMessageInput, Session, TransportLink } from "./types"
 import type { PwaController, PwaState } from "./pwa"
+import { parseWorkspaceRoute, pathForAgent, pathForConversation, type WorkspaceRoute } from "./routes"
 
 export interface AppApi {
   session(): Promise<Session>
@@ -22,6 +25,8 @@ export interface AppApi {
   postMessage?(conversationId: string, input: PostMessageInput): Promise<Message>
   updateConversation?(conversationId: string, input: ConversationUpdate): Promise<Conversation>
   listLinks?(conversationId: string): Promise<TransportLink[]>
+  listAgents?: WorkspaceApi["listAgents"]
+  getAgent?: WorkspaceApi["getAgent"]
 }
 
 export interface ConversationViewApi {
@@ -35,7 +40,14 @@ interface AppProps {
   drafts?: DraftStore
   install?: { run(): void }
   pwa?: Pick<PwaController, "state" | "subscribe" | "install">
-  streamFactory?: (api: AppApi) => ConversationStream
+  streamFactory?: ((api: AppApi) => ConversationStream) | null
+  agentStreamFactory?: (() => AgentStream) | null
+}
+
+interface ConversationWorkspaceProps extends AppProps {
+  session?: Session | null
+  onSessionLoaded?(session: Session): void
+  onNavigateDestination?(destination: "conversations" | "agents"): void
 }
 
 type LoadState = "loading" | "ready" | "forbidden" | "unavailable"
@@ -57,7 +69,7 @@ const conversationIdFromLocation = () => {
   try { return decodeURIComponent(match[1]) } catch { return null }
 }
 
-const pathFor = (conversationId: string | null) => conversationId ? `/conversations/${encodeURIComponent(conversationId)}` : "/"
+const pathFor = pathForConversation
 
 export function createWorkspaceStream(api: AppApi): ConversationStream {
   if (!api.listMessages) throw new Error("Conversation message API is unavailable")
@@ -224,13 +236,14 @@ export function ConversationView({ api, conversation: suppliedConversation, mess
   </>
 }
 
-export function App({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, streamFactory = createWorkspaceStream }: AppProps) {
+export function ConversationWorkspace({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, streamFactory = createWorkspaceStream, session: suppliedSession, onSessionLoaded, onNavigateDestination }: ConversationWorkspaceProps) {
   const apiRef = useRef<AppApi | null>(null)
   const draftsRef = useRef<DraftStore | null>(null)
   if (apiRef.current === null) apiRef.current = suppliedApi ?? new WorkspaceApi()
   if (draftsRef.current === null) draftsRef.current = suppliedDrafts ?? new DraftStore()
   const api = suppliedApi ?? apiRef.current
   const drafts = suppliedDrafts ?? draftsRef.current
+  const suppliedSessionRef = useRef(suppliedSession)
   const [state, dispatch] = useReducer(workspaceReducer, initialWorkspaceState)
   const [loadState, setLoadState] = useState<LoadState>("loading")
   const [dialog, setDialog] = useState<"new" | "archive" | null>(null)
@@ -269,10 +282,12 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, st
     const current = () => loadEpochRef.current === epoch
     if (!background) setLoadState("loading")
     try {
-      const [session, conversations] = await Promise.all([api.session(), api.listConversations()])
+      const sessionRequest = suppliedSessionRef.current ?? api.session()
+      const [session, conversations] = await Promise.all([sessionRequest, api.listConversations()])
       if (!current()) return
       offlineFallbackRef.current = null
       dispatch({ type: "session/loaded", session })
+      onSessionLoaded?.(session)
       if (!current()) return
       dispatch({ type: "conversations/loaded", conversations })
       if (!current()) return
@@ -308,7 +323,7 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, st
       if (!current()) return
       dispatch({ type: "connection/changed", connection: "offline" })
     }
-  }, [api, drafts, pwa])
+  }, [api, drafts, onSessionLoaded, pwa])
 
   useEffect(() => {
     void load()
@@ -447,10 +462,12 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, st
         <span>{pwaState.issue.message}</span>
       </div> : null}
       <AppRail
+        active="conversations"
+        features={state.session.features}
         connection={displayedConnection}
         install={pwa ? { available: pwaState.installAvailable, run: () => pwa.install() } : install ? { available: true, run: async () => install.run() } : undefined}
         onNew={() => openDialog("new")}
-        onConversations={() => navigate(null)}
+        onNavigate={destination => destination === "conversations" ? navigate(null) : onNavigateDestination?.("agents")}
       />
       <ConversationList
         conversations={state.conversations}
@@ -490,6 +507,81 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, st
       {dialog === "archive" && selected ? <ConfirmArchiveDialog title={selected.title} error={actionError} onCancel={closeDialog} onArchive={archiveConversation} /> : null}
     </main>
   )
+}
+
+export function App({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, streamFactory = createWorkspaceStream, agentStreamFactory = () => new AgentStream() }: AppProps) {
+  const apiRef = useRef<AppApi | null>(null)
+  const draftsRef = useRef<DraftStore | null>(null)
+  if (apiRef.current === null) apiRef.current = suppliedApi ?? new WorkspaceApi()
+  if (draftsRef.current === null) draftsRef.current = suppliedDrafts ?? new DraftStore()
+  const api = suppliedApi ?? apiRef.current
+  const drafts = suppliedDrafts ?? draftsRef.current
+  const agentsApi = useMemo(() => api.listAgents && api.getAgent ? {
+    listAgents: () => api.listAgents!(),
+    getAgent: (name: string) => api.getAgent!(name),
+  } : null, [api])
+  const [route, setRoute] = useState<WorkspaceRoute>(() => parseWorkspaceRoute(location.pathname))
+  const [session, setSession] = useState<Session | null>(null)
+  const [sessionState, setSessionState] = useState<LoadState>("loading")
+  const sessionGeneration = useRef(0)
+
+  useEffect(() => {
+    const onPopState = () => setRoute(parseWorkspaceRoute(location.pathname))
+    window.addEventListener("popstate", onPopState)
+    return () => window.removeEventListener("popstate", onPopState)
+  }, [])
+
+  const rememberSession = useCallback((next: Session) => { setSession(next); setSessionState("ready") }, [])
+  const loadSession = useCallback(async () => {
+    const generation = ++sessionGeneration.current
+    setSessionState("loading")
+    try {
+      const next = await api.session()
+      if (generation !== sessionGeneration.current) return
+      setSession(next)
+      setSessionState("ready")
+    } catch (error) {
+      if (generation !== sessionGeneration.current) return
+      const forbidden = error instanceof ApiError && (error.status === 401 || error.status === 403 || error.code === "missing_identity")
+      setSessionState(forbidden ? "forbidden" : "unavailable")
+    }
+  }, [api])
+
+  useEffect(() => {
+    if (route.destination !== "agents" || session) return
+    void loadSession()
+    return () => { sessionGeneration.current++ }
+  }, [loadSession, route.destination, session])
+
+  const navigate = useCallback((destination: "conversations" | "agents", agent: string | null = null) => {
+    const path = destination === "agents" ? pathForAgent(agent) : pathForConversation(null)
+    history.pushState(null, "", path)
+    setRoute(parseWorkspaceRoute(path))
+  }, [])
+
+  if (route.destination === "not_found") return <NotFound />
+  if (route.destination === "agents") {
+    if (sessionState === "forbidden") return <main className="status-page"><section role="alert"><h1>Workspace access denied</h1><p>Ask a Switchboard administrator to grant your identity access.</p></section></main>
+    if (sessionState === "unavailable") return <main className="status-page"><section role="alert"><h1>Switchboard is unavailable</h1><p>Check the service connection, then try again.</p><button type="button" onClick={() => void loadSession()}>Try again</button></section></main>
+    if (sessionState === "loading" || !session) return <main className="status-page"><div role="status"><span className="status-node" />Loading your workspace…</div></main>
+    if (!session.features.agents || session.permissions.agents === "hidden" || !agentsApi) return <NotFound />
+    return <AgentsWorkspace
+      api={agentsApi}
+      session={session}
+      routeAgent={route.agent}
+      connection={navigator.onLine ? "live" : "offline"}
+      install={install ? { available: true, run: async () => install.run() } : undefined}
+      streamFactory={agentStreamFactory}
+      onNavigate={navigate}
+      onNewConversation={() => navigate("conversations")}
+    />
+  }
+
+  return <ConversationWorkspace api={api} drafts={drafts} install={install} pwa={pwa} streamFactory={streamFactory} session={session} onSessionLoaded={rememberSession} onNavigateDestination={destination => navigate(destination)} />
+}
+
+function NotFound() {
+  return <main className="status-page"><section><h1>Not found</h1><p>This Switchboard destination does not exist or is not enabled.</p><a href="/">Return to conversations</a></section></main>
 }
 
 function NewConversationDialog({ session, error, onCancel, onCreate }: { session: Session; error: string; onCancel(): void; onCreate(input: ConversationInput): Promise<void> }) {

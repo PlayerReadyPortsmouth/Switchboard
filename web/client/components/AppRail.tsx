@@ -2,19 +2,20 @@ import type { ConnectionState } from "../types"
 import { ConnectionBanner } from "./ConnectionBanner"
 import { InstallButton } from "./InstallButton"
 
-const destinations = [
-  { id: "conversations", label: "Conversations", available: true },
-  { id: "legacy", label: "Legacy console", available: true, href: "/legacy" },
-] as const
-
 interface AppRailProps {
+  active: "conversations" | "agents"
+  features: { agents: boolean }
   connection: ConnectionState
   install?: { available: boolean; run(): Promise<void> }
   onNew(): void
-  onConversations(): void
+  onNavigate(destination: "conversations" | "agents"): void
 }
 
-export function AppRail({ connection, install, onNew, onConversations }: AppRailProps) {
+export function AppRail({ active, features, connection, install, onNew, onNavigate }: AppRailProps) {
+  const destinations = [
+    { id: "conversations" as const, label: "Conversations", glyph: "≡", href: "/", available: true },
+    { id: "agents" as const, label: "Agents", glyph: "⌁", href: "/agents", available: features.agents },
+  ]
   return (
     <nav className="app-rail" aria-label="Application navigation" data-region="application-navigation">
       <div className="switchboard-mark" aria-hidden="true"><span>S</span></div>
@@ -25,15 +26,16 @@ export function AppRail({ connection, install, onNew, onConversations }: AppRail
         {destinations.map(destination => destination.available && (
           <a
             key={destination.id}
-            className={destination.id === "conversations" ? "rail-link active" : "rail-link"}
-            href={"href" in destination ? destination.href : "/"}
-            onClick={destination.id === "conversations" ? event => { event.preventDefault(); onConversations() } : undefined}
-            aria-current={destination.id === "conversations" ? "page" : undefined}
+            className={destination.id === active ? "rail-link active" : "rail-link"}
+            href={destination.href}
+            onClick={event => { event.preventDefault(); onNavigate(destination.id) }}
+            aria-current={destination.id === active ? "page" : undefined}
           >
-            <span className="rail-glyph" aria-hidden="true">{destination.id === "conversations" ? "≡" : "↗"}</span>
+            <span className="rail-glyph" aria-hidden="true">{destination.glyph}</span>
             <span className="rail-label">{destination.label}</span>
           </a>
         ))}
+        <a className="rail-link" href="/legacy"><span className="rail-glyph" aria-hidden="true">↗</span><span className="rail-label">Legacy console</span></a>
       </div>
       <div className="rail-footer">
         {install ? <InstallButton available={install.available} onInstall={install.run} /> : null}

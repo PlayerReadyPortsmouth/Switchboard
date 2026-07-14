@@ -7,7 +7,7 @@ import { ApiError } from "./api"
 import { App, createWorkspaceStream, type AppApi } from "./App"
 import type { ConversationStreamHandlers } from "./conversationStream"
 import { DraftStore } from "./drafts"
-import type { Conversation, ConversationInput, Message, Session } from "./types"
+import type { AgentDetail, AgentSummary, Conversation, ConversationInput, Message, Session } from "./types"
 
 const screen = within(document.body)
 
@@ -71,6 +71,8 @@ function fakeApi(options: {
       conversations = conversations.filter(item => item.id !== id)
       return result
     },
+    listAgents: async (): Promise<AgentSummary[]> => [],
+    getAgent: async (): Promise<AgentDetail> => { throw new ApiError(404, "not_found") },
   }
 }
 
@@ -81,6 +83,28 @@ afterEach(() => {
 })
 
 describe("responsive workspace shell", () => {
+  test("shows the Agents destination, routes to it, and responds to popstate", async () => {
+    render(<App api={fakeApi()} streamFactory={null} agentStreamFactory={null} />)
+    const agents = await screen.findByRole("link", { name: "Agents" })
+    await userEvent.click(agents)
+    expect(location.pathname).toBe("/agents")
+    expect(await screen.findByRole("heading", { name: "Agents" })).toBeTruthy()
+    history.pushState(null, "", "/")
+    act(() => window.dispatchEvent(new PopStateEvent("popstate")))
+    expect(await screen.findByRole("heading", { name: "Switchboard" })).toBeTruthy()
+  })
+
+  test("hides Agents and rejects direct access when the feature is disabled", async () => {
+    const disabled = { ...session, features: { agents: false }, permissions: { agents: "hidden" as const } }
+    const view = render(<App api={fakeApi({ session: disabled })} />)
+    await screen.findByRole("heading", { name: "Switchboard" })
+    expect(screen.queryByRole("link", { name: "Agents" })).toBeNull()
+    view.unmount()
+    history.replaceState(null, "", "/agents")
+    render(<App api={fakeApi({ session: disabled })} />)
+    expect(await screen.findByRole("heading", { name: "Not found" })).toBeTruthy()
+  })
+
   test("loads session and conversations, then opens the selected transcript", async () => {
     render(<App api={fakeApi({ conversations: [conversation()] })} />)
 
