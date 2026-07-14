@@ -47,6 +47,7 @@ export class CodexAppServerTransport implements AgentTransport {
   private lastChatId = ""
   private lastActivity = Date.now()
   private lastUsage: TurnUsage | null = null
+  private turnUsage: TurnUsage | null = null
   private deltaText = ""
   private completedText: string | undefined
   private cardThisTurn = false
@@ -197,7 +198,7 @@ export class CodexAppServerTransport implements AgentTransport {
     const p = record(params) ? params : {}
     if (method === "thread/tokenUsage/updated") {
       const usage = codexUsage(p)
-      if (usage) this.lastUsage = usage
+      if (usage) { this.lastUsage = usage; this.turnUsage = usage }
       return
     }
     if (method === "item/agentMessage/delta" && typeof p.delta === "string") {
@@ -244,6 +245,7 @@ export class CodexAppServerTransport implements AgentTransport {
     this.cardThisTurn = false
     this.turnCallbacks = []
     this.finalizing = false
+    this.turnUsage = null
     this.activeTools.clear()
     await this.request("turn/start", { threadId: this.threadId, input: [{ type: "text", text: inbound.content }] })
   }
@@ -258,7 +260,7 @@ export class CodexAppServerTransport implements AgentTransport {
     const replyTask = !this.cardThisTurn && text
       ? this.invokeReply({
           agent: this.name, kind: "reply", chatId: active.chatId, messageId: active.messageId, text,
-          ...(this.lastUsage ? { usage: this.lastUsage } : {}),
+          ...(this.turnUsage ? { usage: this.turnUsage } : {}),
         })
       : null
     const failures = await Promise.all([...callbacks, ...(replyTask ? [replyTask.then(result => result.failed)] : [])])

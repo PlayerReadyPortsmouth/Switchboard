@@ -96,6 +96,9 @@ function editableConfig(config: AgentConfig, role: WorkspaceRole): EditableAgent
     cwd: role === "operator" ? safeRuntime.cwd : "[redacted]",
   }
   if (safeRuntime.model !== undefined) runtime.model = safeRuntime.model
+  if (safeRuntime.provider !== undefined) runtime.provider = safeRuntime.provider
+  if (safeRuntime.codexSandbox !== undefined) runtime.codexSandbox = safeRuntime.codexSandbox
+  if (safeRuntime.codexArgs !== undefined) runtime.codexArgs = [...safeRuntime.codexArgs]
   if (safeRuntime.allowedTools !== undefined) runtime.allowedTools = [...safeRuntime.allowedTools]
   if (safeRuntime.resumable !== undefined) runtime.resumable = safeRuntime.resumable
   if (safeRuntime.useMemory !== undefined) runtime.useMemory = safeRuntime.useMemory

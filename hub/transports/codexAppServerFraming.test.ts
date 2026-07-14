@@ -56,6 +56,10 @@ test("maps current or cumulative Codex token usage defensively", () => {
     inputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, outputTokens: 0,
   })
   expect(codexUsage({ nope: true })).toBeUndefined()
+  expect(codexUsage({ tokenUsage: {
+    total: { inputTokens: 1000, cachedInputTokens: 500, outputTokens: 100 },
+    last: { inputTokens: 20, cachedInputTokens: 10, outputTokens: 5 },
+  } })).toEqual({ inputTokens: 20, cacheReadTokens: 10, cacheCreationTokens: 0, outputTokens: 5 })
 })
 
 test("builds TOML-safe Codex argv with feature gates and user args before app-server", () => {

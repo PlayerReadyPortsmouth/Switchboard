@@ -79,7 +79,9 @@ function findUsage(value: unknown, depth = 0): Record<string, unknown> | undefin
 
 /** Map app-server's current or cumulative token object into Switchboard usage. */
 export function codexUsage(value: unknown): TurnUsage | undefined {
-  const usage = findUsage(value)
+  const root = record(value) ? value : undefined
+  const tokenUsage = root && record(root.tokenUsage) ? root.tokenUsage : undefined
+  const usage = tokenUsage && record(tokenUsage.last) ? tokenUsage.last : findUsage(value)
   if (!usage) return undefined
   return {
     inputTokens: finite(usage.inputTokens ?? usage.input_tokens),

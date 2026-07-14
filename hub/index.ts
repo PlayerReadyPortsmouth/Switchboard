@@ -1345,7 +1345,7 @@ async function resetAgentSession(
 ): Promise<void> {
   const cfg = agents[name]
   if (!cfg) return
-  try { unlinkSync(join(hub.stateDir, `${name}.session`)) } catch {}
+  try { unlinkSync(sessionPathFor(hub.stateDir, name, agentProvider(cfg.runtime))) } catch {}
   const old = transports.get(name)
   if (old) { await old.close(); transports.delete(name) }
   const fresh = makeTransport(name, name, cfg)   // resumable, but the session file is now gone → fresh session
