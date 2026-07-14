@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { AgentActionPreviewRegistry, IdempotencyRegistry } from "./operationPreview"
+import { AgentActionPreviewRegistry, agentActionPreviewMissState, IdempotencyRegistry } from "./operationPreview"
 
 test("action previews bind the confirmed runtime snapshot", () => {
   const registry = new AgentActionPreviewRegistry(() => 10, () => "p1", 1000)
@@ -38,6 +38,26 @@ test("expired action previews cannot be consumed", () => {
   registry.create("ada", "qa", "reset", "status-v1", { busy: false, queueDepth: 0 })
   now = 1000
   expect(registry.consume("p1", "ada", "qa", "status-v1")).toBeNull()
+})
+
+test("action preview miss classification reveals only same-resource status drift", () => {
+  const registry = new AgentActionPreviewRegistry(() => 10, () => "p1", 1000)
+  registry.create("ada", "qa", "reset", "status-v1", { busy: false, queueDepth: 0 })
+  const preview = registry.get("p1")
+
+  expect(agentActionPreviewMissState(preview, "ada", "qa", "status-v2", 10)).toBe("state_changed")
+  expect(agentActionPreviewMissState(preview, "mallory", "qa", "status-v2", 10)).toBe("not_found")
+  expect(agentActionPreviewMissState(preview, "ada", "ops", "status-v2", 10)).toBe("not_found")
+  expect(agentActionPreviewMissState(preview, "ada", "qa", "status-v2", 1010)).toBe("not_found")
+  expect(agentActionPreviewMissState(undefined, "ada", "qa", "status-v2", 10)).toBe("not_found")
+})
+
+test("action preview inspection returns an isolated copy", () => {
+  const registry = new AgentActionPreviewRegistry(() => 10, () => "p1", 1000)
+  registry.create("ada", "qa", "reset", "status-v1", { busy: false, queueDepth: 0 })
+  const inspected = registry.get("p1")!
+  inspected.impact.queueDepth = 99
+  expect(registry.get("p1")?.impact.queueDepth).toBe(0)
 })
 
 test("idempotency returns the original completed result", async () => {

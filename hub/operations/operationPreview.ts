@@ -10,6 +10,27 @@ export interface AgentActionPreview {
   expiresAt: number
 }
 
+export function agentActionPreviewMissState(
+  preview: AgentActionPreview | undefined,
+  actor: string,
+  agent: string,
+  statusVersion: string,
+  now: number,
+): "state_changed" | "not_found" {
+  return preview !== undefined
+    && preview.expiresAt > now
+    && preview.actor === actor
+    && preview.agent === agent
+    && preview.statusVersion !== statusVersion
+    ? "state_changed"
+    : "not_found"
+}
+
+const previewCopy = (preview: AgentActionPreview): AgentActionPreview => ({
+  ...preview,
+  impact: { ...preview.impact },
+})
+
 export class AgentActionPreviewRegistry {
   private pending = new Map<string, AgentActionPreview>()
 
@@ -37,6 +58,11 @@ export class AgentActionPreviewRegistry {
     }
     this.pending.set(preview.id, preview)
     return preview
+  }
+
+  get(id: string): AgentActionPreview | undefined {
+    const preview = this.pending.get(id)
+    return preview === undefined ? undefined : previewCopy(preview)
   }
 
   consume(id: string, actor: string, agent: string, statusVersion: string): AgentActionPreview | null {

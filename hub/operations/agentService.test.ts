@@ -59,16 +59,21 @@ function harness(workspace: WorkspaceConfig = { features: { agents: true }, oper
   return { service, disk, commits, actions, audits, status, setNow: (value: number) => { now = value } }
 }
 
+function thrown(operation: () => unknown): unknown {
+  try { operation() } catch (error) { return error }
+  return undefined
+}
+
 test("hidden users cannot enumerate agents and viewers cannot mutate", async () => {
   const service = harness({ features: { agents: true }, viewers: ["viewer"], operators: ["operator"] }).service
-  expect(() => service.list("hidden")).toThrow(AgentOperationsError)
+  expect(thrown(() => service.list("hidden"))).toMatchObject({ status: 404, code: "not_found" })
   expect(service.list("viewer")[0]?.permissions.configure).toBe(false)
   await expect(service.previewConfig("viewer", "qa", config)).rejects.toMatchObject({ status: 403 })
 })
 
 test("disabled feature is hidden even from operators", () => {
   const service = harness({ features: { agents: false }, operators: ["operator"] }).service
-  expect(() => service.list("operator")).toThrow(AgentOperationsError)
+  expect(thrown(() => service.list("operator"))).toMatchObject({ status: 404, code: "not_found" })
 })
 
 test("config confirm rejects disk drift without writing", async () => {
@@ -86,6 +91,39 @@ test("repeated action confirmation returns one runtime result", async () => {
   const second = await h.service.confirmAction("operator", "qa", preview.id, "key-1")
   expect(second).toEqual(first)
   expect(h.actions).toEqual([{ agent: "qa", action: "reset", actor: "operator" }])
+})
+
+test("cached action results still recheck permission and feature visibility", async () => {
+  const workspace: WorkspaceConfig = { features: { agents: true }, operators: ["operator"] }
+  const h = harness(workspace)
+  const preview = h.service.previewAction("operator", "qa", "reset")
+  await h.service.confirmAction("operator", "qa", preview.id, "recheck-key")
+
+  workspace.operators = []
+  workspace.viewers = ["operator"]
+  await expect(h.service.confirmAction("operator", "qa", preview.id, "recheck-key")).rejects.toMatchObject({ status: 403, code: "forbidden" })
+  workspace.operators = ["operator"]
+  workspace.features!.agents = false
+  await expect(h.service.confirmAction("operator", "qa", preview.id, "recheck-key")).rejects.toMatchObject({ status: 404, code: "not_found" })
+  expect(h.actions).toHaveLength(1)
+})
+
+test("one idempotency key cannot cross agent or action request scope", async () => {
+  const h = harness()
+  h.disk.ops = { ...structuredClone(config), description: "Operations" }
+  const qaReset = h.service.previewAction("operator", "qa", "reset")
+  const opsReset = h.service.previewAction("operator", "ops", "reset")
+  const qaRestart = h.service.previewAction("operator", "qa", "restart")
+
+  await h.service.confirmAction("operator", "qa", qaReset.id, "shared-key")
+  await h.service.confirmAction("operator", "ops", opsReset.id, "shared-key")
+  await h.service.confirmAction("operator", "qa", qaRestart.id, "shared-key")
+
+  expect(h.actions.map(({ agent, action }) => ({ agent, action }))).toEqual([
+    { agent: "qa", action: "reset" },
+    { agent: "ops", action: "reset" },
+    { agent: "qa", action: "restart" },
+  ])
 })
 
 test("opaque configured values preserve their live values before classification", async () => {
@@ -123,6 +161,40 @@ test("changed action status rejects before runtime work", async () => {
   h.status.queueDepth = 2
   await expect(h.service.confirmAction("operator", "qa", preview.id, "key-2")).rejects.toMatchObject({ status: 409, code: "action_state_changed" })
   expect(h.actions).toHaveLength(0)
+})
+
+test("action confirmation maps non-drift preview misses to preview_not_found and consumes mismatches", async () => {
+  const workspace: WorkspaceConfig = { features: { agents: true }, operators: ["operator", "other"] }
+  const h = harness(workspace)
+  h.disk.ops = { ...structuredClone(config), description: "Operations" }
+
+  await expect(h.service.confirmAction("operator", "qa", "unknown", "unknown-key")).rejects.toMatchObject({ status: 409, code: "preview_not_found" })
+
+  const expired = h.service.previewAction("operator", "qa", "reset")
+  h.setNow(1_100)
+  await expect(h.service.confirmAction("operator", "qa", expired.id, "expired-key")).rejects.toMatchObject({ status: 409, code: "preview_not_found" })
+
+  h.setNow(100)
+  const wrongActor = h.service.previewAction("operator", "qa", "reset")
+  await expect(h.service.confirmAction("other", "qa", wrongActor.id, "actor-key")).rejects.toMatchObject({ status: 409, code: "preview_not_found" })
+  await expect(h.service.confirmAction("operator", "qa", wrongActor.id, "actor-owner-key")).rejects.toMatchObject({ status: 409, code: "preview_not_found" })
+
+  const wrongAgent = h.service.previewAction("operator", "qa", "restart")
+  await expect(h.service.confirmAction("operator", "ops", wrongAgent.id, "agent-key")).rejects.toMatchObject({ status: 409, code: "preview_not_found" })
+  await expect(h.service.confirmAction("operator", "qa", wrongAgent.id, "agent-owner-key")).rejects.toMatchObject({ status: 409, code: "preview_not_found" })
+
+  const consumed = h.service.previewAction("operator", "qa", "reset")
+  await h.service.confirmAction("operator", "qa", consumed.id, "consumed-key")
+  await expect(h.service.confirmAction("operator", "qa", consumed.id, "different-key")).rejects.toMatchObject({ status: 409, code: "preview_not_found" })
+})
+
+test("malformed submitted runtime is rejected as invalid_config without raw exceptions", async () => {
+  const h = harness()
+  const missingRuntime = { ...structuredClone(config), runtime: undefined } as unknown as AgentConfig
+  const nullRuntime = { ...structuredClone(config), runtime: null } as unknown as AgentConfig
+
+  await expect(h.service.previewConfig("operator", "qa", missingRuntime)).rejects.toMatchObject({ status: 400, code: "invalid_config" })
+  await expect(h.service.previewConfig("operator", "qa", nullRuntime)).rejects.toMatchObject({ status: 400, code: "invalid_config" })
 })
 
 test("mutation audit details stay sanitized on success, deny, and callback failure", async () => {

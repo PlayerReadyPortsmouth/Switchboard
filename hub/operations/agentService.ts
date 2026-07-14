@@ -6,7 +6,7 @@ import type { AgentConfig, AgentRegistry, HubConfig, WorkspaceConfig } from "../
 import { agentsFeatureEnabled, resolveWorkspaceRole, type WorkspaceRole } from "./access"
 import type { AgentEventStream, AgentOperationsEvent } from "./agentEvents"
 import { agentConfigVersion, projectAgentViews, type AgentDetailView, type AgentSummaryView, type EditableAgentConfig, type RedactedConfiguredValue } from "./agentViews"
-import type { AgentActionPreview, AgentActionPreviewRegistry, AgentRuntimeAction, IdempotencyRegistry } from "./operationPreview"
+import { agentActionPreviewMissState, type AgentActionPreview, type AgentActionPreviewRegistry, type AgentRuntimeAction, type IdempotencyRegistry } from "./operationPreview"
 
 export class AgentOperationsError extends Error {
   constructor(public readonly status: number, public readonly code: string) {
@@ -181,17 +181,33 @@ export class AgentOperationsService {
   }
 
   confirmAction(actor: string, agent: string, previewId: string, idempotencyKey: string): Promise<AgentActionResult> {
-    return this.deps.idempotency.run(actor, idempotencyKey, () =>
-      this.auditMutation(actor, "agent_action_confirm", agent, async () => {
-        this.requireOperator(actor, true)
-        if (!idempotencyKey) throw new AgentOperationsError(400, "missing_idempotency_key")
-        const config = this.deps.readAgents()[agent]
-        if (!config) throw new AgentOperationsError(404, "not_found")
-        if (config.mode !== "persistent") throw new AgentOperationsError(409, "action_unavailable")
+    try {
+      this.requireOperator(actor, true)
+      if (!idempotencyKey) throw new AgentOperationsError(400, "missing_idempotency_key")
+      const config = this.deps.readAgents()[agent]
+      if (!config) throw new AgentOperationsError(404, "not_found")
+      if (config.mode !== "persistent") throw new AgentOperationsError(409, "action_unavailable")
+    } catch (error) {
+      this.deps.audit({
+        actor,
+        action: "agent_action_confirm",
+        target: agent,
+        outcome: auditFailureOutcome(error),
+      })
+      return Promise.reject(error)
+    }
 
+    const requestKey = `${agent}\0${previewId}\0${idempotencyKey}`
+    return this.deps.idempotency.run(actor, requestKey, () =>
+      this.auditMutation(actor, "agent_action_confirm", agent, async () => {
         const current = this.findStatus(agent)
-        const preview = this.deps.actionPreviews.consume(previewId, actor, agent, statusVersion(current))
-        if (!preview) throw new AgentOperationsError(409, "action_state_changed")
+        const currentVersion = statusVersion(current)
+        const pending = this.deps.actionPreviews.get(previewId)
+        const preview = this.deps.actionPreviews.consume(previewId, actor, agent, currentVersion)
+        if (!preview) {
+          const state = agentActionPreviewMissState(pending, actor, agent, currentVersion, this.deps.now())
+          throw new AgentOperationsError(409, state === "state_changed" ? "action_state_changed" : "preview_not_found")
+        }
         const result = await this.deps.runAction({ actor, agent, action: preview.action })
         this.deps.events.publish({ kind: "action_completed", agent, action: preview.action, ts: this.deps.now() })
         return result
@@ -252,6 +268,7 @@ export class AgentOperationsService {
   ): AgentConfig | null {
     if (submitted === null) return null
     const after = structuredClone(submitted) as AgentConfig
+    if (invalidAgentConfigShape(after) !== null) throw new AgentOperationsError(400, "invalid_config")
     const runtime = after.runtime as AgentConfig["runtime"] & {
       claudeArgs?: AgentConfig["runtime"]["claudeArgs"] | RedactedConfiguredValue
       appendSystemPrompt?: AgentConfig["runtime"]["appendSystemPrompt"] | RedactedConfiguredValue
