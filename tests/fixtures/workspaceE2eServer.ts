@@ -234,8 +234,9 @@ async function fixtureRoute(request: Request): Promise<Response | null> {
     return Response.json(result.message, { status: 201 })
   }
   if (request.method === "POST" && url.pathname === "/__e2e/agents/drop-stream") {
+    const droppedStreams = activeAgentSseDrops.size
     for (const drop of [...activeAgentSseDrops]) drop()
-    return Response.json({ dropped: true })
+    return Response.json({ droppedStreams })
   }
   if (request.method === "POST" && url.pathname === "/__e2e/agents/status") {
     const body = await request.json().catch(() => null) as { agent?: string; busy?: boolean; queueDepth?: number } | null
@@ -245,7 +246,7 @@ async function fixtureRoute(request: Request): Promise<Response | null> {
     agentStatuses = agentStatuses.map(status => status.name === body.agent
       ? { ...status, busy: body.busy!, queueDepth: body.queueDepth!, lastActivityMs: now() }
       : status)
-    agentEvents.publish({ kind: "agent_changed", agent: "architect", ts: now() })
+    agentEvents.publish({ kind: "agent_changed", agent: body.agent, ts: now() })
     agentEvents.publish({ kind: "agents_snapshot", ts: now() })
     return Response.json({ resetCount: actionCounts.reset, restartCount: actionCounts.restart, auditRows: auditRows.length })
   }

@@ -3,11 +3,11 @@ import { expect, test, type Page } from "@playwright/test"
 
 async function openAgentsDestination(page: Page) {
   await page.goto("/agents")
+  await expect(page.getByRole("heading", { name: "Agents" })).toBeVisible()
   const appNavigation = page.getByRole("navigation", { name: "Application navigation" })
   const mobileNavigation = page.getByRole("navigation", { name: "Destinations" })
-  if (await appNavigation.isVisible()) await expect(appNavigation.getByRole("link", { name: "Agents" })).toBeVisible()
+  if (page.viewportSize()!.width >= 768) await expect(appNavigation.getByRole("link", { name: "Agents" })).toBeVisible()
   else await expect(mobileNavigation.getByRole("button", { name: "Agents" })).toBeVisible()
-  await expect(page.getByRole("heading", { name: "Agents" })).toBeVisible()
 }
 
 test("each viewport completes the standalone Agents operations workflow", async ({ page }, testInfo) => {
@@ -43,9 +43,11 @@ test("each viewport completes the standalone Agents operations workflow", async 
   await restart.getByRole("button", { name: "Restart agent" }).click()
   await expect(page.getByText("qa restart completed.", { exact: true })).toBeAttached()
 
-  await page.evaluate(async () => {
-    await fetch("/__e2e/agents/drop-stream", { method: "POST" })
+  const droppedStreams = await page.evaluate(async () => {
+    const response = await fetch("/__e2e/agents/drop-stream", { method: "POST" })
+    return await response.json() as { droppedStreams: number }
   })
+  expect(droppedStreams.droppedStreams).toBeGreaterThan(0)
   const fixtureState = await page.evaluate(async () => {
     const response = await fetch("/__e2e/agents/status", {
       method: "POST",

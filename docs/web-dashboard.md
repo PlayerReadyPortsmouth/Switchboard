@@ -34,6 +34,6 @@ Runtime actions use a separate impact preview. **Reset** clears resumable contex
 
 ## Rollout and rollback
 
-Build and start the same Bun application with `bun run hub`, then visit `/agents`. The Agents service, authorization, audit path, and ordered event stream do not depend on Discord; the destination works with `discord.enabled: false`. Discord commands and `/legacy` call the same application behavior, and future Slack, Teams, or other adapters can reuse that service rather than duplicating agent operations.
+Build and start the same Bun application with `bun run hub`, then visit `/agents`. The Agents service, authorization, audit path, and ordered event stream do not depend on Discord; the destination works with `discord.enabled: false`, and `/legacy` shares this transport-independent service. Discord remains fully functional through its existing compatibility path, which does not yet call `AgentOperationsService`. Future Slack, Teams, and other adapters should converge on these application boundaries instead of duplicating agent operations.
 
 To roll back the new destination, set `workspace.features.agents` to `false` and restart the hub. Agent configuration remains intact, and `/legacy` stays available. Keep `/legacy` until Approvals, Operations, Settings, Phase 4B capability parity, and the operational soak gate are complete.
