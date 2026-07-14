@@ -1,12 +1,16 @@
 import { useEffect, useRef } from "react"
 
-export function useModalDialog(onCancel: () => void) {
+export function useModalDialog(onCancel: () => void | boolean) {
   const dialogRef = useRef<HTMLDialogElement>(null)
   const cancelRef = useRef(onCancel)
   const restoreRef = useRef<HTMLElement | null>(document.activeElement instanceof HTMLElement ? document.activeElement : null)
   cancelRef.current = onCancel
   const restoreFocus = () => queueMicrotask(() => { if (restoreRef.current?.isConnected) restoreRef.current.focus() })
-  const cancel = () => { cancelRef.current(); restoreFocus() }
+  const cancel = () => {
+    if (cancelRef.current() === false) { dialogRef.current?.focus(); return false }
+    restoreFocus()
+    return true
+  }
 
   useEffect(() => {
     const dialog = dialogRef.current

@@ -17,10 +17,25 @@ function configValidationError(value: unknown, original: EditableAgentConfig): s
   if (!value || typeof value !== "object") return "Configuration must match the documented agent shape."
   const config = value as Record<string, unknown>
   if (typeof config.emoji !== "string" || typeof config.description !== "string" || !["persistent", "ephemeral"].includes(String(config.mode))) return "Configuration must match the documented agent shape."
-  if (!config.access || typeof config.access !== "object" || !Array.isArray((config.access as { roles?: unknown }).roles)) return "Configuration must match the documented agent shape."
+  if (!config.access || typeof config.access !== "object" || !Array.isArray((config.access as { roles?: unknown }).roles) || !(config.access as { roles: unknown[] }).roles.every(role => typeof role === "string")) return "Configuration access roles must be a string array."
   if (!config.runtime || typeof config.runtime !== "object") return "Configuration must match the documented agent shape."
   const runtime = config.runtime as Record<string, unknown>
   if (typeof runtime.cwd !== "string") return "Configuration must match the documented agent shape."
+  if (runtime.model !== undefined && typeof runtime.model !== "string") return "Configuration runtime model must be a string."
+  if (runtime.resumable !== undefined && typeof runtime.resumable !== "boolean") return "Configuration resumable must be true or false."
+  if (runtime.useMemory !== undefined && typeof runtime.useMemory !== "boolean") return "Configuration memory must be true or false."
+  if (runtime.injectContext !== undefined && !["always", "onSwitch", "never"].includes(String(runtime.injectContext))) return "Configuration context injection must be always, onSwitch, or never."
+  if (runtime.maxQueueDepth !== undefined && (!Number.isFinite(runtime.maxQueueDepth) || !Number.isInteger(runtime.maxQueueDepth) || Number(runtime.maxQueueDepth) < 0)) return "Configuration queue depth must be a non-negative integer."
+  if (runtime.pool !== undefined) {
+    if (!runtime.pool || typeof runtime.pool !== "object" || Array.isArray(runtime.pool)) return "Configuration pool must be an object."
+    const pool = runtime.pool as Record<string, unknown>
+    for (const key of ["min", "max", "scaleUpQueue", "scaleUpSustainMs", "replicaIdleMs"] as const) {
+      const entry = pool[key]
+      if (entry !== undefined && (!Number.isFinite(entry) || !Number.isInteger(entry) || Number(entry) < 0)) return `Configuration pool ${key} must be a non-negative integer.`
+    }
+    if (pool.isolateCwd !== undefined && typeof pool.isolateCwd !== "boolean") return "Configuration pool isolateCwd must be true or false."
+    if (typeof pool.min === "number" && typeof pool.max === "number" && pool.min > pool.max) return "Configuration pool minimum cannot exceed maximum."
+  }
   const args = runtime.claudeArgs
   if (configuredSentinel(args) && !configuredSentinel(original.runtime.claudeArgs)) return "Configured values can only preserve a value already configured on the server."
   if (args !== undefined && !configuredSentinel(args) && !(Array.isArray(args) && args.every(item => typeof item === "string"))) return "Claude arguments must be a string array or the unchanged configured value."
@@ -73,7 +88,7 @@ export function AgentConfigEditor({ agent, config, api, online, onApplied, onRel
     finally { setBusy(false) }
   }
   const confirm = async () => {
-    if (!preview) return
+    if (!preview || !online) return
     setBusy(true); setError("")
     try { onApplied(await api.confirmAgentConfig(agent, preview.id, preview.classification.tier === "hard")) }
     catch (cause) {
@@ -115,7 +130,7 @@ export function AgentConfigEditor({ agent, config, api, online, onApplied, onRel
       <header><p className="eyebrow">Server classification</p><h4>{classificationHeading[preview.classification.tier]}</h4></header>
       <div className="config-diff"><div><strong>Before</strong><pre>{JSON.stringify(preview.before, null, 2)}</pre></div><div><strong>After</strong><pre>{JSON.stringify(preview.after, null, 2)}</pre></div></div>
       {preview.classification.fullRestart.length ? <div className="restart-reasons"><strong>Pending restart reasons</strong><ul>{preview.classification.fullRestart.map(reason => <li key={reason}>{reason}</li>)}</ul></div> : null}
-      <div className="config-editor-actions"><button type="button" disabled={busy} onClick={() => void confirm()}>{busy ? "Applying…" : confirmCopy[preview.classification.tier]}</button></div>
+      <div className="config-editor-actions"><button type="button" disabled={busy || !online} onClick={() => void confirm()}>{busy ? "Applying…" : confirmCopy[preview.classification.tier]}</button></div>
     </section> : null}
   </section>
 }

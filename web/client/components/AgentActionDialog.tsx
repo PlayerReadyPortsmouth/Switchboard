@@ -11,10 +11,11 @@ export interface AgentActionApi extends AgentConfigApi {
 const title = { reset: "Reset agent context", restart: "Restart agent", remove: "Remove agent" } as const
 const confirmLabel = { reset: "Reset agent", restart: "Restart agent", remove: "Save removal pending hub restart" } as const
 
-export function AgentActionDialog({ agent, action, api, onCancel, onSuccess }: {
+export function AgentActionDialog({ agent, action, api, online, onCancel, onSuccess }: {
   agent: string
   action: AgentProtectedAction
   api: AgentActionApi
+  online: boolean
   onCancel(): void
   onSuccess(message: string): void
 }) {
@@ -24,7 +25,11 @@ export function AgentActionDialog({ agent, action, api, onCancel, onSuccess }: {
   const [error, setError] = useState("")
   const pendingRef = useRef(false)
   const keyRef = useRef(globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`)
-  const { dialogRef, cancel } = useModalDialog(() => { if (!pendingRef.current) onCancel() })
+  const { dialogRef, cancel } = useModalDialog(() => {
+    if (pendingRef.current) return false
+    onCancel()
+    return true
+  })
 
   useEffect(() => {
     let active = true
@@ -35,8 +40,9 @@ export function AgentActionDialog({ agent, action, api, onCancel, onSuccess }: {
   }, [action, agent, api])
 
   const confirm = async () => {
-    if (!preview || pendingRef.current) return
+    if (!preview || pendingRef.current || !online) return
     pendingRef.current = true; setSubmitting(true); setError("")
+    dialogRef.current?.focus()
     try {
       if (action === "remove") await api.confirmAgentConfig(agent, preview.id, false)
       else await api.confirmAgentAction(agent, preview.id, keyRef.current)
@@ -48,7 +54,7 @@ export function AgentActionDialog({ agent, action, api, onCancel, onSuccess }: {
 
   const actionImpact = preview && "impact" in preview ? preview.impact : null
   return <div className="dialog-backdrop">
-    <dialog ref={dialogRef} aria-labelledby="agent-action-title" className="agent-action-dialog">
+    <dialog ref={dialogRef} aria-labelledby="agent-action-title" className="agent-action-dialog" tabIndex={-1}>
       <form onSubmit={event => { event.preventDefault(); void confirm() }}>
         <header><p className="eyebrow">Protected runtime action</p><h2 id="agent-action-title">{title[action]}</h2></header>
         <p>{action === "reset" ? "Reset clears resumable context and starts the next turn without the prior session." : action === "restart" ? "Restart stops the current process but keeps the session file for resumption." : "The configuration entry will be removed now. The running agent remains until the hub restarts."}</p>
@@ -56,7 +62,8 @@ export function AgentActionDialog({ agent, action, api, onCancel, onSuccess }: {
         {actionImpact ? <dl className="action-impact"><div><dt>Runtime</dt><dd>{actionImpact.busy ? "Agent is busy" : "Agent is idle"}</dd></div><div><dt>Queue</dt><dd>{actionImpact.queueDepth} queued {actionImpact.queueDepth === 1 ? "request" : "requests"}</dd></div></dl> : null}
         {action === "remove" && preview && "classification" in preview ? <div className="restart-reasons"><strong>Full hub restart required</strong><ul>{preview.classification.fullRestart.map(reason => <li key={reason}>{reason}</li>)}</ul></div> : null}
         {error && preview ? <p role="alert" className="form-error">{error}</p> : null}
-        <div className="dialog-actions"><button type="button" disabled={submitting} onClick={cancel}>Cancel</button><button type="submit" className={action === "remove" || action === "reset" ? "danger-fill" : ""} disabled={!preview || submitting}>{submitting ? "Confirming…" : error && preview && action !== "remove" ? `Try ${action} again` : confirmLabel[action]}</button></div>
+        {!online ? <p className="config-offline">Reconnect to confirm this preview.</p> : null}
+        <div className="dialog-actions"><button type="button" disabled={submitting} onClick={cancel}>Cancel</button><button type="submit" className={action === "remove" || action === "reset" ? "danger-fill" : ""} disabled={!preview || submitting || !online}>{submitting ? "Confirming…" : error && preview && action !== "remove" ? `Try ${action} again` : confirmLabel[action]}</button></div>
       </form>
     </dialog>
   </div>

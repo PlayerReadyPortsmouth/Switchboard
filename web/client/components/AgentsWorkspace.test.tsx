@@ -84,6 +84,22 @@ describe("AgentsWorkspace", () => {
     const operator = { ...session, permissions: { agents: "operator" as const } }
     view.rerender(<AgentsWorkspace api={fakeApi({ detail: mutable })} session={operator} routeAgent="qa" connection="live" streamFactory={null} onNavigate={() => {}} onNewConversation={() => {}} />)
     expect(await screen.findByRole("tab", { name: "Overview" })).toBeTruthy()
+    const overviewTab = screen.getByRole("tab", { name: "Overview" })
+    overviewTab.focus()
+    await userEvent.keyboard("{ArrowRight}")
+    expect(document.activeElement).toBe(screen.getByRole("tab", { name: "Sessions" }))
+    expect(screen.getByRole("tab", { name: "Sessions" }).getAttribute("aria-selected")).toBe("true")
+    await userEvent.keyboard("{End}")
+    expect(document.activeElement).toBe(screen.getByRole("tab", { name: "Activity" }))
+    await userEvent.keyboard("{Home}")
+    expect(document.activeElement).toBe(overviewTab)
+    for (const label of ["Overview", "Sessions", "Configuration", "Activity"]) {
+      const tab = screen.getByRole("tab", { name: label })
+      const panel = document.getElementById(tab.getAttribute("aria-controls")!)
+      expect(tab.id).toBeTruthy()
+      expect(panel).toBeTruthy()
+      expect(panel?.getAttribute("aria-labelledby")).toBe(tab.id)
+    }
     expect((screen.getByRole("button", { name: "Reset agent" }) as HTMLButtonElement).disabled).toBe(false)
     expect((screen.getByRole("button", { name: "Restart agent" }) as HTMLButtonElement).disabled).toBe(false)
     await userEvent.click(screen.getByRole("tab", { name: "Configuration" }))
@@ -91,6 +107,7 @@ describe("AgentsWorkspace", () => {
     await userEvent.clear(screen.getByLabelText("Description"))
     await userEvent.type(screen.getByLabelText("Description"), "Preserved local draft")
     await userEvent.click(screen.getByRole("tab", { name: "Activity" }))
+    expect(screen.getByText("Last tool invocation")).toBeTruthy()
     expect(screen.getByText(/Operations vertical/)).toBeTruthy()
     expect(screen.queryByRole("button", { name: /Operations/ })).toBeNull()
     await userEvent.click(screen.getByRole("tab", { name: "Configuration" }))
@@ -142,13 +159,14 @@ describe("AgentsWorkspace", () => {
       open: (_url, handlers) => { sourceHandlers = handlers; return { close() {} } },
     })
     render(<AgentsWorkspace api={api} session={session} routeAgent="qa" connection="live" streamFactory={() => stream} onNavigate={() => {}} onNewConversation={() => {}} />)
-    expect(await screen.findByText("v1")).toBeTruthy()
+    const panel = await screen.findByRole("tabpanel")
+    expect(await within(panel).findByText("v1")).toBeTruthy()
     expect(listCalls).toBe(1)
     expect(detailCalls).toBe(1)
 
     await act(async () => { sourceHandlers?.message(JSON.stringify({ kind: "snapshot_required", sequence: 1, ts: Date.now() })) })
 
-    expect(await screen.findByText("v2")).toBeTruthy()
+    expect(await within(screen.getByRole("tabpanel")).findByText("v2")).toBeTruthy()
     expect(listCalls).toBe(2)
     expect(detailCalls).toBe(2)
   })

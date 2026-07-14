@@ -628,7 +628,11 @@ function NewConversationDialog({ session, error, onCancel, onCreate }: { session
 
 function ConfirmArchiveDialog({ title, error, onCancel, onArchive }: { title: string; error: string; onCancel(): void; onArchive(): Promise<void> }) {
   const pendingRef = useRef(false)
-  const { dialogRef } = useModalDialog(() => { if (!pendingRef.current) onCancel() })
+  const { dialogRef } = useModalDialog(() => {
+    if (pendingRef.current) return false
+    onCancel()
+    return true
+  })
   const [submitting, setSubmitting] = useState(false)
   const submit = async (event: FormEvent) => {
     event.preventDefault()
