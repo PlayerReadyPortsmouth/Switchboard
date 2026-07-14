@@ -14,6 +14,7 @@
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",
     "@modelcontextprotocol/sdk": "^1.0.0",
+    "@openai/codex": "0.144.4",
     "croner": "^10.0.1",
     "discord.js": "^14.14.0",
     "react": "19.2.7",
