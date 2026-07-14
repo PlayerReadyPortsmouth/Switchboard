@@ -2,6 +2,7 @@ import "../testSetup"
 import { afterEach, describe, expect, test } from "bun:test"
 import { act, cleanup, render, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
+import { readFileSync } from "node:fs"
 import { ApiError } from "../api"
 import { AgentStream, type EventSourceHandlers } from "../agentStream"
 import type { AgentDetail, AgentSummary, Session } from "../types"
@@ -49,7 +50,11 @@ function fakeApi(options: { agents?: AgentSummary[]; detail?: AgentDetail; listE
   }
 }
 
-afterEach(() => { cleanup(); history.replaceState(null, "", "/agents") })
+afterEach(() => {
+  cleanup()
+  history.replaceState(null, "", "/agents")
+  Object.defineProperty(window, "innerWidth", { configurable: true, value: 1280 })
+})
 
 describe("AgentsWorkspace", () => {
   test("searches status-labeled agents and opens read-only detail", async () => {
@@ -62,6 +67,21 @@ describe("AgentsWorkspace", () => {
     expect(await screen.findByRole("heading", { name: "qa" })).toBeTruthy()
     expect(screen.getByText("Verify release")).toBeTruthy()
     expect(screen.queryByRole("button", { name: "Restart agent" })).toBeNull()
+  })
+
+  test("shows disabled mutation previews to permitted operators but omits them for viewers", async () => {
+    const mutable = detail({ permissions: { configure: true, reset: true, restart: true, remove: false } })
+    const view = render(<AgentsWorkspace api={fakeApi({ detail: mutable })} session={session} routeAgent="qa" connection="live" streamFactory={null} onNavigate={() => {}} onNewConversation={() => {}} />)
+    await screen.findByRole("heading", { name: "qa" })
+    expect(screen.queryByRole("button", { name: "Configure agent" })).toBeNull()
+    expect(screen.queryByRole("button", { name: "Reset agent" })).toBeNull()
+    expect(screen.queryByRole("button", { name: "Restart agent" })).toBeNull()
+
+    const operator = { ...session, permissions: { agents: "operator" as const } }
+    view.rerender(<AgentsWorkspace api={fakeApi({ detail: mutable })} session={operator} routeAgent="qa" connection="live" streamFactory={null} onNavigate={() => {}} onNewConversation={() => {}} />)
+    for (const name of ["Configure agent", "Reset agent", "Restart agent"]) {
+      expect(((await screen.findByRole("button", { name })) as HTMLButtonElement).disabled).toBe(true)
+    }
   })
 
   test("renders loading, empty, forbidden, missing, and unavailable states", async () => {
@@ -117,5 +137,34 @@ describe("AgentsWorkspace", () => {
     expect(await screen.findByText("v2")).toBeTruthy()
     expect(listCalls).toBe(2)
     expect(detailCalls).toBe(2)
+  })
+
+  test("uses a closed tablet detail drawer, moves focus into it, and restores focus on Escape", async () => {
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 900 })
+    render(<AgentsWorkspace api={fakeApi()} session={session} routeAgent={null} connection="live" streamFactory={null} onNavigate={() => {}} onNewConversation={() => {}} />)
+    const row = await screen.findByRole("button", { name: "Open qa" })
+    const shell = document.querySelector(".agents-shell")!
+    const drawer = document.querySelector<HTMLElement>('.agent-detail[aria-label="Agent detail"]')!
+    expect(shell.getAttribute("data-layout")).toBe("tablet")
+    expect(drawer.getAttribute("data-open")).toBe("false")
+    expect(drawer.getAttribute("aria-hidden")).toBe("true")
+
+    await userEvent.click(row)
+    await screen.findByRole("heading", { name: "qa" })
+    expect(drawer.getAttribute("data-open")).toBe("true")
+    expect(drawer.getAttribute("aria-hidden")).toBe("false")
+    await waitFor(() => expect(document.activeElement?.textContent).toBe("Back to agents"))
+
+    await userEvent.keyboard("{Escape}")
+    expect(drawer.getAttribute("data-open")).toBe("false")
+    await waitFor(() => expect(document.activeElement?.getAttribute("aria-label")).toBe("Open qa"))
+  })
+
+  test("defines tablet drawer geometry and prevents horizontal viewport overflow", () => {
+    const css = readFileSync(new URL("../styles.css", import.meta.url), "utf8")
+    expect(css).toContain("html, body, #root { min-height: 100%; max-width: 100%; overflow-x: hidden; }")
+    expect(css).toContain('.agents-shell[data-layout="tablet"] .agent-detail')
+    expect(css).toContain('.agents-shell[data-layout="tablet"] .agent-detail[data-open="false"]')
+    expect(css).toContain("inset: 0 0 0 calc(var(--rail-width) + var(--list-width))")
   })
 })

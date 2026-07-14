@@ -46,6 +46,7 @@ interface AppProps {
 
 interface ConversationWorkspaceProps extends AppProps {
   session?: Session | null
+  controllerState?: PwaState
   onSessionLoaded?(session: Session): void
   onNavigateDestination?(destination: "conversations" | "agents"): void
 }
@@ -70,6 +71,8 @@ const conversationIdFromLocation = () => {
 }
 
 const pathFor = pathForConversation
+const defaultPwaState: PwaState = { installAvailable: false, online: true, issue: null }
+const createDefaultAgentStream = () => new AgentStream()
 
 export function createWorkspaceStream(api: AppApi): ConversationStream {
   if (!api.listMessages) throw new Error("Conversation message API is unavailable")
@@ -236,7 +239,7 @@ export function ConversationView({ api, conversation: suppliedConversation, mess
   </>
 }
 
-export function ConversationWorkspace({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, streamFactory = createWorkspaceStream, session: suppliedSession, onSessionLoaded, onNavigateDestination }: ConversationWorkspaceProps) {
+export function ConversationWorkspace({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, controllerState, streamFactory = createWorkspaceStream, session: suppliedSession, onSessionLoaded, onNavigateDestination }: ConversationWorkspaceProps) {
   const apiRef = useRef<AppApi | null>(null)
   const draftsRef = useRef<DraftStore | null>(null)
   if (apiRef.current === null) apiRef.current = suppliedApi ?? new WorkspaceApi()
@@ -258,11 +261,9 @@ export function ConversationWorkspace({ api: suppliedApi, drafts: suppliedDrafts
   const drawerInvokerRef = useRef<HTMLElement | null>(null)
   const dialogInvokerRef = useRef<HTMLElement | null>(null)
   const [focusRequest, setFocusRequest] = useState<FocusRequest | null>(null)
-  const [pwaState, setPwaState] = useState<PwaState>(() => pwa?.state() ?? { installAvailable: false, online: true, issue: null })
+  const pwaState = controllerState ?? pwa?.state() ?? defaultPwaState
   const loadEpochRef = useRef(0)
   const offlineFallbackRef = useRef<string | null>(null)
-
-  useEffect(() => pwa?.subscribe(setPwaState), [pwa])
 
   useLayoutEffect(() => {
     if (!focusRequest) return
@@ -457,10 +458,7 @@ export function ConversationWorkspace({ api: suppliedApi, drafts: suppliedDrafts
   return (
     <main className="workspace-shell" data-mobile-pane={mobilePane}>
       <span className="sr-only" aria-live="polite" aria-atomic="true" data-workspace-announcer data-turn-announcer>{workspaceAnnouncement}</span>
-      {pwaState.issue ? <div className="pwa-issue" role="status" aria-labelledby="pwa-issue-title" data-source={pwaState.issue.source}>
-        <strong id="pwa-issue-title">{pwaState.issue.source === "install" ? "Install Switchboard" : "Offline support"}</strong>
-        <span>{pwaState.issue.message}</span>
-      </div> : null}
+      <PwaIssueBanner issue={pwaState.issue} />
       <AppRail
         active="conversations"
         features={state.session.features}
@@ -509,7 +507,7 @@ export function ConversationWorkspace({ api: suppliedApi, drafts: suppliedDrafts
   )
 }
 
-export function App({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, streamFactory = createWorkspaceStream, agentStreamFactory = () => new AgentStream() }: AppProps) {
+export function App({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, streamFactory = createWorkspaceStream, agentStreamFactory = createDefaultAgentStream }: AppProps) {
   const apiRef = useRef<AppApi | null>(null)
   const draftsRef = useRef<DraftStore | null>(null)
   if (apiRef.current === null) apiRef.current = suppliedApi ?? new WorkspaceApi()
@@ -523,7 +521,10 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, st
   const [route, setRoute] = useState<WorkspaceRoute>(() => parseWorkspaceRoute(location.pathname))
   const [session, setSession] = useState<Session | null>(null)
   const [sessionState, setSessionState] = useState<LoadState>("loading")
+  const [pwaState, setPwaState] = useState<PwaState>(() => pwa?.state() ?? defaultPwaState)
   const sessionGeneration = useRef(0)
+
+  useEffect(() => pwa?.subscribe(setPwaState), [pwa])
 
   useEffect(() => {
     const onPopState = () => setRoute(parseWorkspaceRoute(location.pathname))
@@ -565,19 +566,30 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, st
     if (sessionState === "unavailable") return <main className="status-page"><section role="alert"><h1>Switchboard is unavailable</h1><p>Check the service connection, then try again.</p><button type="button" onClick={() => void loadSession()}>Try again</button></section></main>
     if (sessionState === "loading" || !session) return <main className="status-page"><div role="status"><span className="status-node" />Loading your workspace…</div></main>
     if (!session.features.agents || session.permissions.agents === "hidden" || !agentsApi) return <NotFound />
-    return <AgentsWorkspace
-      api={agentsApi}
-      session={session}
-      routeAgent={route.agent}
-      connection={navigator.onLine ? "live" : "offline"}
-      install={install ? { available: true, run: async () => install.run() } : undefined}
-      streamFactory={agentStreamFactory}
-      onNavigate={navigate}
-      onNewConversation={() => navigate("conversations")}
-    />
+    return <>
+      <PwaIssueBanner issue={pwaState.issue} />
+      <AgentsWorkspace
+        api={agentsApi}
+        session={session}
+        routeAgent={route.agent}
+        connection={pwa && !pwaState.online ? "offline" : navigator.onLine ? "live" : "offline"}
+        install={pwa ? { available: pwaState.installAvailable, run: () => pwa.install() } : install ? { available: true, run: async () => install.run() } : undefined}
+        streamFactory={agentStreamFactory}
+        onNavigate={navigate}
+        onNewConversation={() => navigate("conversations")}
+      />
+    </>
   }
 
-  return <ConversationWorkspace api={api} drafts={drafts} install={install} pwa={pwa} streamFactory={streamFactory} session={session} onSessionLoaded={rememberSession} onNavigateDestination={destination => navigate(destination)} />
+  return <ConversationWorkspace api={api} drafts={drafts} install={install} pwa={pwa} controllerState={pwaState} streamFactory={streamFactory} session={session} onSessionLoaded={rememberSession} onNavigateDestination={destination => navigate(destination)} />
+}
+
+function PwaIssueBanner({ issue }: { issue: PwaState["issue"] }) {
+  if (!issue) return null
+  return <div className="pwa-issue" role="status" aria-labelledby="pwa-issue-title" data-source={issue.source}>
+    <strong id="pwa-issue-title">{issue.source === "install" ? "Install Switchboard" : "Offline support"}</strong>
+    <span>{issue.message}</span>
+  </div>
 }
 
 function NotFound() {

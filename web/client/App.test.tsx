@@ -105,6 +105,57 @@ describe("responsive workspace shell", () => {
     expect(await screen.findByRole("heading", { name: "Not found" })).toBeTruthy()
   })
 
+  test("uses live PWA install availability and issue feedback on the Agents route", async () => {
+    history.replaceState(null, "", "/agents")
+    let listener: ((state: { installAvailable: boolean; online: boolean; issue: { source: "install"; message: string } | null }) => void) | undefined
+    let installs = 0
+    const pwa = {
+      state: () => ({ installAvailable: false, online: true, issue: null }),
+      subscribe: (next: typeof listener) => { listener = next; next?.(pwa.state()); return () => { listener = undefined } },
+      install: async () => { installs++ },
+    }
+    render(<App api={fakeApi()} pwa={pwa} streamFactory={null} agentStreamFactory={null} />)
+    await screen.findByRole("heading", { name: "Agents" })
+    expect(screen.queryByRole("button", { name: "Install Switchboard" })).toBeNull()
+
+    act(() => listener?.({ installAvailable: true, online: true, issue: { source: "install", message: "Install prompt unavailable." } }))
+    await userEvent.click(await screen.findByRole("button", { name: "Install Switchboard" }))
+    expect(installs).toBe(1)
+    expect(screen.getByRole("status").textContent).toContain("Install prompt unavailable.")
+  })
+
+  test("keeps the default agent stream alive across internal agent routes", async () => {
+    history.replaceState(null, "", "/agents")
+    const originalEventSource = globalThis.EventSource
+    let opens = 0
+    let closes = 0
+    class CountingEventSource {
+      constructor() { opens++ }
+      addEventListener() {}
+      close() { closes++ }
+    }
+    Object.defineProperty(globalThis, "EventSource", { configurable: true, value: CountingEventSource })
+    const api = fakeApi()
+    api.listAgents = async () => [{
+      name: "qa", emoji: "🧪", description: "Release verification", mode: "persistent", status: "idle", queueDepth: 0,
+      contextFill: 10, costUsd: 0, replicas: 1, lastActivityMs: 1, currentTool: null, lastTool: null, currentWork: null,
+      model: "gpt-5", version: "v1", permissions: { configure: false, reset: false, restart: false, remove: false },
+    }]
+    api.getAgent = async () => ({ ...(await api.listAgents!())[0], config: { emoji: "🧪", description: "Release verification", mode: "persistent", access: { roles: [] }, runtime: { cwd: "/qa" } } })
+    try {
+      render(<App api={api} streamFactory={null} />)
+      await userEvent.click(await screen.findByRole("button", { name: "Open qa" }))
+      await screen.findByRole("heading", { name: "qa" })
+      expect(opens).toBe(1)
+      expect(closes).toBe(0)
+      await userEvent.click(screen.getByRole("button", { name: "Back to agents" }))
+      expect(opens).toBe(1)
+      expect(closes).toBe(0)
+    } finally {
+      Object.defineProperty(globalThis, "EventSource", { configurable: true, value: originalEventSource })
+    }
+  })
+
   test("loads session and conversations, then opens the selected transcript", async () => {
     render(<App api={fakeApi({ conversations: [conversation()] })} />)
 
