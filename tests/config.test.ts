@@ -1,5 +1,6 @@
 import { test, expect } from "bun:test"
 import { loadConfigs, expandHome } from "../hub/config"
+import { resolveWorkspaceRole } from "../hub/operations/access"
 import { mkdtempSync, writeFileSync } from "fs"
 import { isAbsolute, join } from "path"
 import { homedir, tmpdir } from "os"
@@ -87,11 +88,80 @@ test("rejects invalid workspace access entries", () => {
   writeFileSync(join(dir, "agents.json"), JSON.stringify({ qa: { emoji: "x", description: "q", mode: "persistent", access: { roles: ["*"] }, runtime: { cwd: "." } } }))
 
   write({ viewers: "*" })
-  expect(() => loadConfigs(dir)).toThrow("config: workspace.viewers must be a non-empty string array")
+  expect(() => loadConfigs(dir)).toThrow("config: workspace.viewers must be a string array")
   write({ viewers: [""] })
-  expect(() => loadConfigs(dir)).toThrow("config: workspace.viewers must be a non-empty string array")
+  expect(() => loadConfigs(dir)).toThrow("config: workspace.viewers must be a string array")
   write({ operators: [42] })
-  expect(() => loadConfigs(dir)).toThrow("config: workspace.operators must be a non-empty string array")
+  expect(() => loadConfigs(dir)).toThrow("config: workspace.operators must be a string array")
+})
+
+test("empty workspace access arrays remain explicit deny-all lists", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sb-cfg-"))
+  writeFileSync(join(dir, "hub.config.json"), JSON.stringify({
+    discord: { enabled: false }, guildIds: [], socketPath: "s", stateDir: "d",
+    workspace: { viewers: [], operators: [] },
+    routerModel: "m", switchThreshold: 0.7, defaultAgent: "qa",
+    ephemeralTimeoutMs: 1, tagStyle: "prefix", chatKeyScope: "user",
+  }))
+  writeFileSync(join(dir, "agents.json"), JSON.stringify({
+    qa: { emoji: "x", description: "q", mode: "persistent", access: { roles: ["*"] }, runtime: { cwd: "." } },
+  }))
+
+  const { hub } = loadConfigs(dir)
+  expect(resolveWorkspaceRole("ops@example.com", hub.workspace)).toBe("hidden")
+  expect(resolveWorkspaceRole("viewer@example.com", hub.workspace)).toBe("hidden")
+})
+
+test.each([
+  ["scalar", "approver@example.com"],
+  ["empty string", [""]],
+  ["non-string", [42]],
+])("rejects %s web approvers", (_case, webApprovers) => {
+  const dir = mkdtempSync(join(tmpdir(), "sb-cfg-"))
+  writeFileSync(join(dir, "hub.config.json"), JSON.stringify({
+    discord: { enabled: false }, guildIds: [], socketPath: "s", stateDir: "d",
+    approvals: { webApprovers },
+    routerModel: "m", switchThreshold: 0.7, defaultAgent: "qa",
+    ephemeralTimeoutMs: 1, tagStyle: "prefix", chatKeyScope: "user",
+  }))
+  writeFileSync(join(dir, "agents.json"), JSON.stringify({
+    qa: { emoji: "x", description: "q", mode: "persistent", access: { roles: ["*"] }, runtime: { cwd: "." } },
+  }))
+
+  expect(() => loadConfigs(dir)).toThrow("config: approvals.webApprovers must be a string array")
+})
+
+test("accepts supported web approver arrays", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sb-cfg-"))
+  writeFileSync(join(dir, "agents.json"), JSON.stringify({
+    qa: { emoji: "x", description: "q", mode: "persistent", access: { roles: ["*"] }, runtime: { cwd: "." } },
+  }))
+
+  for (const webApprovers of [[], ["approver@example.com"], ["*"]]) {
+    writeFileSync(join(dir, "hub.config.json"), JSON.stringify({
+      discord: { enabled: false }, guildIds: [], socketPath: "s", stateDir: "d",
+      approvals: { webApprovers },
+      routerModel: "m", switchThreshold: 0.7, defaultAgent: "qa",
+      ephemeralTimeoutMs: 1, tagStyle: "prefix", chatKeyScope: "user",
+    }))
+
+    expect(loadConfigs(dir).hub.approvals?.webApprovers).toEqual(webApprovers)
+  }
+})
+
+test("validates Discord approval approvers with the shared identity-array policy", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sb-cfg-"))
+  writeFileSync(join(dir, "hub.config.json"), JSON.stringify({
+    discord: { enabled: false }, guildIds: [], socketPath: "s", stateDir: "d",
+    approvals: { approvers: [""] },
+    routerModel: "m", switchThreshold: 0.7, defaultAgent: "qa",
+    ephemeralTimeoutMs: 1, tagStyle: "prefix", chatKeyScope: "user",
+  }))
+  writeFileSync(join(dir, "agents.json"), JSON.stringify({
+    qa: { emoji: "x", description: "q", mode: "persistent", access: { roles: ["*"] }, runtime: { cwd: "." } },
+  }))
+
+  expect(() => loadConfigs(dir)).toThrow("config: approvals.approvers must be a string array")
 })
 
 test("explicitly disabled Discord remains disabled", () => {

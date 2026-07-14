@@ -548,6 +548,7 @@ export interface ApprovalConfig {
   enabled?: boolean              // master switch; off ⇒ requireApproval flags are inert
   channelId?: string             // channel for approval cards (default: the effect's origin chat)
   approvers?: string[]           // Discord user ids who may approve (default: [deployApproverUserId])
+  webApprovers?: string[]
   ttlMs?: number                 // pending approval timeout → auto-deny (default 3600000 = 1h)
 }
 

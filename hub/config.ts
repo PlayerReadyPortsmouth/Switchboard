@@ -25,11 +25,10 @@ export function createDiscordRuntime<T>(
   return startup.enabled ? create(startup.token) : undefined
 }
 
-function validateWorkspaceAccess(hub: HubConfig): void {
-  for (const [name, value] of [["viewers", hub.workspace?.viewers], ["operators", hub.workspace?.operators]] as const) {
-    if (value !== undefined && (!Array.isArray(value) || value.some(entry => typeof entry !== "string" || !entry))) {
-      throw new Error(`config: workspace.${name} must be a non-empty string array`)
-    }
+function validateIdentityArray(path: string, value: unknown): void {
+  if (value === undefined) return
+  if (!Array.isArray(value) || value.some(entry => typeof entry !== "string" || entry.length === 0)) {
+    throw new Error(`config: ${path} must be a string array`)
   }
 }
 
@@ -57,7 +56,10 @@ export function loadConfigs(dir: string): { hub: HubConfig; agents: AgentRegistr
   if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(hub.webIdentityHeader)) {
     throw new Error("config: webIdentityHeader must be a valid HTTP header name")
   }
-  validateWorkspaceAccess(hub)
+  validateIdentityArray("workspace.viewers", hub.workspace?.viewers)
+  validateIdentityArray("workspace.operators", hub.workspace?.operators)
+  validateIdentityArray("approvals.approvers", hub.approvals?.approvers)
+  validateIdentityArray("approvals.webApprovers", hub.approvals?.webApprovers)
 
   hub.socketPath = expandHome(hub.socketPath)
   hub.stateDir = expandHome(hub.stateDir)

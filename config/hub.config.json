@@ -6,7 +6,7 @@
   "stateDir": "~/.switchboard",
   "webIdentityHeader": "X-Switchboard-User",
   "workspace": {
-    "features": { "agents": true },
+    "features": { "agents": true, "approvals": false },
     "viewers": ["*"],
     "operators": ["*"]
   },
@@ -165,6 +165,7 @@
     "enabled": true,
     "channelId": "<channel id for Approve/Deny cards, or omit to use the effect's origin channel>",
     "approvers": ["<discord user id>"],
+    "webApprovers": ["verified@example.com"],
     "ttlMs": 3600000
   },
   "peering": {
