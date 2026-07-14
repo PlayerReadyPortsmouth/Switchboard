@@ -285,6 +285,31 @@ test("existing unknown runtime keys are excluded from viewer projections and aud
   expect(JSON.stringify(h.audits)).not.toContain("disk-secret")
 })
 
+test("existing unknown nested keys are excluded from every projection and audit level", async () => {
+  const h = harness({ features: { agents: true }, viewers: ["viewer"], operators: ["operator"] })
+  ;(h.disk.qa.access as unknown as Record<string, unknown>).credentials = { API_TOKEN: "access-secret" }
+  h.disk.qa.runtime.overseer = { enabled: true }
+  ;(h.disk.qa.runtime.overseer as unknown as Record<string, unknown>).credentials = { API_TOKEN: "overseer-secret" }
+  h.disk.qa.runtime.sessionGovernor = { enabled: true }
+  ;(h.disk.qa.runtime.sessionGovernor as unknown as Record<string, unknown>).credentials = { API_TOKEN: "governor-secret" }
+  h.disk.qa.runtime.pool = { min: 1, max: 2 }
+  ;(h.disk.qa.runtime.pool as unknown as Record<string, unknown>).credentials = { API_TOKEN: "pool-secret" }
+
+  for (const actor of ["viewer", "operator"]) {
+    const serialized = JSON.stringify(h.service.get(actor, "qa"))
+    expect(serialized).not.toContain("credentials")
+    expect(serialized).not.toContain("API_TOKEN")
+    expect(serialized).not.toContain("-secret")
+  }
+
+  const submitted = h.service.get("operator", "qa").config
+  await h.service.previewConfig("operator", "qa", submitted, h.service.get("operator", "qa").version)
+  const audit = JSON.stringify(h.audits)
+  expect(audit).not.toContain("credentials")
+  expect(audit).not.toContain("API_TOKEN")
+  expect(audit).not.toContain("-secret")
+})
+
 test("audit classifies opaque replacements by path without storing either value", async () => {
   const h = harness()
   const submitted = h.service.get("operator", "qa").config

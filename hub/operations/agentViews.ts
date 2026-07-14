@@ -51,6 +51,41 @@ export interface AgentDetailView extends AgentSummaryView {
 
 const configuredValue = (): RedactedConfiguredValue => ({ redacted: true, configured: true })
 
+function safeAccess(access: AgentConfig["access"]): AgentConfig["access"] {
+  const safe: AgentConfig["access"] = { roles: [...access.roles] }
+  if (access.users !== undefined) safe.users = [...access.users]
+  if (access.consultableBy !== undefined) safe.consultableBy = [...access.consultableBy]
+  if (access.peerableBy !== undefined) safe.peerableBy = [...access.peerableBy]
+  return safe
+}
+
+function safeOverseer(value: NonNullable<AgentConfig["runtime"]["overseer"]>): NonNullable<AgentConfig["runtime"]["overseer"]> {
+  const safe: NonNullable<AgentConfig["runtime"]["overseer"]> = { enabled: value.enabled }
+  if (value.maxIterations !== undefined) safe.maxIterations = value.maxIterations
+  if (value.maxWallclockMs !== undefined) safe.maxWallclockMs = value.maxWallclockMs
+  if (value.model !== undefined) safe.model = value.model
+  return safe
+}
+
+function safeGovernor(value: NonNullable<AgentConfig["runtime"]["sessionGovernor"]>): NonNullable<AgentConfig["runtime"]["sessionGovernor"]> {
+  const safe: NonNullable<AgentConfig["runtime"]["sessionGovernor"]> = { enabled: value.enabled }
+  if (value.softPct !== undefined) safe.softPct = value.softPct
+  if (value.hardPct !== undefined) safe.hardPct = value.hardPct
+  if (value.strategy !== undefined) safe.strategy = value.strategy
+  return safe
+}
+
+function safePool(value: NonNullable<AgentConfig["runtime"]["pool"]>): NonNullable<AgentConfig["runtime"]["pool"]> {
+  const safe: NonNullable<AgentConfig["runtime"]["pool"]> = {}
+  if (value.min !== undefined) safe.min = value.min
+  if (value.max !== undefined) safe.max = value.max
+  if (value.scaleUpQueue !== undefined) safe.scaleUpQueue = value.scaleUpQueue
+  if (value.scaleUpSustainMs !== undefined) safe.scaleUpSustainMs = value.scaleUpSustainMs
+  if (value.replicaIdleMs !== undefined) safe.replicaIdleMs = value.replicaIdleMs
+  if (value.isolateCwd !== undefined) safe.isolateCwd = value.isolateCwd
+  return safe
+}
+
 export function agentConfigVersion(config: AgentConfig | null): string {
   return createHash("sha256").update(JSON.stringify(config)).digest("hex")
 }
@@ -60,9 +95,17 @@ function editableConfig(config: AgentConfig, role: WorkspaceRole): EditableAgent
   const runtime: EditableAgentConfig["runtime"] = {
     cwd: role === "operator" ? safeRuntime.cwd : "[redacted]",
   }
-  const safeKeys = ["model", "allowedTools", "resumable", "useMemory", "injectContext", "overseer", "sessionGovernor", "maxQueueDepth", "coalesceBurst", "pool", "audit"] as const
-  const runtimeRecord = runtime as unknown as Record<string, unknown>
-  for (const key of safeKeys) if (safeRuntime[key] !== undefined) runtimeRecord[key] = structuredClone(safeRuntime[key])
+  if (safeRuntime.model !== undefined) runtime.model = safeRuntime.model
+  if (safeRuntime.allowedTools !== undefined) runtime.allowedTools = [...safeRuntime.allowedTools]
+  if (safeRuntime.resumable !== undefined) runtime.resumable = safeRuntime.resumable
+  if (safeRuntime.useMemory !== undefined) runtime.useMemory = safeRuntime.useMemory
+  if (safeRuntime.injectContext !== undefined) runtime.injectContext = safeRuntime.injectContext
+  if (safeRuntime.overseer !== undefined) runtime.overseer = safeOverseer(safeRuntime.overseer)
+  if (safeRuntime.sessionGovernor !== undefined) runtime.sessionGovernor = safeGovernor(safeRuntime.sessionGovernor)
+  if (safeRuntime.maxQueueDepth !== undefined) runtime.maxQueueDepth = safeRuntime.maxQueueDepth
+  if (safeRuntime.coalesceBurst !== undefined) runtime.coalesceBurst = safeRuntime.coalesceBurst
+  if (safeRuntime.pool !== undefined) runtime.pool = safePool(safeRuntime.pool)
+  if (safeRuntime.audit !== undefined) runtime.audit = safeRuntime.audit
 
   if (role === "operator") {
     if (claudeArgs !== undefined) runtime.claudeArgs = configuredValue()
@@ -73,7 +116,7 @@ function editableConfig(config: AgentConfig, role: WorkspaceRole): EditableAgent
     emoji: config.emoji,
     description: config.description,
     mode: config.mode,
-    access: structuredClone(config.access),
+    access: safeAccess(config.access),
     runtime,
   }
 }
