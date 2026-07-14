@@ -91,3 +91,25 @@ test("subscription during delivery does not duplicate a retained pending event",
   nestedSubscription?.unsubscribe()
   expect(seen).toEqual([1, 2])
 })
+
+test("mutating the publish return cannot corrupt retained replay", () => {
+  const stream = new AgentEventStream()
+  const published = stream.publish({ kind: "agents_snapshot", ts: 1 })
+  published.sequence = 99
+  const seen: Array<{ kind: string; sequence: number }> = []
+
+  stream.subscribe(0, event => seen.push({ kind: event.kind, sequence: event.sequence })).unsubscribe()
+
+  expect(seen).toEqual([{ kind: "agents_snapshot", sequence: 1 }])
+})
+
+test("one subscriber cannot mutate the event delivered to another subscriber", () => {
+  const stream = new AgentEventStream()
+  const seen: number[] = []
+  stream.subscribe(0, event => { event.sequence = 99 })
+  stream.subscribe(0, event => seen.push(event.sequence))
+
+  stream.publish({ kind: "agents_snapshot", ts: 1 })
+
+  expect(seen).toEqual([1])
+})

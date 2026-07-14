@@ -6,6 +6,8 @@ export type AgentEventInput =
 
 export type AgentOperationsEvent = (AgentEventInput | { kind: "snapshot_required"; ts: number }) & { sequence: number }
 
+const eventCopy = (event: AgentOperationsEvent): AgentOperationsEvent => ({ ...event } as AgentOperationsEvent)
+
 export class AgentEventStream {
   private sequence = 0
   private readonly retained: AgentOperationsEvent[] = []
@@ -19,7 +21,7 @@ export class AgentEventStream {
   }
 
   publish(input: AgentEventInput): AgentOperationsEvent {
-    const event = { ...input, sequence: ++this.sequence } as AgentOperationsEvent
+    const event = Object.freeze({ ...input, sequence: ++this.sequence }) as AgentOperationsEvent
     this.retained.push(event)
     if (this.retained.length > this.capacity) this.retained.shift()
     this.pending.push(event)
@@ -28,13 +30,13 @@ export class AgentEventStream {
       try {
         while (this.pending.length > 0) {
           const next = this.pending.shift()!
-          for (const subscriber of [...this.subscribers]) subscriber(next)
+          for (const subscriber of [...this.subscribers]) subscriber(eventCopy(next))
         }
       } finally {
         this.delivering = false
       }
     }
-    return event
+    return eventCopy(event)
   }
 
   subscribe(after: number, callback: (event: AgentOperationsEvent) => void): { unsubscribe(): void } {
@@ -54,7 +56,7 @@ export class AgentEventStream {
       if (retainedFloor !== undefined && after < retainedFloor - 1) {
         callback({ kind: "snapshot_required", ts: Date.now(), sequence: replayThrough })
       } else {
-        for (const event of replay) callback(event)
+        for (const event of replay) callback(eventCopy(event))
       }
       while (buffered.length > 0) callback(buffered.shift()!)
       replaying = false
