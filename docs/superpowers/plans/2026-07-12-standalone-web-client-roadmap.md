@@ -24,6 +24,14 @@ Completed with a bundled TypeScript client implementing the application rail, co
 
 Create a follow-on plan after the workspace shell is usable. The parity checklist explicitly retains canonical web attachments, consultations, delegations, handoff, approvals, agent management, operations (including delivery failures, tools, traces, workflows, and audit), and settings. Preserve preview/confirm safety flows. Redirect the legacy dashboard only after every parity item and an operational soak pass.
 
+- [x] Agents workspace destination
+- [ ] Approvals workspace destination
+- [ ] Operations workspace destination
+- [ ] Settings workspace destination
+- [ ] Phase 4B attachments, consultations, delegations, and handoff
+- [ ] Operational soak gate
+- [ ] Redirect `/legacy` to the workspace
+
 ## Cross-Phase Constraints
 
 - Switchboard must remain deployable as one Bun/TypeScript process.

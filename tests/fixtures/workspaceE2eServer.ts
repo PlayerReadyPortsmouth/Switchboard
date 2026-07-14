@@ -3,7 +3,12 @@ import { createBuiltWorkspaceAssets } from "../../hub/webAssets"
 import { handleWebRequest, type WebDeps } from "../../hub/webServer"
 import { ConversationEventStream, ConversationService, SqliteConversationRepository } from "../../hub/conversations"
 import type { WebInput } from "../../hub/web"
-import { AgentOperationsError } from "../../hub/operations/agentService"
+import { AgentOperationsService } from "../../hub/operations/agentService"
+import { AgentEventStream } from "../../hub/operations/agentEvents"
+import { AgentActionPreviewRegistry, IdempotencyRegistry } from "../../hub/operations/operationPreview"
+import { AgentConfigPreviewRegistry } from "../../hub/agentConfigPreview"
+import type { AgentRegistry, HubConfig } from "../../hub/types"
+import type { AgentStatus } from "../../hub/statusRegistry"
 
 const HOST = "127.0.0.1"
 const PORT = 4173
@@ -19,6 +24,48 @@ const now = () => ++clock
 const events = new ConversationEventStream((conversationId, after, limit) => repository.listMessages(conversationId, after, limit))
 const service = new ConversationService(repository, now, nextId, events, agent => AGENTS.includes(agent as typeof AGENTS[number]))
 const assets = createBuiltWorkspaceAssets()
+
+const hub: HubConfig = {
+  discord: { enabled: false }, guildIds: [], socketPath: "fixture.sock", stateDir: "fixture-state",
+  routerModel: "fixture-router", switchThreshold: 0.5, defaultAgent: "architect",
+  ephemeralTimeoutMs: 60_000, tagStyle: "prefix", chatKeyScope: "channel",
+  workspace: { features: { agents: true }, operators: [IDENTITY] },
+}
+let agentRegistry: AgentRegistry = {
+  architect: { emoji: "A", description: "System architect", mode: "persistent", access: { roles: ["*"] }, runtime: { cwd: "/fixture/architect", model: "fixture-model", resumable: true } },
+  qa: { emoji: "Q", description: "Quality assurance", mode: "persistent", access: { roles: ["*"] }, runtime: { cwd: "/fixture/qa", model: "fixture-model", resumable: true, injectContext: "onSwitch", maxQueueDepth: 8 } },
+}
+let agentStatuses: AgentStatus[] = AGENTS.map(name => ({
+  name, emoji: name === "architect" ? "A" : "Q", mode: "persistent", alive: true, busy: false,
+  queueDepth: 0, fillPct: name === "architect" ? 0.21 : 0.34, costUsd: name === "architect" ? 0.4 : 0.2,
+  replicas: 1, lastActivityMs: clock,
+}))
+const agentEvents = new AgentEventStream(1)
+const actionCounts = { reset: 0, restart: 0 }
+const auditRows: Array<Record<string, unknown>> = []
+const agentOperations = new AgentOperationsService({
+  workspace: hub.workspace,
+  hub,
+  readAgents: () => agentRegistry,
+  statuses: () => ({ agents: agentStatuses, overseers: [] }),
+  commitConfig: async ({ agent, after, classification }) => {
+    if (after === null) {
+      const { [agent]: _removed, ...remaining } = agentRegistry
+      agentRegistry = remaining
+    } else agentRegistry = { ...agentRegistry, [agent]: structuredClone(after) }
+    return { state: "applied", restarted: classification.tier === "hard" ? [agent] : [], fullRestart: [...classification.fullRestart] }
+  },
+  runAction: async ({ agent, action }) => {
+    actionCounts[action]++
+    return { state: "applied", agent, action }
+  },
+  audit: input => { auditRows.push({ sequence: auditRows.length + 1, ts: now(), ...structuredClone(input) }) },
+  now,
+  events: agentEvents,
+  configPreviews: new AgentConfigPreviewRegistry(now, nextId, 60_000),
+  actionPreviews: new AgentActionPreviewRegistry(now, nextId, 60_000),
+  idempotency: new IdempotencyRegistry(now, 60_000),
+})
 
 const designReview = service.create(IDENTITY, { title: "Design review", primaryAgent: "architect" })
 service.appendUserMessage(IDENTITY, designReview.id, { content: "Can we review the workspace navigation?", clientKey: "seed-design-user" })
@@ -61,7 +108,7 @@ const deps: WebDeps = {
   subscribeChannel: () => () => {},
   sendChannelMessage: async () => {},
   runCommand: async () => null,
-  agentOperations: { list: () => [], get: () => { throw new AgentOperationsError(404, "not_found") }, listLegacyConfigs: () => ({}), previewLegacyConfig: async () => { throw new AgentOperationsError(400, "unused") }, confirmLegacyConfig: async () => { throw new AgentOperationsError(409, "unused") }, previewConfig: async () => { throw new AgentOperationsError(400, "unused") }, confirmConfig: async () => { throw new AgentOperationsError(409, "unused") }, previewAction: () => { throw new AgentOperationsError(400, "unused") }, confirmAction: async () => { throw new AgentOperationsError(409, "unused") }, subscribe: () => ({ unsubscribe() {} }) },
+  agentOperations,
   agentSessionAccess: () => ({ feature: true, role: "operator" }),
   listHubConfig: async () => ({}),
   previewHubConfigChange: async () => ({ id: "fixture", before: {}, after: {}, classification: { tier: "safe", fullRestart: [] } }),
@@ -92,6 +139,7 @@ const deps: WebDeps = {
 }
 
 const activeSseDrops = new Map<string, Set<() => void>>()
+const activeAgentSseDrops = new Set<() => void>()
 
 function droppableSse(response: Response, conversationId: string): Response {
   if (!response.body) return response
@@ -135,6 +183,41 @@ function droppableSse(response: Response, conversationId: string): Response {
   return new Response(stream, { status: response.status, headers: response.headers })
 }
 
+function droppableAgentSse(response: Response): Response {
+  if (!response.body) return response
+  const reader = response.body.getReader()
+  let dropped = false
+  let controller: ReadableStreamDefaultController<Uint8Array> | null = null
+  const drop = () => {
+    if (dropped) return
+    dropped = true
+    activeAgentSseDrops.delete(drop)
+    controller?.close()
+    void reader.cancel().catch(() => {})
+  }
+  const stream = new ReadableStream<Uint8Array>({
+    start(nextController) {
+      controller = nextController
+      activeAgentSseDrops.add(drop)
+      nextController.enqueue(new TextEncoder().encode(": connected\n\n"))
+      void (async () => {
+        try {
+          while (!dropped) {
+            const result = await reader.read()
+            if (result.done) { activeAgentSseDrops.delete(drop); nextController.close(); return }
+            nextController.enqueue(result.value)
+          }
+        } catch (error) {
+          activeAgentSseDrops.delete(drop)
+          if (!dropped) nextController.error(error)
+        }
+      })()
+    },
+    cancel() { dropped = true; activeAgentSseDrops.delete(drop); return reader.cancel() },
+  })
+  return new Response(stream, { status: response.status, headers: response.headers })
+}
+
 async function fixtureRoute(request: Request): Promise<Response | null> {
   const url = new URL(request.url)
   if (!url.pathname.startsWith("/__e2e/")) return null
@@ -149,6 +232,22 @@ async function fixtureRoute(request: Request): Promise<Response | null> {
       content: body.content, state: "completed", createdAt: now(),
     }, [])
     return Response.json(result.message, { status: 201 })
+  }
+  if (request.method === "POST" && url.pathname === "/__e2e/agents/drop-stream") {
+    for (const drop of [...activeAgentSseDrops]) drop()
+    return Response.json({ dropped: true })
+  }
+  if (request.method === "POST" && url.pathname === "/__e2e/agents/status") {
+    const body = await request.json().catch(() => null) as { agent?: string; busy?: boolean; queueDepth?: number } | null
+    if (!body?.agent || !AGENTS.includes(body.agent as typeof AGENTS[number]) || typeof body.busy !== "boolean" || !Number.isSafeInteger(body.queueDepth) || body.queueDepth! < 0) {
+      return Response.json({ error: "invalid_status" }, { status: 400 })
+    }
+    agentStatuses = agentStatuses.map(status => status.name === body.agent
+      ? { ...status, busy: body.busy!, queueDepth: body.queueDepth!, lastActivityMs: now() }
+      : status)
+    agentEvents.publish({ kind: "agent_changed", agent: "architect", ts: now() })
+    agentEvents.publish({ kind: "agents_snapshot", ts: now() })
+    return Response.json({ resetCount: actionCounts.reset, restartCount: actionCounts.restart, auditRows: auditRows.length })
   }
   return new Response("not found", { status: 404 })
 }
@@ -165,8 +264,10 @@ const server = Bun.serve({
     headers.set("x-switchboard-user", IDENTITY)
     const trusted = new Request(request, { headers })
     const response = await handleWebRequest(trusted, deps, assets)
-    const eventMatch = /^\/api\/conversations\/([^/]+)\/events$/.exec(new URL(request.url).pathname)
-    return eventMatch ? droppableSse(response, decodeURIComponent(eventMatch[1])) : response
+    const pathname = new URL(request.url).pathname
+    const eventMatch = /^\/api\/conversations\/([^/]+)\/events$/.exec(pathname)
+    if (eventMatch) return droppableSse(response, decodeURIComponent(eventMatch[1]))
+    return pathname === "/api/operations/agents/events" ? droppableAgentSse(response) : response
   },
 })
 
@@ -175,6 +276,7 @@ const stop = async () => {
   if (stopping) return
   stopping = true
   for (const drops of [...activeSseDrops.values()]) for (const drop of [...drops]) drop()
+  for (const drop of [...activeAgentSseDrops]) drop()
   await server.stop(true)
   db.close()
 }
