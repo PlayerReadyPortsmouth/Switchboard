@@ -243,8 +243,45 @@ button { color: inherit; }
 .agent-detail-empty h2, .agent-detail-state h2 { margin: 18px 0 8px; font-size: 1.05rem; }
 .agent-detail-empty p, .agent-detail-state p { color: var(--muted); font-size: .86rem; line-height: 1.55; }
 .agent-detail-state button { min-height: 44px; padding: 0 14px; border: 1px solid var(--accent); background: transparent; cursor: pointer; }
-.agent-action-preview > div { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 12px; border-top: 1px solid var(--line); }
-.agent-action-preview button { min-height: 40px; padding: 0 12px; border: 1px solid var(--line); background: transparent; color: var(--muted); }
+.agent-tabs { max-width: 880px; display: flex; gap: 0; margin: -10px 0 30px; border-bottom: 1px solid var(--line); overflow-x: auto; }
+.agent-tabs button { min-height: 46px; padding: 0 16px; border: 0; border-bottom: 1px solid transparent; background: transparent; color: var(--muted); font: 650 .65rem/1 ui-monospace, SFMono-Regular, Consolas, monospace; text-transform: uppercase; letter-spacing: .07em; cursor: pointer; white-space: nowrap; }
+.agent-tabs button[aria-selected="true"] { border-color: var(--accent); color: var(--text); }
+.agent-runtime-controls > div { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 12px; border-top: 1px solid var(--line); }
+.agent-runtime-controls button, .config-mode-switch button, .config-editor-actions button, .config-recovery button { min-height: 42px; padding: 0 13px; border: 1px solid var(--line); background: transparent; color: var(--text); cursor: pointer; }
+.agent-runtime-controls button:disabled, .config-editor-actions button:disabled { color: var(--muted); cursor: not-allowed; }
+.agent-runtime-controls .danger-text { border-color: color-mix(in srgb, var(--danger) 50%, var(--line)); color: var(--danger); }
+.agent-runtime-controls > p, .config-offline, .operations-notice { color: var(--muted); font-size: .76rem; line-height: 1.5; }
+.agent-config-editor { max-width: 880px; }
+.config-mode-switch { display: flex; gap: 0; margin-bottom: 24px; border-bottom: 1px solid var(--line); }
+.config-mode-switch button { border: 0; border-bottom: 1px solid transparent; color: var(--muted); }
+.config-mode-switch button[aria-pressed="true"] { border-color: var(--accent); color: var(--text); }
+.config-guided-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.config-guided-grid label, .config-json-label { min-width: 0; display: grid; gap: 7px; color: var(--muted); font: 600 .65rem/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; text-transform: uppercase; letter-spacing: .05em; }
+.config-guided-grid input, .config-guided-grid select, .config-guided-grid textarea, .config-json-label textarea { width: 100%; min-height: 42px; padding: 9px 11px; border: 1px solid var(--line); background: var(--ink-1); color: var(--text); font: .78rem/1.45 Inter, system-ui, sans-serif; text-transform: none; letter-spacing: normal; }
+.config-guided-grid textarea { min-height: 92px; resize: vertical; }
+.config-guided-grid .config-wide { grid-column: 1 / -1; }
+.config-guided-grid .config-check { grid-template-columns: auto 1fr; align-items: center; }
+.config-guided-grid .config-check input { width: 18px; min-height: 18px; padding: 0; accent-color: var(--accent); }
+.configured-sentinel { justify-self: start; padding: 4px 7px; border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line)); color: var(--accent); font-size: .58rem; }
+.config-json-label textarea { min-height: 390px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre; }
+.config-editor-actions { display: flex; justify-content: flex-end; margin-top: 18px; }
+.config-editor-actions button { border-color: var(--accent); }
+.config-recovery { margin-top: 16px; padding: 13px; border-left: 1px solid var(--danger); background: var(--ink-1); }
+.config-recovery p { margin: 0 0 10px; color: var(--danger); font-size: .78rem; line-height: 1.5; }
+.config-impact-ledger { margin-top: 24px; padding: 18px; border: 1px solid var(--line); border-left-color: var(--accent); background: var(--ink-1); }
+.config-impact-ledger h4 { margin: 0; font-size: .95rem; }
+.config-diff { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; margin-top: 16px; background: var(--line); }
+.config-diff > div { min-width: 0; padding: 12px; background: var(--ink-0); }
+.config-diff strong, .restart-reasons strong { font: 650 .62rem/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; text-transform: uppercase; letter-spacing: .06em; }
+.config-diff pre, .readonly-config { max-height: 300px; margin: 9px 0 0; overflow: auto; color: var(--muted); font: .65rem/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.readonly-config { max-height: none; padding: 16px; border: 1px solid var(--line); background: var(--ink-1); }
+.restart-reasons { margin-top: 14px; padding: 12px; border-left: 1px solid var(--accent-warm); }
+.restart-reasons ul { margin: 8px 0 0; padding-left: 18px; color: var(--muted); font: .68rem/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.agent-activity ol { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line); }
+.agent-activity li { display: flex; justify-content: space-between; gap: 16px; padding: 14px 0; border-bottom: 1px solid var(--line); font-size: .78rem; }
+.agent-activity li span { color: var(--muted); }
+.agent-activity li strong { font: 650 .68rem/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.operations-notice { padding: 13px; border-left: 1px solid var(--accent); background: var(--ink-1); }
 .pwa-issue { position: fixed; z-index: 90; right: 18px; bottom: 18px; width: min(420px, calc(100vw - 36px)); display: grid; gap: 5px; padding: 13px 15px; border: 1px solid var(--danger); background: var(--ink-1); color: var(--text); box-shadow: 0 14px 40px rgba(0, 0, 0, .38); }
 .pwa-issue strong { color: var(--danger); font-size: .78rem; }
 .pwa-issue span { color: var(--muted); font-size: .78rem; line-height: 1.45; }
@@ -267,6 +304,13 @@ dialog input, dialog select { min-height: 44px; width: 100%; padding: 0 11px; bo
 .dialog-actions button { min-height: 44px; padding: 0 14px; border: 1px solid var(--line); background: transparent; cursor: pointer; }
 .dialog-actions button[type="submit"] { border-color: var(--accent); }
 .dialog-actions .danger-fill { border-color: var(--danger); color: var(--danger); }
+.agent-action-dialog { width: min(100%, 520px); }
+.agent-action-dialog header h2 { margin-top: 5px; }
+.action-impact { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 0; border: 1px solid var(--line); }
+.action-impact div { padding: 12px; }
+.action-impact div + div { border-left: 1px solid var(--line); }
+.action-impact dt { color: var(--muted); font: .6rem/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; text-transform: uppercase; letter-spacing: .06em; }
+.action-impact dd { margin: 6px 0 0; font-size: .8rem; }
 .form-error { color: var(--danger); }
 
 @media (min-width: 768px) {
@@ -327,6 +371,9 @@ dialog input, dialog select { min-height: 44px; width: 100%; padding: 0 11px; bo
   .agent-detail-header { min-height: 0; grid-template-columns: minmax(0, 1fr); gap: 16px; padding: 14px 16px 18px; }
   .agent-live-state { min-width: 0; justify-self: start; }
   .agent-detail-scroll { padding: 22px 16px 38px; }
+  .config-guided-grid, .config-diff { grid-template-columns: minmax(0, 1fr); }
+  .config-guided-grid .config-wide { grid-column: auto; }
+  .config-json-label textarea { min-height: 300px; }
   .agent-facts { grid-template-columns: minmax(0, 1fr); }
   .agent-facts div:nth-child(odd) { margin-right: 0; }
   .current-work { align-items: start; flex-direction: column; }

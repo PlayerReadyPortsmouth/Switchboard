@@ -47,6 +47,10 @@ function fakeApi(options: { agents?: AgentSummary[]; detail?: AgentDetail; listE
       if (options.detailError) throw options.detailError
       return options.detail ?? detail()
     },
+    previewAgentConfig: async (_name, next) => ({ id: "config-preview", before: detail().config, after: next, classification: { tier: "safe", fullRestart: [] }, expiresAt: Date.now() + 60_000 }),
+    confirmAgentConfig: async () => ({ state: "applied", restarted: [], fullRestart: [] }),
+    previewAgentAction: async (_name, action) => ({ id: "action-preview", actor: "operator@example.com", agent: "qa", action, statusVersion: "v1", impact: { busy: true, queueDepth: 2 }, expiresAt: Date.now() + 60_000 }),
+    confirmAgentAction: async (_name, _id, _key) => ({ state: "applied", agent: "qa", action: "restart" }),
   }
 }
 
@@ -69,7 +73,7 @@ describe("AgentsWorkspace", () => {
     expect(screen.queryByRole("button", { name: "Restart agent" })).toBeNull()
   })
 
-  test("shows disabled mutation previews to permitted operators but omits them for viewers", async () => {
+  test("shows real mutation flows to permitted operators but omits them for viewers", async () => {
     const mutable = detail({ permissions: { configure: true, reset: true, restart: true, remove: false } })
     const view = render(<AgentsWorkspace api={fakeApi({ detail: mutable })} session={session} routeAgent="qa" connection="live" streamFactory={null} onNavigate={() => {}} onNewConversation={() => {}} />)
     await screen.findByRole("heading", { name: "qa" })
@@ -79,15 +83,24 @@ describe("AgentsWorkspace", () => {
 
     const operator = { ...session, permissions: { agents: "operator" as const } }
     view.rerender(<AgentsWorkspace api={fakeApi({ detail: mutable })} session={operator} routeAgent="qa" connection="live" streamFactory={null} onNavigate={() => {}} onNewConversation={() => {}} />)
-    for (const name of ["Configure agent", "Reset agent", "Restart agent"]) {
-      expect(((await screen.findByRole("button", { name })) as HTMLButtonElement).disabled).toBe(true)
-    }
+    expect(await screen.findByRole("tab", { name: "Overview" })).toBeTruthy()
+    expect((screen.getByRole("button", { name: "Reset agent" }) as HTMLButtonElement).disabled).toBe(false)
+    expect((screen.getByRole("button", { name: "Restart agent" }) as HTMLButtonElement).disabled).toBe(false)
+    await userEvent.click(screen.getByRole("tab", { name: "Configuration" }))
+    expect((screen.getByRole("button", { name: "Preview changes" }) as HTMLButtonElement).disabled).toBe(false)
+    await userEvent.clear(screen.getByLabelText("Description"))
+    await userEvent.type(screen.getByLabelText("Description"), "Preserved local draft")
+    await userEvent.click(screen.getByRole("tab", { name: "Activity" }))
+    expect(screen.getByText(/Operations vertical/)).toBeTruthy()
+    expect(screen.queryByRole("button", { name: /Operations/ })).toBeNull()
+    await userEvent.click(screen.getByRole("tab", { name: "Configuration" }))
+    expect((screen.getByLabelText("Description") as HTMLInputElement).value).toBe("Preserved local draft")
   })
 
   test("renders loading, empty, forbidden, missing, and unavailable states", async () => {
     let resolve!: (agents: AgentSummary[]) => void
     const pending = new Promise<AgentSummary[]>(yes => { resolve = yes })
-    const view = render(<AgentsWorkspace api={{ listAgents: () => pending, getAgent: async () => detail() }} session={session} routeAgent={null} connection="connecting" streamFactory={null} onNavigate={() => {}} onNewConversation={() => {}} />)
+    const view = render(<AgentsWorkspace api={{ ...fakeApi(), listAgents: () => pending, getAgent: async () => detail() }} session={session} routeAgent={null} connection="connecting" streamFactory={null} onNavigate={() => {}} onNewConversation={() => {}} />)
     expect(screen.getByRole("status").textContent).toContain("Loading agents")
     resolve([])
     expect(await screen.findByText("No agents available")).toBeTruthy()
@@ -120,6 +133,7 @@ describe("AgentsWorkspace", () => {
     let listCalls = 0
     let detailCalls = 0
     const api: AgentsApi = {
+      ...fakeApi(),
       listAgents: async () => { listCalls++; return [summary()] },
       getAgent: async () => { detailCalls++; return detail({ version: `v${detailCalls}` }) },
     }

@@ -3,11 +3,13 @@ import { ApiError } from "../api"
 import { AgentStream } from "../agentStream"
 import type { AgentDetail as AgentDetailValue, AgentSummary, ConnectionState, Session } from "../types"
 import { AgentDetail } from "./AgentDetail"
+import type { AgentActionApi } from "./AgentActionDialog"
+import type { AgentConfigApi } from "./AgentConfigEditor"
 import { AgentList } from "./AgentList"
 import { AppRail } from "./AppRail"
 import { DestinationMobileNav } from "./DestinationMobileNav"
 
-export interface AgentsApi {
+export type AgentsApi = AgentConfigApi & AgentActionApi & {
   listAgents(): Promise<AgentSummary[]>
   getAgent(agent: string): Promise<AgentDetailValue>
 }
@@ -35,6 +37,7 @@ export function AgentsWorkspace({ api, session, routeAgent, connection: supplied
   const [loadError, setLoadError] = useState<LoadError>(null)
   const [detailError, setDetailError] = useState<DetailError>(null)
   const [connection, setConnection] = useState(suppliedConnection)
+  const [announcement, setAnnouncement] = useState("")
   const [activeAgent, setActiveAgent] = useState(routeAgent)
   const [layout, setLayout] = useState<AgentsLayout>(() => readLayout())
   const rows = useRef(new Map<string, HTMLButtonElement>())
@@ -125,10 +128,10 @@ export function AgentsWorkspace({ api, session, routeAgent, connection: supplied
   if (loadError) return <main className="agents-shell agents-state-shell" data-layout={layout}><AppRail active="agents" connection={connection} features={session.features} install={install} onNew={onNewConversation} onNavigate={destination => onNavigate(destination)} /><section className="status-page"><div role="alert"><h1>{loadError === "forbidden" ? "Agent access denied" : connection === "offline" ? "Agents are unavailable offline" : "Agents are unavailable"}</h1><p>{loadError === "forbidden" ? "Ask a Switchboard administrator to grant agent access." : "Reconnect to Switchboard, then try again."}</p></div></section><DestinationMobileNav active="agents" features={session.features} onNavigate={destination => onNavigate(destination)} /></main>
 
   return <main className="agents-shell" data-layout={layout} data-mobile-pane={activeAgent ? "detail" : "list"}>
-    <span className="sr-only" aria-live="polite">{connection === "live" ? "Agent telemetry live." : `Agent telemetry ${connection}.`}</span>
+    <span className="sr-only" aria-live="polite">{announcement || (connection === "live" ? "Agent telemetry live." : `Agent telemetry ${connection}.`)}</span>
     <AppRail active="agents" connection={connection} features={session.features} install={install} onNew={onNewConversation} onNavigate={destination => onNavigate(destination)} />
     {loading ? <section className="agent-list agent-loading" role="status">Loading agents…</section> : <AgentList agents={agents} selected={activeAgent} query={query} onQueryChange={setQuery} onSelect={selectAgent} rowRef={registerRow} />}
-    <AgentDetail agent={selected} connection={connection} sessionPermission={session.permissions.agents} loading={detailLoading} error={detailError} hidden={layout === "tablet" && !activeAgent} closeRef={detailCloseRef} onBack={showList} />
+    <AgentDetail agent={selected} connection={connection} sessionPermission={session.permissions.agents} api={api} loading={detailLoading} error={detailError} hidden={layout === "tablet" && !activeAgent} closeRef={detailCloseRef} onBack={showList} onReload={() => { if (activeAgentRef.current) void loadDetail(activeAgentRef.current); void loadList() }} onAnnounce={setAnnouncement} />
     <DestinationMobileNav active="agents" features={session.features} onNavigate={destination => onNavigate(destination)} />
   </main>
 }

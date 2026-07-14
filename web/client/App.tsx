@@ -11,6 +11,7 @@ import { Transcript, canonicalMessages } from "./components/Transcript"
 import { Composer } from "./components/Composer"
 import { ActivityDisclosure } from "./components/ActivityItem"
 import { MobileNav, type MobilePane } from "./components/MobileNav"
+import { useModalDialog } from "./components/useModalDialog"
 import { initialWorkspaceState, workspaceReducer } from "./state"
 import type { ConnectionState, Conversation, ConversationEvent, ConversationInput, ConversationUpdate, Message, PostMessageInput, Session, TransportLink } from "./types"
 import type { PwaController, PwaState } from "./pwa"
@@ -27,6 +28,10 @@ export interface AppApi {
   listLinks?(conversationId: string): Promise<TransportLink[]>
   listAgents?: WorkspaceApi["listAgents"]
   getAgent?: WorkspaceApi["getAgent"]
+  previewAgentConfig?: WorkspaceApi["previewAgentConfig"]
+  confirmAgentConfig?: WorkspaceApi["confirmAgentConfig"]
+  previewAgentAction?: WorkspaceApi["previewAgentAction"]
+  confirmAgentAction?: WorkspaceApi["confirmAgentAction"]
 }
 
 export interface ConversationViewApi {
@@ -517,6 +522,10 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, st
   const agentsApi = useMemo(() => api.listAgents && api.getAgent ? {
     listAgents: () => api.listAgents!(),
     getAgent: (name: string) => api.getAgent!(name),
+    previewAgentConfig: (name: string, config: Parameters<WorkspaceApi["previewAgentConfig"]>[1]) => api.previewAgentConfig ? api.previewAgentConfig(name, config) : Promise.reject(new ApiError(503, "operation_unavailable")),
+    confirmAgentConfig: (name: string, previewId: string, hard: boolean) => api.confirmAgentConfig ? api.confirmAgentConfig(name, previewId, hard) : Promise.reject(new ApiError(503, "operation_unavailable")),
+    previewAgentAction: (name: string, action: Parameters<WorkspaceApi["previewAgentAction"]>[1]) => api.previewAgentAction ? api.previewAgentAction(name, action) : Promise.reject(new ApiError(503, "operation_unavailable")),
+    confirmAgentAction: (name: string, previewId: string, idempotencyKey: string) => api.confirmAgentAction ? api.confirmAgentAction(name, previewId, idempotencyKey) : Promise.reject(new ApiError(503, "operation_unavailable")),
   } : null, [api])
   const [route, setRoute] = useState<WorkspaceRoute>(() => parseWorkspaceRoute(location.pathname))
   const [session, setSession] = useState<Session | null>(null)
@@ -600,7 +609,7 @@ function NewConversationDialog({ session, error, onCancel, onCreate }: { session
   const [title, setTitle] = useState("")
   const [primaryAgent, setPrimaryAgent] = useState(session.agents[0]?.name ?? "")
   const [submitting, setSubmitting] = useState(false)
-  const dialogRef = useModalDialog(onCancel)
+  const { dialogRef } = useModalDialog(onCancel)
   return (
     <div className="dialog-backdrop">
       <dialog ref={dialogRef} aria-labelledby="new-conversation-title">
@@ -619,7 +628,7 @@ function NewConversationDialog({ session, error, onCancel, onCreate }: { session
 
 function ConfirmArchiveDialog({ title, error, onCancel, onArchive }: { title: string; error: string; onCancel(): void; onArchive(): Promise<void> }) {
   const pendingRef = useRef(false)
-  const dialogRef = useModalDialog(() => { if (!pendingRef.current) onCancel() })
+  const { dialogRef } = useModalDialog(() => { if (!pendingRef.current) onCancel() })
   const [submitting, setSubmitting] = useState(false)
   const submit = async (event: FormEvent) => {
     event.preventDefault()
@@ -656,32 +665,4 @@ function useWorkspaceLayout(): WorkspaceLayout {
     return () => window.removeEventListener("resize", update)
   }, [])
   return layout
-}
-
-function useModalDialog(onCancel: () => void) {
-  const dialogRef = useRef<HTMLDialogElement>(null)
-  const cancelRef = useRef(onCancel)
-  cancelRef.current = onCancel
-  useEffect(() => {
-    const dialog = dialogRef.current
-    if (!dialog) return
-    const handleCancel = (event: Event) => { event.preventDefault(); cancelRef.current() }
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Tab") return
-      const focusable = [...dialog.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])')]
-      if (!focusable.length) return
-      const first = focusable[0], last = focusable[focusable.length - 1]
-      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus() }
-      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus() }
-    }
-    dialog.addEventListener("cancel", handleCancel)
-    dialog.addEventListener("keydown", handleKeyDown)
-    dialog.showModal()
-    return () => {
-      dialog.removeEventListener("cancel", handleCancel)
-      dialog.removeEventListener("keydown", handleKeyDown)
-      if (dialog.open) dialog.close()
-    }
-  }, [])
-  return dialogRef
 }
