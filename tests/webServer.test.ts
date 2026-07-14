@@ -161,19 +161,19 @@ test("GET /api/agents without X-Switchboard-User → 400", async () => {
   expect(res.status).toBe(400)
 })
 
-test("POST /api/agents/:name/preview → 200, forwards name and config", async () => {
+test("POST /api/agents/:name/preview → 200, forwards name, config, and authenticated actor", async () => {
   // Wrapped in an object (not a bare `let`) so TS's control-flow narrowing doesn't
   // collapse the read below to the closure-unreachable `null` initializer type.
-  const called: { v: [string, unknown] | null } = { v: null }
+  const called: { v: [string, unknown, string] | null } = { v: null }
   const deps = fakeDeps({
-    previewAgentChange: async (name, config) => {
-      called.v = [name, config]
+    previewAgentChange: async (name, config, actor) => {
+      called.v = [name, config, actor]
       return { id: "prev-1", before: null, after: config as any, classification: { tier: "restart", fullRestart: ["+agent:qa"] } }
     },
   })
   const res = await handleWebRequest(post("/api/agents/qa/preview", { config: { emoji: "🤖" } }, { "x-switchboard-user": "a@b.com" }), deps)
   expect(res.status).toBe(200)
-  expect(called.v).toEqual(["qa", { emoji: "🤖" }])
+  expect(called.v).toEqual(["qa", { emoji: "🤖" }, "a@b.com"])
   expect(await res.json()).toEqual({ id: "prev-1", before: null, after: { emoji: "🤖" }, classification: { tier: "restart", fullRestart: ["+agent:qa"] } })
 })
 

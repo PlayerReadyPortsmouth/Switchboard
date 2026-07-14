@@ -5,7 +5,8 @@ import { createDiscordRuntime, loadConfigs, resolveDiscordStartup } from "./conf
 import { escalatedRuntime, countErrors, RateCap } from "./escalation"
 import { planReload } from "./configReload"
 import { classifyAgentChange, invalidAgentConfigShape, type AgentChangeClassification } from "./agentConfigDraft"
-import { AgentConfigPreviewRegistry } from "./agentConfigPreview"
+import { AgentConfigPreviewRegistry, agentConfigPreviewMissState } from "./agentConfigPreview"
+import { agentConfigVersion } from "./operations/agentViews"
 import { classifyHubChange, invalidSafeFieldValue, type HubChangeClassification } from "./hubConfigDraft"
 import { HubConfigPreviewRegistry } from "./hubConfigPreview"
 import { BaseGate } from "./baseGate"
@@ -2257,7 +2258,7 @@ const webDeps: WebDeps = {
     return readAgentsJson()
   },
 
-  previewAgentChange: async (name, config) => {
+  previewAgentChange: async (name, config, actor) => {
     if (config) {
       const shapeError = invalidAgentConfigShape(config)
       if (shapeError) return { error: shapeError }
@@ -2265,19 +2266,24 @@ const webDeps: WebDeps = {
     const current = readAgentsJson()
     const before = current[name] ?? null
     const classification = classifyAgentChange(name, before, config, hub)
-    const preview = agentConfigPreviews.create(name, before, config, classification)
+    const preview = agentConfigPreviews.create(actor, name, agentConfigVersion(before), before, config, classification)
     return { id: preview.id, before: preview.before, after: preview.after, classification: preview.classification }
   },
 
   confirmAgentChange: async (name, id, hard, actor) => {
-    const preview = agentConfigPreviews.consume(id)
-    if (!preview || preview.agentName !== name) return { state: "not_found", restarted: [], fullRestart: [] }
+    const current = readAgentsJson()
+    const liveBefore = current[name] ?? null
+    const liveVersion = agentConfigVersion(liveBefore)
+    const pending = agentConfigPreviews.get(id)
+    const preview = agentConfigPreviews.consume(id, actor, name, liveVersion)
+    if (!preview) {
+      const state = agentConfigPreviewMissState(pending, actor, name, liveVersion, Date.now())
+      return { state, restarted: [], fullRestart: [] }
+    }
 
     // Drift check: re-read disk fresh and compare against what the preview
     // captured as `before` — if someone else already changed this agent since
     // the preview was generated, refuse rather than silently clobber it.
-    const current = readAgentsJson()
-    const liveBefore = current[name] ?? null
     if (JSON.stringify(liveBefore) !== JSON.stringify(preview.before)) {
       return { state: "conflict", restarted: [], fullRestart: [] }
     }

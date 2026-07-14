@@ -3,12 +3,30 @@ import type { AgentChangeClassification } from "./agentConfigDraft"
 
 export interface AgentConfigPreview {
   id: string
+  actor: string
   agentName: string
+  beforeVersion: string
   before: AgentConfig | null
   after: AgentConfig | null
   classification: AgentChangeClassification
   createdAt: number
   expiresAt: number
+}
+
+export function agentConfigPreviewMissState(
+  preview: AgentConfigPreview | undefined,
+  actor: string,
+  agentName: string,
+  liveVersion: string,
+  now: number,
+): "conflict" | "not_found" {
+  return preview !== undefined
+    && preview.expiresAt > now
+    && preview.actor === actor
+    && preview.agentName === agentName
+    && preview.beforeVersion !== liveVersion
+    ? "conflict"
+    : "not_found"
 }
 
 /** Short-lived staging area for an agent-config edit pending operator confirmation.
@@ -26,12 +44,13 @@ export class AgentConfigPreviewRegistry {
   ) {}
 
   create(
-    agentName: string, before: AgentConfig | null, after: AgentConfig | null,
+    actor: string, agentName: string, beforeVersion: string,
+    before: AgentConfig | null, after: AgentConfig | null,
     classification: AgentChangeClassification,
   ): AgentConfigPreview {
     const createdAt = this.now()
     const p: AgentConfigPreview = {
-      id: this.genId(), agentName, before, after, classification,
+      id: this.genId(), actor, agentName, beforeVersion, before, after, classification,
       createdAt, expiresAt: createdAt + this.ttlMs,
     }
     this.pending.set(p.id, p)
@@ -45,11 +64,12 @@ export class AgentConfigPreviewRegistry {
   /** Single-shot: deletes and returns the preview if present and not expired.
    *  A second consume, or one past expiresAt (even if sweepExpired hasn't run
    *  yet), returns null. */
-  consume(id: string): AgentConfigPreview | null {
+  consume(id: string, actor: string, agentName: string, liveVersion: string): AgentConfigPreview | null {
     const p = this.pending.get(id)
     if (!p) return null
     this.pending.delete(id)
     if (p.expiresAt <= this.now()) return null
+    if (p.actor !== actor || p.agentName !== agentName || p.beforeVersion !== liveVersion) return null
     return p
   }
 

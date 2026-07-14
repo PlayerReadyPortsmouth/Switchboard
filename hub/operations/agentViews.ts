@@ -51,7 +51,7 @@ export interface AgentDetailView extends AgentSummaryView {
 
 const configuredValue = (): RedactedConfiguredValue => ({ redacted: true, configured: true })
 
-export function agentConfigVersion(config: AgentConfig): string {
+export function agentConfigVersion(config: AgentConfig | null): string {
   return createHash("sha256").update(JSON.stringify(config)).digest("hex")
 }
 

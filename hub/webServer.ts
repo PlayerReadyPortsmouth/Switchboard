@@ -23,7 +23,7 @@ export interface WebDeps {
   sendChannelMessage: (channelId: string, email: string, text: string) => Promise<void>
   runCommand: (name: string, channelId: string) => Promise<string | null>
   listAgents: () => Promise<Record<string, AgentConfig>>
-  previewAgentChange: (name: string, config: AgentConfig | null) => Promise<{
+  previewAgentChange: (name: string, config: AgentConfig | null, actor: string) => Promise<{
     id: string; before: AgentConfig | null; after: AgentConfig | null; classification: AgentChangeClassification
   } | { error: string }>
   confirmAgentChange: (name: string, id: string, hard: boolean, actor: string) => Promise<{
@@ -271,7 +271,7 @@ export async function handleWebRequest(
     if (method === "POST" && agentPreviewMatch) {
       const body = (await req.json().catch(() => null)) as { config?: AgentConfig | null } | null
       if (body?.config === undefined) return json({ error: "missing_config" }, 400)
-      const preview = await deps.previewAgentChange(agentPreviewMatch[1], body.config)
+      const preview = await deps.previewAgentChange(agentPreviewMatch[1], body.config, email)
       return "error" in preview ? json(preview, 400) : json(preview)
     }
 
