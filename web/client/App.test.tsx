@@ -162,6 +162,32 @@ describe("responsive workspace shell", () => {
     expect((await screen.findByRole("textbox", { name: "Message" }) as HTMLTextAreaElement).value).toBe("offline draft")
   })
 
+  test("coming online replaces offline deep-route placeholders with canonical metadata and preserves the draft", async () => {
+    history.replaceState(null, "", "/conversations/design%2Freview")
+    const storage = new Map([["switchboard:draft:design/review", JSON.stringify({ text: "offline draft", clientKey: "draft-key", updatedAt: 1 })]])
+    const drafts = new DraftStore({ getItem: key => storage.get(key) ?? null, setItem: (key, value) => { storage.set(key, value) }, removeItem: key => { storage.delete(key) } })
+    let online = false; let notify: ((state: { installAvailable: boolean; online: boolean; issue: null }) => void) | undefined; let sessionCalls = 0
+    const pwa = {
+      state: () => ({ installAvailable: false, online, issue: null }),
+      subscribe: (listener: typeof notify) => { notify = listener; listener?.(pwa.state()); return () => { notify = undefined } },
+      install: async () => {},
+    }
+    const api = fakeApi({ conversations: [conversation()] })
+    api.session = async () => { if (sessionCalls++ === 0) throw new ApiError(503, "offline"); return session }
+    render(<App api={api} drafts={drafts} pwa={pwa} />)
+    const composer = await screen.findByRole("textbox", { name: "Message" }) as HTMLTextAreaElement
+    expect(composer.value).toBe("offline draft")
+    expect(screen.getByRole("heading", { name: "design/review" })).toBeTruthy()
+
+    await act(async () => { online = true; notify?.(pwa.state()); await Promise.resolve() })
+
+    expect(await screen.findByRole("heading", { name: "Design review" })).toBeTruthy()
+    expect((screen.getByRole("combobox", { name: "Primary agent" }) as HTMLSelectElement).value).toBe("architect")
+    expect(screen.getAllByText("ada@example.com")).toHaveLength(2)
+    expect((screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement).value).toBe("offline draft")
+    expect(sessionCalls).toBe(2)
+  })
+
   test("an older failed load cannot overwrite a newer successful API load", async () => {
     const oldSession = deferred<Session>()
     const oldConversations = deferred<Conversation[]>()

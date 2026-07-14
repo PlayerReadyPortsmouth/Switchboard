@@ -45,8 +45,9 @@ test("web-only production composition persists submit, fake agent reply, SSE, an
     const states: string[] = []
     events.subscribe(conversation.id, 0, event => { if (event.kind === "turn_state") states.push(`${event.state}:${event.detail?.messageId}`) })
     expect((await handleWebRequest(request(`/api/conversations/${conversation.id}/messages`, "POST", { content: "question" }, { "idempotency-key": "web-1" }), deps)).status).toBe(201)
-    const reply: AgentReply = { agent: "fake", kind: "reply", chatId: dispatched!.chatId, correlationId: "reply-1", text: "answer" }
+    const reply: AgentReply = { agent: "fake", kind: "reply", chatId: dispatched!.chatId, messageId: dispatched!.messageId, text: "answer" }
     await coordinator.acceptAgentReply(reply)
+    coordinator.acceptTurnOutcome({ agent: "fake", chatId: dispatched!.chatId, messageId: dispatched!.messageId, state: "completed" })
     expect(states).toEqual([`queued:${dispatched!.messageId}`, `working:${dispatched!.messageId}`, `completed:${dispatched!.messageId}`])
     const sse = await handleWebRequest(request(`/api/conversations/${conversation.id}/events?after=0`), deps)
     const reader = sse.body!.getReader(); let text = ""

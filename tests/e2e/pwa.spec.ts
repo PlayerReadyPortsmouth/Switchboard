@@ -45,6 +45,11 @@ test("active service worker reloads a deep conversation URL with its draft while
   })
   expect(apiFailed).toBe(true)
   await context.setOffline(false)
+  await expect(page.getByRole("heading", { name: "Design review" })).toBeVisible()
+  await page.getByRole("button", { name: "Conversation details" }).click()
+  await expect(page.getByRole("combobox", { name: "Primary agent" })).toHaveValue("architect")
+  await expect(page.getByRole("region", { name: "Conversation inspector" }).getByText("owner@example.com")).toHaveCount(2)
+  await expect(page.getByRole("textbox", { name: "Message" })).toHaveValue("offline deep-link draft")
   await page.evaluate(async () => {
     await Promise.all((await navigator.serviceWorker.getRegistrations()).map(registration => registration.unregister()))
     await Promise.all((await caches.keys()).map(name => caches.delete(name)))

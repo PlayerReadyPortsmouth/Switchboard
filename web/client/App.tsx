@@ -242,6 +242,7 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, st
   const [focusRequest, setFocusRequest] = useState<FocusRequest | null>(null)
   const [pwaState, setPwaState] = useState<PwaState>(() => pwa?.state() ?? { installAvailable: false, online: true, issue: null })
   const loadEpochRef = useRef(0)
+  const offlineFallbackRef = useRef<string | null>(null)
 
   useEffect(() => pwa?.subscribe(setPwaState), [pwa])
 
@@ -258,13 +259,14 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, st
     setFocusRequest(null)
   }, [focusRequest])
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (background = false) => {
     const epoch = ++loadEpochRef.current
     const current = () => loadEpochRef.current === epoch
-    setLoadState("loading")
+    if (!background) setLoadState("loading")
     try {
       const [session, conversations] = await Promise.all([api.session(), api.listConversations()])
       if (!current()) return
+      offlineFallbackRef.current = null
       dispatch({ type: "session/loaded", session })
       if (!current()) return
       dispatch({ type: "conversations/loaded", conversations })
@@ -278,6 +280,7 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, st
       if (!current()) return
       const offlineConversationId = conversationIdFromLocation()
       if (pwa?.state().online === false && offlineConversationId && drafts.read(offlineConversationId)) {
+        offlineFallbackRef.current = offlineConversationId
         const now = Date.now()
         dispatch({ type: "session/loaded", session: { identity: "", agents: [] } })
         if (!current()) return
@@ -293,7 +296,7 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, st
         return
       }
       const forbidden = error instanceof ApiError && (error.status === 401 || error.status === 403 || error.code === "missing_identity")
-      setLoadState(forbidden ? "forbidden" : "unavailable")
+      if (forbidden || !background) setLoadState(forbidden ? "forbidden" : "unavailable")
       if (!current()) return
       dispatch({ type: "connection/changed", connection: "offline" })
     }
@@ -303,6 +306,9 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, st
     void load()
     return () => { loadEpochRef.current++ }
   }, [load])
+  useEffect(() => {
+    if (pwaState.online && offlineFallbackRef.current) void load(true)
+  }, [load, pwaState.online])
   useEffect(() => {
     const onPopState = () => {
       const conversationId = conversationIdFromLocation()

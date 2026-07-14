@@ -1,11 +1,12 @@
-import type { AgentReply, InboundMessage, TurnUsage } from "./types"
+import type { AgentReply, AgentTurnOutcome, InboundMessage, SendOutcome, TurnUsage } from "./types"
 import type { AgentTransport } from "./transports/index"
 
 /** The slice of a transport the pool drives. StreamJsonTransport satisfies it. */
 export interface PooledReplica {
   readonly name: string
-  deliver(chatKey: string, inbound: InboundMessage): void
-  onReply(cb: (r: AgentReply) => void): void
+  deliver(chatKey: string, inbound: InboundMessage): boolean | void
+  onReply(cb: (r: AgentReply) => void | Promise<void | SendOutcome>): void
+  onTurnOutcome?(cb: (outcome: AgentTurnOutcome) => void | Promise<void>): void
   isAvailable(): boolean
   isBusy(): boolean
   queueDepth(): number
@@ -77,7 +78,8 @@ export interface ReplicaPoolDeps extends ScaleCfg {
 export class ReplicaPool implements AgentTransport {
   private replicas: PooledReplica[]
   private sticky = new Map<string, PooledReplica>()   // chatKey → replica
-  private replyCb: (r: AgentReply) => void = () => {}
+  private replyCb: (r: AgentReply) => void | Promise<void | SendOutcome> = () => {}
+  private outcomeCb: (outcome: AgentTurnOutcome) => void | Promise<void> = () => {}
   private pressureSince: number | null = null
   private scaling = false
 
@@ -92,19 +94,24 @@ export class ReplicaPool implements AgentTransport {
     let n = 0; for (const v of this.sticky.values()) if (v === r) n++; return n
   }
 
-  onReply(cb: (r: AgentReply) => void): void {
+  onReply(cb: (r: AgentReply) => void | Promise<void | SendOutcome>): void {
     this.replyCb = cb
     for (const r of this.replicas) r.onReply(rr => this.replyCb(rr))
   }
 
-  deliver(chatKey: string, inbound: InboundMessage): void {
+  onTurnOutcome(cb: (outcome: AgentTurnOutcome) => void | Promise<void>): void {
+    this.outcomeCb = cb
+    for (const r of this.replicas) r.onTurnOutcome?.(outcome => this.outcomeCb(outcome))
+  }
+
+  deliver(chatKey: string, inbound: InboundMessage): boolean {
     let r = this.sticky.get(chatKey)
     if (!r || !r.isAvailable()) {
       const idx = pickIndex(this.loads())
       r = idx >= 0 ? this.replicas[idx]! : this.replicas[0]!
       this.sticky.set(chatKey, r)
     }
-    r.deliver(chatKey, inbound)
+    return r.deliver(chatKey, inbound) !== false
   }
 
   /** Periodic load check: scale up under sustained pressure, retire idle spares. */
@@ -128,6 +135,7 @@ export class ReplicaPool implements AgentTransport {
     try {
       const t = await this.deps.spawn(`${this.name}#${this.replicas.length + 1}`)
       t.onReply(r => this.replyCb(r))
+      t.onTurnOutcome?.(outcome => this.outcomeCb(outcome))
       this.replicas.push(t)
       this.pressureSince = null   // cooldown after adding capacity
     } finally { this.scaling = false }

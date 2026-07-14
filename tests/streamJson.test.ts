@@ -68,12 +68,71 @@ test("deliver writes a stream-json user message to stdin", async () => {
   expect(JSON.parse(fp.writes[0]).message.content[0].text).toBe("ping")
 })
 
-test("a result event becomes a reply to the last-delivered chat", async () => {
+test("a result event carries the exact active inbound chat and message IDs", async () => {
   const { t, fp } = make(); await t.start()
   const replies: any[] = []; t.onReply((r) => { replies.push(r) })
   t.deliver("c9", { chatId: "c9", messageId: "m", userId: "u", user: "x", content: "hi", ts: "t", isDM: false })
   fp.emitStdout(JSON.stringify({ type: "result", subtype: "success", result: "done" }))
-  expect(replies).toEqual([{ agent: "worker", kind: "reply", chatId: "c9", text: "done" }])
+  expect(replies).toEqual([{ agent: "worker", kind: "reply", chatId: "c9", messageId: "m", text: "done" }])
+})
+
+test("queued turns preserve exact IDs and emit one terminal outcome each", async () => {
+  const { t, fp } = make(); await t.start()
+  const replies: any[] = []; const outcomes: any[] = []
+  t.onReply(r => { replies.push(r) })
+  ;(t as any).onTurnOutcome((outcome: any) => outcomes.push(outcome))
+  t.deliver("c1", { chatId: "c1", messageId: "m1", userId: "u", user: "x", content: "one", ts: "t", isDM: false })
+  t.deliver("c2", { chatId: "c2", messageId: "m2", userId: "u", user: "x", content: "two", ts: "t", isDM: false })
+  fp.emitStdout(JSON.stringify({ type: "result", result: "first" }))
+  await new Promise(resolve => setTimeout(resolve, 0))
+  fp.emitStdout(JSON.stringify({ type: "result", result: "second" }))
+  await new Promise(resolve => setTimeout(resolve, 0))
+  expect(replies.map(reply => [reply.chatId, reply.messageId])).toEqual([["c1", "m1"], ["c2", "m2"]])
+  expect(outcomes.map(outcome => [outcome.chatId, outcome.messageId, outcome.state])).toEqual([["c1", "m1", "completed"], ["c2", "m2", "completed"]])
+})
+
+test("card-only turns still emit an exact completed outcome", async () => {
+  const { t, fp, fs } = make(); await t.start()
+  const outcomes: any[] = []; (t as any).onTurnOutcome((outcome: any) => outcomes.push(outcome))
+  t.deliver("c1", { chatId: "c1", messageId: "card-turn", userId: "u", user: "x", content: "card", ts: "t", isDM: false })
+  fs.fireNotify({ chatId: "c1", card: { title: "T", body: "b", buttons: [] }, correlationId: "k" })
+  fp.emitStdout(JSON.stringify({ type: "result", result: "summary" }))
+  await new Promise(resolve => setTimeout(resolve, 0))
+  expect(outcomes).toEqual([{ agent: "worker", chatId: "c1", messageId: "card-turn", state: "completed" }])
+})
+
+test("overflow is synchronously rejected", async () => {
+  const fp = fakeProc(); const fs = fakeSocket()
+  const t = new StreamJsonTransport("worker", { ...cfg, runtime: { ...cfg.runtime, maxQueueDepth: 0 } }, {
+    spawner: () => fp.handle, socket: fs.sock, shimPath: "/s", socketPath: "/r", mcpConfigPath: "/m", writeMcpConfig: () => {},
+  })
+  await t.start()
+  expect(t.deliver("c1", { chatId: "c1", messageId: "m1", userId: "u", user: "x", content: "one", ts: "t", isDM: false })).toBe(true)
+  expect(t.deliver("c1", { chatId: "c1", messageId: "m2", userId: "u", user: "x", content: "two", ts: "t", isDM: false })).toBe(false)
+})
+
+test("process exit fails the exact active and queued turns", async () => {
+  const { t, fp } = make(); await t.start()
+  const outcomes: any[] = []; (t as any).onTurnOutcome((outcome: any) => outcomes.push(outcome))
+  t.deliver("c1", { chatId: "c1", messageId: "m1", userId: "u", user: "x", content: "one", ts: "t", isDM: false })
+  t.deliver("c2", { chatId: "c2", messageId: "m2", userId: "u", user: "x", content: "two", ts: "t", isDM: false })
+  fp.emitExit(1)
+  expect(outcomes.map(outcome => [outcome.chatId, outcome.messageId, outcome.state])).toEqual([["c1", "m1", "failed"], ["c2", "m2", "failed"]])
+})
+
+test("async reply rejection is reported and fails the turn without an unhandled rejection", async () => {
+  const fp = fakeProc(); const fs = fakeSocket(); const reported: unknown[] = []
+  const t = new StreamJsonTransport("worker", cfg, {
+    spawner: () => fp.handle, socket: fs.sock, shimPath: "/s", socketPath: "/r", mcpConfigPath: "/m", writeMcpConfig: () => {}, reportError: (error: unknown) => reported.push(error),
+  } as any)
+  await t.start()
+  const outcomes: any[] = []; (t as any).onTurnOutcome((outcome: any) => outcomes.push(outcome))
+  t.onReply(async () => { throw new Error("handler failed") })
+  t.deliver("c1", { chatId: "c1", messageId: "m1", userId: "u", user: "x", content: "one", ts: "t", isDM: false })
+  fp.emitStdout(JSON.stringify({ type: "result", result: "answer" }))
+  await new Promise(resolve => setTimeout(resolve, 0))
+  expect((reported[0] as Error).message).toBe("handler failed")
+  expect(outcomes[0]).toMatchObject({ messageId: "m1", state: "failed" })
 })
 
 test("a notify (card) from the socket becomes a card reply", async () => {

@@ -1,5 +1,5 @@
 import { writeFileSync, unlinkSync, readFileSync } from "fs"
-import type { AgentConfig, AgentReply, InboundMessage, CardSpec, TurnUsage, SendOutcome } from "../types"
+import type { AgentConfig, AgentReply, AgentTurnOutcome, InboundMessage, CardSpec, TurnUsage, SendOutcome } from "../types"
 import { contextTokens, fillPct, blendUsage } from "../usage"
 import { TurnGate } from "../turnGate"
 import type { AgentTransport } from "./index"
@@ -75,6 +75,8 @@ export interface StreamJsonOpts {
   writeSession?: (id: string) => void
   /** Called when a submission is rejected because the turn queue is full. */
   onOverflow?: (inbound: InboundMessage) => void
+  /** Reports rejected reply/outcome handlers without creating unhandled rejections. */
+  reportError?: (error: unknown) => void
 }
 
 /** One agent = one long-lived `claude -p --input-format stream-json` process.
@@ -85,6 +87,7 @@ export class StreamJsonTransport implements AgentTransport {
   private closed = false
   private lastChatId = ""
   private cardThisTurn = false
+  private turnCallbacks: Promise<boolean>[] = []
   private lastActivity = Date.now()
   private lastUsage: TurnUsage | null = null
   // The most recent `assistant` frame's usage this turn ≈ the live prompt size.
@@ -92,6 +95,8 @@ export class StreamJsonTransport implements AgentTransport {
   // every tool-call and sub-agent and would over-count). Reset at each turn end.
   private lastAssistantUsage: TurnUsage | null = null
   private cb: (r: AgentReply) => void | Promise<void | SendOutcome> = () => {}
+  private outcomeCb: (outcome: AgentTurnOutcome) => void | Promise<void> = () => {}
+  private readonly terminalTurns = new Set<string>()
   private toolUseCb: (tools: { id: string; name: string }[]) => void = () => {}
   private toolResultCb: (results: { id: string; isError: boolean }[]) => void = () => {}
   private gate: TurnGate
@@ -116,6 +121,7 @@ export class StreamJsonTransport implements AgentTransport {
   }
 
   onReply(cb: (r: AgentReply) => void | Promise<void | SendOutcome>): void { this.cb = cb }
+  onTurnOutcome(cb: (outcome: AgentTurnOutcome) => void | Promise<void>): void { this.outcomeCb = cb }
   onToolUse(cb: typeof this.toolUseCb): void { this.toolUseCb = cb }
   onToolResult(cb: typeof this.toolResultCb): void { this.toolResultCb = cb }
   isAvailable(): boolean { return this.alive }
@@ -129,15 +135,19 @@ export class StreamJsonTransport implements AgentTransport {
       this.cardThisTurn = true
       // Return the reply handler's promise so the send outcome (Discord message id
       // / error) flows back to the shim as a receipt when receipts are enabled.
-      return this.cb({ agent: this.name, kind: "card", chatId: chan(chatId), card: normalizeCard(card), correlationId })
+      const task = this.invokeReply({ agent: this.name, kind: "card", chatId: chan(chatId), card: normalizeCard(card), correlationId })
+      this.turnCallbacks.push(task.then(result => result.failed))
+      return task.then(result => result.value)
     })
     socket.onReact(({ chatId, messageId, emoji }) =>
-      this.cb({ agent: this.name, kind: "react", chatId: chan(chatId), messageId, emoji }))
+      { void this.invokeReply({ agent: this.name, kind: "react", chatId: chan(chatId), messageId, emoji }) })
     socket.onEdit(({ chatId, messageId, text }) =>
-      this.cb({ agent: this.name, kind: "edit", chatId: chan(chatId), messageId, text }))
+      { void this.invokeReply({ agent: this.name, kind: "edit", chatId: chan(chatId), messageId, text }) })
     socket.onUpdate(({ chatId, card, correlationId }) => {
       this.cardThisTurn = true
-      return this.cb({ agent: this.name, kind: "update", chatId: chan(chatId), card: normalizeCard(card), correlationId })
+      const task = this.invokeReply({ agent: this.name, kind: "update", chatId: chan(chatId), card: normalizeCard(card), correlationId })
+      this.turnCallbacks.push(task.then(result => result.failed))
+      return task.then(result => result.value)
     })
     socket.onFinish(() => {
       // Only ephemeral/spawned agents self-terminate; a persistent agent serves
@@ -170,7 +180,7 @@ export class StreamJsonTransport implements AgentTransport {
       this.alive = true
       this.proc.onExit(() => {
         this.alive = false
-        this.gate.reset()
+        this.failPendingTurns()
         // Stale --resume: the CLI exits immediately before emitting init when the
         // session id is no longer on disk. Retry once as a fresh session and clear
         // the stale file so future restarts don't hit the same loop.
@@ -211,12 +221,26 @@ export class StreamJsonTransport implements AgentTransport {
           // already communicate via a card this turn — a card IS the message, so the
           // transcript summary underneath it is redundant noise. Turns with no card
           // (e.g. a short "Backlogged" acknowledgement) still post their text.
-          if (!this.cardThisTurn) {
-            this.cb({ agent: this.name, kind: "reply", chatId: this.lastChatId, text: ev.text, usage })
-          }
+          const active = this.gate.activeTurn()
+          const cardThisTurn = this.cardThisTurn
+          const callbacks = this.turnCallbacks
+          const replyTask = !cardThisTurn && active
+            ? this.invokeReply({
+                agent: this.name, kind: "reply", chatId: active.chatId, messageId: active.messageId,
+                text: ev.text, ...(usage ? { usage } : {}),
+              })
+            : null
           this.cardThisTurn = false
-          this.lastAssistantUsage = null   // reset for the next turn
-          this.gate.turnComplete()   // turn finished → drain the next queued message
+          this.turnCallbacks = []
+          this.lastAssistantUsage = null
+          this.gate.turnComplete()
+          void (async () => {
+            const failures = await Promise.all([
+              ...callbacks,
+              ...(replyTask ? [replyTask.then(result => result.failed)] : []),
+            ])
+            if (active) await this.emitOutcome(active, failures.some(Boolean) ? "failed" : "completed")
+          })()
         }
       })
     }
@@ -224,10 +248,11 @@ export class StreamJsonTransport implements AgentTransport {
     spawnWith(initialSessionId, false)
   }
 
-  deliver(_chatKey: string, inbound: InboundMessage): void {
+  deliver(_chatKey: string, inbound: InboundMessage): boolean {
     this.lastActivity = Date.now()
     const r = this.gate.submit(inbound)   // sent now, queued, or rejected (overflow)
     if (r === "overflow") this.opts.onOverflow?.(inbound)
+    return r !== "overflow"
   }
 
   sendInteraction(customId: string, userId: string, fields?: Record<string, string>): void {
@@ -256,9 +281,33 @@ export class StreamJsonTransport implements AgentTransport {
   async close(): Promise<void> {
     if (this.closed) return
     this.closed = true
+    this.failPendingTurns()
     try { this.proc?.kill() } catch {}
     await this.opts.socket.close()
     try { unlinkSync(this.opts.mcpConfigPath) } catch {}
+  }
+
+  private async invokeReply(reply: AgentReply): Promise<{ value: void | SendOutcome; failed: boolean }> {
+    try { return { value: await this.cb(reply), failed: false } }
+    catch (error) {
+      this.safeReport(error)
+      return { value: { ok: false, error: "Reply handler failed" }, failed: true }
+    }
+  }
+
+  private async emitOutcome(inbound: InboundMessage, state: AgentTurnOutcome["state"]): Promise<void> {
+    if (this.terminalTurns.has(inbound.messageId)) return
+    this.terminalTurns.add(inbound.messageId)
+    try { await this.outcomeCb({ agent: this.name, chatId: inbound.chatId, messageId: inbound.messageId, state }) }
+    catch (error) { this.safeReport(error) }
+  }
+
+  private failPendingTurns(): void {
+    for (const inbound of this.gate.reset()) void this.emitOutcome(inbound, "failed")
+  }
+
+  private safeReport(error: unknown): void {
+    try { (this.opts.reportError ?? (value => process.stderr.write(`stream-json callback failed: ${value}\n`)))(error) } catch {}
   }
 }
 

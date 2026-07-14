@@ -79,6 +79,14 @@ export interface AgentReply {
   usage?: TurnUsage          // end-of-turn token/cost usage (kind === "reply")
 }
 
+/** Exact lifecycle result for one inbound agent turn. */
+export interface AgentTurnOutcome {
+  agent: string
+  chatId: string
+  messageId: string
+  state: "completed" | "failed"
+}
+
 export interface AgentAccess {
   roles: string[]       // role names; "*" means any paired user
   users?: string[]      // user snowflakes

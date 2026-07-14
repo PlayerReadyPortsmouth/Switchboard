@@ -14,6 +14,28 @@ function fakeTransport(name: string, available = true): AgentTransport & { deliv
   } as any
 }
 
+test("dispatch reports a synchronous transport rejection", () => {
+  const research = fakeTransport("research") as any
+  research.deliver = () => false
+  expect(new Dispatcher([research]).dispatch("research", "c", inbound)).toBe(false)
+})
+
+test("turn outcomes propagate and rejected async reply handlers are reported", async () => {
+  let reply: any = () => {}; let outcome: any = () => {}; const errors: unknown[] = []
+  const transport = {
+    name: "research", deliver: () => true, isAvailable: () => true,
+    onReply: (cb: any) => { reply = cb }, onTurnOutcome: (cb: any) => { outcome = cb },
+  } as any
+  const dispatcher = new Dispatcher([transport], error => errors.push(error))
+  const outcomes: any[] = []
+  dispatcher.onReply(async () => { throw new Error("reply rejected") })
+  ;(dispatcher as any).onTurnOutcome((value: any) => outcomes.push(value))
+  await reply({ agent: "research", kind: "reply", chatId: "c", messageId: "m", text: "x" }).catch(() => {})
+  outcome({ agent: "research", chatId: "c", messageId: "m", state: "completed" })
+  expect((errors[0] as Error).message).toBe("reply rejected")
+  expect(outcomes).toHaveLength(1)
+})
+
 const inbound: InboundMessage = {
   chatId: "c", messageId: "m", userId: "u", user: "bob",
   content: "hi", ts: "t", isDM: true,
@@ -36,7 +58,7 @@ test("replies propagate through the dispatcher callback", () => {
   const research = fakeTransport("research") as any
   const d = new Dispatcher([research])
   const got: AgentReply[] = []
-  d.onReply(r => got.push(r))
+  d.onReply(r => { got.push(r) })
   research._emit({ agent: "research", kind: "reply", chatId: "c", text: "yo" })
   expect(got[0].text).toBe("yo")
 })

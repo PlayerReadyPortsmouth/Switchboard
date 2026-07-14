@@ -153,24 +153,56 @@ describe("TurnCoordinator", () => {
     expect(f.repo.listDueDeliveries(999)).toHaveLength(0)
   })
 
-  test("production coordinator publishes queued working completed for an accepted reply", async () => {
+  test("canonical message identity takes precedence over a legacy correlation token", async () => {
+    const f = fixture()
+    const submitted = await f.coordinator.submitWebTurn("owner", f.conversation.id, { content: "question", clientKey: "identity" })
+    const result = await f.coordinator.acceptAgentReply({
+      agent: "architect", kind: "reply", chatId: f.conversation.id, text: "answer",
+      messageId: submitted.message.id, correlationId: "legacy-token",
+    })
+    if (!result || "closed" in result) throw new Error("expected an accepted agent turn")
+    expect(result.message.clientKey).toBe(`agent:architect:${submitted.message.id}`)
+  })
+
+  test("production coordinator publishes queued working completed for an exact terminal outcome", async () => {
     const f = fixture()
     const submitted = await f.coordinator.submitWebTurn("owner", f.conversation.id, { content: "question", clientKey: "terminal" })
-    await f.coordinator.acceptAgentReply({ agent: "architect", kind: "reply", chatId: f.conversation.id, text: "answer", correlationId: "terminal-reply" })
+    await f.coordinator.acceptAgentReply({ agent: "architect", kind: "reply", chatId: f.conversation.id, text: "answer", messageId: submitted.message.id })
+    f.coordinator.acceptTurnOutcome({ agent: "architect", chatId: f.conversation.id, messageId: submitted.message.id, state: "completed" })
     expect(f.events.filter(event => event.kind === "turn_state").map(event => [event.state, event.detail?.messageId])).toEqual([
       ["queued", submitted.message.id], ["working", submitted.message.id], ["completed", submitted.message.id],
     ])
   })
 
-  test("concurrent turns complete once in dispatch order and duplicate replies do not repeat terminals", async () => {
+  test("concurrent turns complete by exact message ID and duplicate outcomes do not repeat terminals", async () => {
     const f = fixture()
     const first = await f.coordinator.submitWebTurn("owner", f.conversation.id, { content: "one", clientKey: "one" })
     const second = await f.coordinator.submitWebTurn("owner", f.conversation.id, { content: "two", clientKey: "two" })
-    const reply = { agent: "architect", kind: "reply" as const, chatId: f.conversation.id, text: "answer one", correlationId: "one-reply" }
-    await f.coordinator.acceptAgentReply(reply)
-    await f.coordinator.acceptAgentReply(reply)
-    await f.coordinator.acceptAgentReply({ ...reply, text: "answer two", correlationId: "two-reply" })
-    expect(f.events.filter(event => event.kind === "turn_state" && event.state === "completed").map(event => event.detail?.messageId)).toEqual([first.message.id, second.message.id])
+    await f.coordinator.acceptAgentReply({ agent: "architect", kind: "reply", chatId: f.conversation.id, text: "answer two", messageId: second.message.id })
+    f.coordinator.acceptTurnOutcome({ agent: "architect", chatId: f.conversation.id, messageId: second.message.id, state: "completed" })
+    f.coordinator.acceptTurnOutcome({ agent: "architect", chatId: f.conversation.id, messageId: second.message.id, state: "completed" })
+    await f.coordinator.acceptAgentReply({ agent: "architect", kind: "reply", chatId: f.conversation.id, text: "answer one", messageId: first.message.id })
+    f.coordinator.acceptTurnOutcome({ agent: "architect", chatId: f.conversation.id, messageId: first.message.id, state: "completed" })
+    expect(f.events.filter(event => event.kind === "turn_state" && event.state === "completed").map(event => event.detail?.messageId)).toEqual([second.message.id, first.message.id])
+  })
+
+  test("card-only and reset outcomes terminally settle their exact accepted turns", async () => {
+    const f = fixture()
+    const card = await f.coordinator.submitWebTurn("owner", f.conversation.id, { content: "card", clientKey: "card" })
+    const reset = await f.coordinator.submitWebTurn("owner", f.conversation.id, { content: "reset", clientKey: "reset" })
+    f.coordinator.acceptTurnOutcome({ agent: "architect", chatId: f.conversation.id, messageId: card.message.id, state: "completed" })
+    f.coordinator.acceptTurnOutcome({ agent: "architect", chatId: f.conversation.id, messageId: reset.message.id, state: "failed" })
+    expect(f.events.filter(event => event.kind === "turn_state" && ["completed", "failed"].includes(event.state!)).map(event => [event.detail?.messageId, event.state])).toEqual([
+      [card.message.id, "completed"], [reset.message.id, "failed"],
+    ])
+  })
+
+  test("an uncorrelated legacy reply is ignored without throwing or settling a canonical turn", async () => {
+    const f = fixture()
+    const submitted = await f.coordinator.submitWebTurn("owner", f.conversation.id, { content: "question", clientKey: "legacy" })
+    expect(await f.coordinator.acceptAgentReply({ agent: "architect", kind: "reply", chatId: f.conversation.id, text: "legacy" })).toBeNull()
+    expect(f.events.filter(event => event.kind === "turn_state" && ["completed", "failed"].includes(event.state!))).toEqual([])
+    f.coordinator.acceptTurnOutcome({ agent: "architect", chatId: f.conversation.id, messageId: submitted.message.id, state: "failed" })
   })
 
   test("publishes one failed terminal when an accepted reply cannot be persisted", async () => {
@@ -178,7 +210,7 @@ describe("TurnCoordinator", () => {
     const submitted = await f.coordinator.submitWebTurn("owner", f.conversation.id, { content: "question", clientKey: "persist-failure" })
     const failure = new Error("append failed")
     ;(f.service as any).appendAgentMessage = () => { throw failure }
-    await expect(f.coordinator.acceptAgentReply({ agent: "architect", kind: "reply", chatId: f.conversation.id, text: "answer", correlationId: "failed-reply" })).rejects.toBe(failure)
+    await expect(f.coordinator.acceptAgentReply({ agent: "architect", kind: "reply", chatId: f.conversation.id, text: "answer", messageId: submitted.message.id })).rejects.toBe(failure)
     expect(f.events.filter(event => event.kind === "turn_state" && ["completed", "failed"].includes(event.state!)).map(event => [event.state, event.detail?.messageId])).toEqual([["failed", submitted.message.id]])
   })
 

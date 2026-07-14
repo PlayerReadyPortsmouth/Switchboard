@@ -1317,6 +1317,7 @@ if (pools.size) {
 // key is the agent name (== reply.agent). (Ephemeral spawn transports are not in the
 // Dispatcher and keep the onReply set in makeTransport, keyed by jobId.)
 dispatcher.onReply((reply) => onAgentReply(reply, reply.agent))
+dispatcher.onTurnOutcome((outcome) => { turnCoordinator?.acceptTurnOutcome(outcome) })
 
 /** Clear a persistent agent's context: drop its session file + respawn fresh.
  *  `reason` distinguishes a manual reset from a governor auto-compaction. */

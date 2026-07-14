@@ -18,21 +18,22 @@ export interface TurnGateOpts {
  *  exposes `busy`/`queueDepth` — the load signal the status board and the agent
  *  pool read. Pure logic; the real stdin write is injected via `send`. */
 export class TurnGate {
-  private busy = false
+  private active: InboundMessage | null = null
   private queue: InboundMessage[] = []
   constructor(private opts: TurnGateOpts) {}
 
-  isBusy(): boolean { return this.busy }
+  isBusy(): boolean { return this.active !== null }
   queueDepth(): number { return this.queue.length }
+  activeTurn(): InboundMessage | null { return this.active }
 
   /** Submit a message. Sends immediately when idle; otherwise queues it (until
    *  the depth cap, past which it is rejected as "overflow"). */
   submit(inbound: InboundMessage): SubmitResult {
-    if (!this.busy) { this.busy = true; this.opts.send(inbound); return "sent" }
+    if (!this.active) { this.active = inbound; this.opts.send(inbound); return "sent" }
     const cap = this.opts.maxQueueDepth ?? 8
     if (this.opts.coalesce) {
       const last = this.queue[this.queue.length - 1]
-      if (last && last.chatId === inbound.chatId && last.userId === inbound.userId) {
+      if (last && last.messageId === inbound.messageId && last.chatId === inbound.chatId && last.userId === inbound.userId) {
         this.queue[this.queue.length - 1] = { ...last, content: `${last.content}\n${inbound.content}` }
         return "queued"
       }
@@ -44,13 +45,20 @@ export class TurnGate {
 
   /** Signal that the in-flight turn finished (its `result` arrived). Drains the
    *  next queued message (starting its turn) or goes idle. No-op when idle. */
-  turnComplete(): void {
-    if (!this.busy) return
+  turnComplete(): InboundMessage | null {
+    if (!this.active) return null
+    const completed = this.active
     const next = this.queue.shift()
-    if (next) this.opts.send(next)   // stays busy: the next turn is now in flight
-    else this.busy = false
+    this.active = next ?? null
+    if (next) this.opts.send(next)
+    return completed
   }
 
   /** Drop in-flight + queued state (e.g. the agent process exited/restarted). */
-  reset(): void { this.busy = false; this.queue = [] }
+  reset(): InboundMessage[] {
+    const dropped = this.active ? [this.active, ...this.queue] : [...this.queue]
+    this.active = null
+    this.queue = []
+    return dropped
+  }
 }

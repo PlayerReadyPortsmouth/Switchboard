@@ -1,4 +1,4 @@
-import type { AgentReply, InboundMessage } from "../types"
+import type { AgentReply, AgentTurnOutcome, InboundMessage } from "../types"
 import type { NormalizedSurfaceEvent, SurfaceDeliveryResult } from "../surfaces"
 import type { ConversationEvent } from "./events"
 import type { AppendMessageResult, ConversationRepository } from "./repository"
@@ -30,7 +30,7 @@ export function inboundLinkRoute(link: TransportLink | null | undefined): "canon
 
 export class TurnCoordinator {
   private readonly backgroundDeliveries = new Set<Promise<void>>()
-  private readonly pendingTurns = new Map<string, Message[]>()
+  private readonly pendingTurns = new Map<string, { message: Message; agent: string }>()
   private closing = false
   constructor(
     private readonly service: Pick<ConversationService, "appendUserMessage" | "appendExternalMessage" | "appendAgentMessage">,
@@ -87,13 +87,13 @@ export class TurnCoordinator {
     if (reply.kind !== "reply") return null
     const text = reply.text?.trim()
     if (!text) return null
-    const callbackId = reply.correlationId ?? reply.messageId
-    if (!callbackId) throw new Error("Agent text replies require a correlationId or messageId")
+    const callbackId = reply.messageId ?? reply.correlationId
+    if (!callbackId) return null
     const conversation = this.repo.getConversation(reply.chatId)
     if (!conversation) return null
     const links = this.repo.listTransportLinks(conversation.id).filter((link) => link.enabled && link.syncMode !== "inbound_only" && link.syncMode !== "notifications_only")
-    const key = this.turnKey(conversation.id, reply.agent)
-    const originatingTurn = this.pendingTurns.get(key)?.[0]
+    const originatingTurn = reply.messageId ? this.pendingTurns.get(reply.messageId) : undefined
+    if (originatingTurn && (originatingTurn.agent !== reply.agent || originatingTurn.message.conversationId !== conversation.id)) return null
     let result: AgentTurnResult
     try {
       result = this.service.appendAgentMessage({
@@ -101,11 +101,10 @@ export class TurnCoordinator {
         replyTo: reply.replyTo, state: "completed", clientKey: `agent:${reply.agent}:${callbackId}`, createdAt: this.now(),
       }, links)
     } catch (error) {
-      if (originatingTurn) this.finishTurn(key, originatingTurn, "failed")
+      if (originatingTurn) this.finishTurn(originatingTurn.message.id, "failed")
       throw error
     }
     if (result.inserted) {
-      if (originatingTurn) this.finishTurn(key, originatingTurn, "completed")
       const replyIds = new Map<string, string>()
       if (result.message.replyTo) for (const link of links) {
         const externalId = this.repo.resolveDeliveredExternalMessageId(result.message.replyTo, link.id)
@@ -116,6 +115,14 @@ export class TurnCoordinator {
     return result
   }
 
+  /** Settle one accepted canonical turn by its exact transport envelope. */
+  acceptTurnOutcome(outcome: AgentTurnOutcome): boolean {
+    const pending = this.pendingTurns.get(outcome.messageId)
+    if (!pending || pending.agent !== outcome.agent || pending.message.conversationId !== outcome.chatId) return false
+    this.finishTurn(outcome.messageId, outcome.state)
+    return true
+  }
+
   private dispatch(conversationId: string, message: Message, userId: string, user: string): void {
     const conversation = this.repo.getConversation(conversationId)
     if (!conversation) return
@@ -123,7 +130,7 @@ export class TurnCoordinator {
     const inbound: InboundMessage = { chatId: conversationId, messageId: message.id, userId, user, content: message.content, ts: new Date(message.createdAt).toISOString(), isDM: false }
     try {
       if (this.dispatcher.dispatch(conversation.primaryAgent, conversationId, inbound)) {
-        this.pendingTurns.set(this.turnKey(conversationId, conversation.primaryAgent), [...(this.pendingTurns.get(this.turnKey(conversationId, conversation.primaryAgent)) ?? []), message])
+        this.pendingTurns.set(message.id, { message, agent: conversation.primaryAgent })
         this.turnState(message, "working")
       }
       else this.turnState(message, "failed")
@@ -167,14 +174,11 @@ export class TurnCoordinator {
     try { this.reportError(error) } catch {}
   }
 
-  private turnKey(conversationId: string, agent: string): string { return `${conversationId}\0${agent}` }
-
-  private finishTurn(key: string, message: Message, state: "completed" | "failed"): void {
-    const pending = this.pendingTurns.get(key)
-    if (!pending || pending[0]?.id !== message.id) return
-    pending.shift()
-    if (!pending.length) this.pendingTurns.delete(key)
-    this.turnState(message, state)
+  private finishTurn(messageId: string, state: "completed" | "failed"): void {
+    const pending = this.pendingTurns.get(messageId)
+    if (!pending) return
+    this.pendingTurns.delete(messageId)
+    this.turnState(pending.message, state)
   }
 
   private turnState(message: Message, state: "queued" | "working" | "completed" | "failed"): void {

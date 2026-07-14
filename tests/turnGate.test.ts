@@ -47,14 +47,15 @@ test("queue cap rejects overflow without dropping earlier work", () => {
   expect(sent).toEqual(["a"])
 })
 
-test("coalesce folds consecutive same-conversation same-user messages", () => {
+test("configured coalescing never merges distinct message IDs", () => {
   const { g, sent } = gate({ coalesce: true })
   g.submit(msg("a"))                     // in flight
   g.submit(msg("b1"))                    // queued
-  g.submit(msg("b2"))                    // folded into b1
-  expect(g.queueDepth()).toBe(1)
+  g.submit(msg("b2"))
+  expect(g.queueDepth()).toBe(2)
   g.turnComplete()
-  expect(sent).toEqual(["a", "b1\nb2"])
+  g.turnComplete()
+  expect(sent).toEqual(["a", "b1", "b2"])
 })
 
 test("coalesce does not merge across conversations or users", () => {
@@ -76,7 +77,7 @@ test("turnComplete is a no-op when idle", () => {
 test("reset clears in-flight and queued state", () => {
   const { g } = gate()
   g.submit(msg("a")); g.submit(msg("b"))
-  g.reset()
+  expect(g.reset().map(message => message.messageId)).toEqual(["a", "b"])
   expect(g.isBusy()).toBe(false)
   expect(g.queueDepth()).toBe(0)
 })
