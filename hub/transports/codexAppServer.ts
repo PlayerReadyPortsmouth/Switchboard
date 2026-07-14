@@ -34,8 +34,6 @@ interface PendingRequest {
 }
 
 const SNOWFLAKE = /^\d{17,20}$/
-const sandboxName = (value: AgentConfig["runtime"]["codexSandbox"]): "readOnly" | "workspaceWrite" | "dangerFullAccess" =>
-  value === "read-only" ? "readOnly" : value === "workspace-write" ? "workspaceWrite" : "dangerFullAccess"
 const record = (value: unknown): value is Record<string, any> => Boolean(value) && typeof value === "object" && !Array.isArray(value)
 
 /** One configured agent backed by a long-lived `codex app-server` process/thread. */
@@ -153,7 +151,7 @@ export class CodexAppServerTransport implements AgentTransport {
       ...(this.cfg.runtime.model ? { model: this.cfg.runtime.model } : {}),
       cwd: this.cfg.runtime.cwd,
       approvalPolicy: "never",
-      sandbox: sandboxName(this.cfg.runtime.codexSandbox),
+      sandbox: this.cfg.runtime.codexSandbox ?? "danger-full-access",
     }
   }
 

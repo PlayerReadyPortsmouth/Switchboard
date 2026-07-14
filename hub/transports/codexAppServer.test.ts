@@ -60,7 +60,7 @@ function harness(runtime: Partial<AgentConfig["runtime"]> = {}, seams: Record<st
   return { proc, socket, saved, cleared, errors, transport }
 }
 
-async function initialize(h: ReturnType<typeof harness>, threadId = "thr-1", sandbox = "dangerFullAccess") {
+async function initialize(h: ReturnType<typeof harness>, threadId = "thr-1", sandbox = "danger-full-access") {
   const starting = h.transport.start()
   await tick()
   const init = h.proc.last("initialize")
@@ -119,7 +119,7 @@ describe("Codex app-server lifecycle", () => {
 describe("Codex app-server turns", () => {
   test("serializes turns, prefers completed text, records usage, tools, and exact outcomes", async () => {
     const h = harness({ codexSandbox: "workspace-write", maxQueueDepth: 2 })
-    await initialize(h, "thr-1", "workspaceWrite")
+    await initialize(h, "thr-1", "workspace-write")
     const replies: AgentReply[] = [], outcomes: AgentTurnOutcome[] = [], uses: any[] = [], results: any[] = []
     h.transport.onReply(reply => { replies.push(reply) })
     h.transport.onTurnOutcome(outcome => { outcomes.push(outcome) })
