@@ -1,6 +1,6 @@
 # Switchboard
 
-One Discord bot, many Claude Code agents.
+One Discord bot, many Claude Code or Codex agents.
 
 Switchboard extends the official Claude Code Discord plugin (which is strictly **1 bot ↔ 1 session**) into a **hub** that fans a single Discord bot out to many Claude Code agents — each with its own working directory, model, tools, and MCP setup. A small Claude router (`claude -p --model claude-haiku-4-5`, reusing your Claude Code auth) decides which agent each message reaches, conversations stay stickily bound to an agent with confident auto-switching, and access is gated per Discord **role and user ID**.
 
@@ -47,6 +47,7 @@ docs/        superpowers/ spec + plan
 
 - [Bun](https://bun.sh): `curl -fsSL https://bun.sh/install | bash`
 - The `claude` CLI on your `PATH` (the hub reuses your existing Claude Code auth).
+- For opt-in Codex agents, authenticate the project-pinned Codex CLI once with `bunx codex login`. Switchboard pins `@openai/codex` 0.144.4 and reuses that local authentication.
 
 **Steps**
 
@@ -96,7 +97,30 @@ docs/        superpowers/ spec + plan
 
    ```bash
    bun run scripts/smoke-streamjson.ts   # expects: reply + card round-trip
+   bun run scripts/smoke-codex-app-server.ts  # authenticated two-turn Codex app-server check
    ```
+
+### Opt-in Codex agents
+
+Codex is selected per agent; existing entries and all hub-internal router, librarian, distiller, and overseer calls remain Claude-backed. Start with one canary agent:
+
+```json
+"codex-canary": {
+  "emoji": "🧭",
+  "description": "Codex coding canary",
+  "mode": "persistent",
+  "access": { "roles": ["dev"] },
+  "runtime": {
+    "provider": "codex",
+    "cwd": "~/work/project",
+    "model": "gpt-5.6",
+    "codexSandbox": "danger-full-access",
+    "resumable": true
+  }
+}
+```
+
+The Codex transport runs one long-lived `codex app-server` process and persistent thread per agent, and exposes the same Switchboard shim tools. Approval policy is fixed to `never`; the sandbox defaults to `danger-full-access` to match the existing full-trust Claude agent model, with `read-only` and `workspace-write` also available. After editing `config/agents.json`, run `!reload hard`. Roll back by changing `provider` to `claude` (and the model if needed), then run `!reload hard` again. Claude session IDs and Codex thread IDs are stored separately.
 
 ## Integration config
 

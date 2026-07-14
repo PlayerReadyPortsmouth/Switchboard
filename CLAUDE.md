@@ -14,6 +14,7 @@ bun test               # unit suite (~680 tests, <3s)
 bun run typecheck      # tsc --noEmit — keep clean
 bun run hub            # run the hub (needs config/agents.json + DISCORD_BOT_TOKEN, see README Setup)
 bun run scripts/smoke-streamjson.ts   # transport check against a REAL `claude` CLI
+bun run scripts/smoke-codex-app-server.ts # authenticated two-turn Codex app-server check
 bun run scripts/pair.ts <code>        # approve a DM pairing code
 ```
 
@@ -47,7 +48,7 @@ bun run scripts/pair.ts <code>        # approve a DM pairing code
 | Discord I/O | `gateway.ts`, `outbound.ts`, `format.ts`, `messageCache.ts` |
 | Access layers (in order) | `baseGate.ts` (DM pairing / group opt-in) → `access.ts` (per-agent roles/users) → feature flags → `deployGate.ts` (`deploy:*` buttons) → `gatedActions.ts` + `approvals.ts` (park-for-Approve/Deny) |
 | Routing | `router.ts` (Haiku pick), `bindings.ts` (sticky), `orchestrator.ts` |
-| Agent sessions | `transports/streamJson.ts` + `transports/spawnClaude.ts`, `turnGate.ts` (one turn in flight), `sessionGovernor.ts`, `agentPool.ts`, `threadAgents.ts`/`threadGit.ts`/`threadState.ts` (per-Discord-thread instances + worktrees) |
+| Agent sessions | `transports/streamJson.ts` (Claude), `transports/codexAppServer.ts` + `codexAppServerFraming.ts` (Codex), `transports/provider.ts`, `transports/spawnClaude.ts`, `turnGate.ts` (one turn in flight), `sessionGovernor.ts`, `agentPool.ts`, `threadAgents.ts`/`threadGit.ts`/`threadState.ts` (per-Discord-thread instances + worktrees) |
 | Shim relay | `transports/shimSocket.ts` ↔ `shim/server.ts` (the agent-facing MCP toolset) |
 | Cards / UI | `cardRegistry.ts`, `cardLifecycle.ts`, `modal.ts`, `notifyRouter.ts` |
 | Memory vault | `memory/` (store, retriever, embedder, librarian, distiller, dedup, gardener, qdrant/http backends), `memoryBrowse.ts` |
@@ -105,6 +106,8 @@ Shared engineering practice lives in `~/Documents/Ready/ready-docs/engineering/`
   failure — see Commands). For transport/shim changes also run
   `bun run scripts/smoke-streamjson.ts` against a real `claude` (hardcodes a `/tmp` Unix
   socket — run it on the Linux box, not Windows).
+- For Codex transport changes also run `bun run scripts/smoke-codex-app-server.ts`; it uses
+  the pinned local CLI/auth and verifies two turns retain one app-server thread.
 - Live-hub behaviour (Discord cards, buttons, modals) can only be confirmed on a running hub —
   say so explicitly if you couldn't drive it.
 - **This repo's flag system is config gates:** new subsystems ship `enabled: false` / key
