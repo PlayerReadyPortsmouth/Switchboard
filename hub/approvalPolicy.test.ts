@@ -71,6 +71,30 @@ test("payload, route, and combined fingerprints are keyed and effect-specific", 
   expect(a.effectFingerprint).not.toBe(otherProcess.effectFingerprint)
 })
 
+test("fingerprint domains prevent a payload oracle from reproducing route or exact-effect fingerprints", () => {
+  const policy = createOutboundApprovalPolicy(Buffer.alloc(32, 22))
+  const canonicalRoute = {
+    id: "deploy",
+    url: route.url,
+    pattern: null,
+    method: "POST",
+    secretEnv: "OUTBOUND_SECRET",
+    template: "raw-template",
+    consume: false,
+    requireApproval: false,
+    headers: [["authorization", "Bearer raw-secret"]],
+  }
+  const victim = policy.prepare(outboundDescriptor({ route, body: "victim" }))
+  const routeOracle = policy.prepare(outboundDescriptor({ route, body: JSON.stringify(canonicalRoute) }))
+  const effectOracle = policy.prepare(outboundDescriptor({
+    route,
+    body: JSON.stringify({ ...canonicalRoute, body: "victim" }),
+  }))
+
+  expect(routeOracle.detail.payloadFingerprint).not.toBe(victim.detail.routeVersionFingerprint)
+  expect(effectOracle.detail.payloadFingerprint).not.toBe(victim.effectFingerprint)
+})
+
 test("route fingerprints canonicalize header order and case", () => {
   const policy = createOutboundApprovalPolicy(Buffer.alloc(32, 10))
   const first = policy.prepare(outboundDescriptor({
@@ -126,6 +150,26 @@ test("outbound descriptors reject non-token methods before they can enter public
   const policy = createOutboundApprovalPolicy(Buffer.alloc(32, 18))
   expect(() => policy.prepare(outboundDescriptor({
     route: { ...route, method: "post secret" },
+    body: "same",
+  }))).toThrow("invalid_approval_request")
+})
+
+test("raw HTTP methods must be ASCII tokens before uppercase normalization", () => {
+  const policy = createOutboundApprovalPolicy(Buffer.alloc(32, 23))
+  expect(() => policy.prepare(outboundDescriptor({
+    route: { ...route, method: "poſt" },
+    body: "same",
+  }))).toThrow("invalid_approval_request")
+})
+
+test("raw static header names must be ASCII tokens before case folding", () => {
+  const policy = createOutboundApprovalPolicy(Buffer.alloc(32, 24))
+  expect(() => policy.prepare(outboundDescriptor({
+    route: { ...route, headers: { "K": "unicode-case-maps-to-k" } },
+    body: "same",
+  }))).toThrow("invalid_approval_request")
+  expect(() => policy.prepare(outboundDescriptor({
+    route: { ...route, headers: { "Bad Header": "space-is-not-tchar" } },
     body: "same",
   }))).toThrow("invalid_approval_request")
 })
@@ -190,6 +234,18 @@ test("the persisted-detail projector rejects non-canonical methods and hostnames
     ...prepared.detail,
     destinationHostname: "user:pass@hooks.example.com/private?token=raw#fragment",
   })).toThrow("corrupt_record")
+})
+
+test("prepare emits only canonical bounded hostnames that round-trip through projection", () => {
+  const policy = createOutboundApprovalPolicy(Buffer.alloc(32, 25))
+  const prepared = policy.prepare(outboundDescriptor({ route, body: "exact" }))
+  expect(policy.projectDetail(prepared.detail)).toEqual(prepared.detail)
+
+  const oversizedHostname = "a".repeat(513)
+  expect(() => policy.prepare(outboundDescriptor({
+    route: { ...route, url: `https://${oversizedHostname}/private` },
+    body: "exact",
+  }))).toThrow("invalid_approval_request")
 })
 
 test("approval policy registry rejects duplicates and unknown kinds", () => {

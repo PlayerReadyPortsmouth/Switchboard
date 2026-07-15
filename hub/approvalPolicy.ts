@@ -82,7 +82,12 @@ const EXECUTION_FAILURE_CODES = new Set([
 
 const encoder = new TextEncoder()
 const ABSENT = Symbol("absent")
-const HTTP_METHOD = /^[!#$%&'*+.^_`|~0-9A-Z-]+$/
+const HTTP_TOKEN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/
+const FINGERPRINT_DOMAIN = {
+  payload: "switchboard:approval:outbound:payload:v1",
+  routeVersion: "switchboard:approval:outbound:route-version:v1",
+  exactEffect: "switchboard:approval:outbound:exact-effect:v1",
+} as const
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false
@@ -168,7 +173,7 @@ function canonicalHeaders(value: unknown): Array<[string, string]> {
   const folded = new Set<string>()
   const headers: Array<[string, string]> = []
   for (const key of ownKeys(value, "invalid_approval_request")) {
-    if (typeof key !== "string" || key.length === 0) {
+    if (typeof key !== "string" || !HTTP_TOKEN.test(key)) {
       throw new Error("invalid_approval_request")
     }
     const headerValue = ownDataValue(value, key, "invalid_approval_request")
@@ -198,14 +203,15 @@ function canonicalRoute(value: unknown): { route: CanonicalOutboundRoute; hostna
   } catch {
     throw new Error("invalid_approval_request")
   }
-  if (parsed.hostname.length === 0) throw new Error("invalid_approval_request")
+  const hostname = requireCanonicalHostname(parsed.hostname, "invalid_approval_request")
 
   const methodValue = ownDataValue(value, "method", "invalid_approval_request")
   if (methodValue !== ABSENT && methodValue !== undefined && typeof methodValue !== "string") {
     throw new Error("invalid_approval_request")
   }
-  const method = (typeof methodValue === "string" ? methodValue : "POST").toUpperCase()
-  if (!HTTP_METHOD.test(method)) throw new Error("invalid_approval_request")
+  const rawMethod = typeof methodValue === "string" ? methodValue : "POST"
+  if (!HTTP_TOKEN.test(rawMethod)) throw new Error("invalid_approval_request")
+  const method = rawMethod.toUpperCase()
 
   const headersValue = ownDataValue(value, "headers", "invalid_approval_request")
 
@@ -221,12 +227,16 @@ function canonicalRoute(value: unknown): { route: CanonicalOutboundRoute; hostna
       requireApproval: optionalOwnBoolean(value, "requireApproval"),
       headers: canonicalHeaders(headersValue === ABSENT ? undefined : headersValue),
     },
-    hostname: parsed.hostname,
+    hostname,
   }
 }
 
-function fingerprint(key: Uint8Array, value: string | Uint8Array): string {
-  return createHmac("sha256", key).update(value).digest("hex")
+function fingerprint(key: Uint8Array, domain: string, value: string | Uint8Array): string {
+  return createHmac("sha256", key)
+    .update(domain)
+    .update(Uint8Array.of(0))
+    .update(value)
+    .digest("hex")
 }
 
 function isFingerprint(value: unknown): value is string {
@@ -249,19 +259,24 @@ function isCanonicalHostname(value: string): boolean {
   }
 }
 
+function requireCanonicalHostname(value: unknown, error: string): string {
+  const hostname = requireBoundedString(value, 512, error)
+  if (!isCanonicalHostname(hostname)) throw new Error(error)
+  return hostname
+}
+
 function projectOutboundDetail(value: SafeValue): OutboundApprovalDetail {
   if (!isPlainRecord(value)) throw new Error("corrupt_record")
   const routeId = requireBoundedString(ownDataValue(value, "routeId", "corrupt_record"), 256, "corrupt_record")
   const method = requireBoundedString(ownDataValue(value, "method", "corrupt_record"), 512, "corrupt_record")
-  const destinationHostname = requireBoundedString(
+  const destinationHostname = requireCanonicalHostname(
     ownDataValue(value, "destinationHostname", "corrupt_record"),
-    512,
     "corrupt_record",
   )
   const payloadBytes = ownDataValue(value, "payloadBytes", "corrupt_record")
   const payloadFingerprint = ownDataValue(value, "payloadFingerprint", "corrupt_record")
   const routeVersionFingerprint = ownDataValue(value, "routeVersionFingerprint", "corrupt_record")
-  if (!HTTP_METHOD.test(method) || method !== method.toUpperCase() || !isCanonicalHostname(destinationHostname)) {
+  if (!HTTP_TOKEN.test(method) || method !== method.toUpperCase()) {
     throw new Error("corrupt_record")
   }
   if (!Number.isSafeInteger(payloadBytes) || (payloadBytes as number) < 0) {
@@ -335,15 +350,15 @@ export function createOutboundApprovalPolicy(processKey: Uint8Array): ApprovalKi
         method: route.method,
         destinationHostname: hostname,
         payloadBytes: encoder.encode(body).byteLength,
-        payloadFingerprint: fingerprint(key, encoder.encode(body)),
-        routeVersionFingerprint: fingerprint(key, routeInput),
+        payloadFingerprint: fingerprint(key, FINGERPRINT_DOMAIN.payload, encoder.encode(body)),
+        routeVersionFingerprint: fingerprint(key, FINGERPRINT_DOMAIN.routeVersion, routeInput),
       }
       return {
         target,
         summary,
         detail,
         risk: "elevated",
-        effectFingerprint: fingerprint(key, effectInput),
+        effectFingerprint: fingerprint(key, FINGERPRINT_DOMAIN.exactEffect, effectInput),
       }
     },
 
