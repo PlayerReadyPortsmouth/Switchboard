@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite"
+import { approvalMigrationFour } from "../approvalMigrations"
 
-const migrationOne = `
+export const migrationOne = `
   CREATE TABLE conversations (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
@@ -67,7 +68,7 @@ const migrationOne = `
   );
 `
 
-const migrationTwo = `
+export const migrationTwo = `
   CREATE TABLE external_message_links (
     message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
     link_id TEXT NOT NULL REFERENCES transport_links(id) ON DELETE CASCADE,
@@ -77,7 +78,7 @@ const migrationTwo = `
     UNIQUE (link_id, external_message_id)
   );
 `
-const migrationThree = `
+export const migrationThree = `
   ALTER TABLE deliveries ADD COLUMN lease_owner TEXT;
   ALTER TABLE deliveries ADD COLUMN lease_expires_at INTEGER;
   CREATE INDEX deliveries_due_lease_idx ON deliveries(state, next_attempt_at, lease_expires_at);
@@ -113,6 +114,11 @@ export function runConversationMigrations(db: Database): void {
       db.exec(migrationThree)
       db.query("INSERT INTO conversation_schema_migrations(version, applied_at) VALUES (?, ?)").run(3, Date.now())
     }
-    db.exec("PRAGMA user_version = 3")
-  })()
+    const v4 = db.query<{ version: number }, [number]>("SELECT version FROM conversation_schema_migrations WHERE version = ?").get(4)
+    if (!v4) {
+      db.exec(approvalMigrationFour)
+      db.query("INSERT INTO conversation_schema_migrations(version, applied_at) VALUES (?, ?)").run(4, Date.now())
+    }
+    db.exec("PRAGMA user_version = 4")
+  }).immediate()
 }
