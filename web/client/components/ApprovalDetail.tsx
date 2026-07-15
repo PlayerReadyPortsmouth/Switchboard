@@ -1,6 +1,6 @@
 import type { KeyboardEvent, Ref } from "react"
 import { pathForConversation } from "../routes"
-import type { ApprovalDetail as ApprovalDetailValue, ConnectionState, SafeValue } from "../types"
+import type { ApprovalDecision, ApprovalDetail as ApprovalDetailValue, ConnectionState, SafeValue } from "../types"
 
 export type ApprovalDetailError = "forbidden" | "not_found" | "unavailable" | null
 
@@ -11,14 +11,31 @@ function Timestamp({ value }: { value: number }) {
   return <time dateTime={new Date(value).toISOString()}>{absoluteTime(value)}</time>
 }
 
-function SafeValueView({ value }: { value: SafeValue }) {
+export function SafeValueView({ value }: { value: SafeValue }) {
   if (value === null) return <span className="approval-safe-null">null</span>
   if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return <span className="approval-safe-scalar">{String(value)}</span>
   if (Array.isArray(value)) return <ol className="approval-safe-list">{value.map((item, index) => <li key={index}><SafeValueView value={item} /></li>)}</ol>
   return <dl className="approval-safe-object">{Object.entries(value).map(([key, item]) => <div key={key}><dt>{key}</dt><dd><SafeValueView value={item} /></dd></div>)}</dl>
 }
 
-export function ApprovalDetail({ approval, loading, error, hidden, producing, connection, closeRef, onBack, onConversation }: {
+export function approvalOutcomeMessage(approval: ApprovalDetailValue): string | null {
+  if (approval.state === "granted" && approval.execution === "failed") return "Approval succeeded, but delivery failed. The approval must not be submitted again."
+  if (approval.state === "granted" && approval.execution === "interrupted") return "Approval succeeded; execution outcome unknown. Do not retry this approval."
+  if (approval.state === "granted" && approval.execution === "succeeded") return "Approval succeeded and the requested effect completed."
+  if (approval.state === "granted") return "Approval succeeded. Execution is still pending."
+  if (approval.state === "denied") return "Approval denied. The held effect was discarded without running."
+  if (approval.state === "expired") return "Approval expired. The held effect was discarded without running."
+  if (approval.state === "interrupted") return "Approval interrupted. The held effect was discarded without running."
+  return null
+}
+
+export interface ApprovalDecisionControls {
+  disabled: boolean
+  guidance: string
+  onDecision(decision: ApprovalDecision): void
+}
+
+export function ApprovalDetail({ approval, loading, error, hidden, producing, connection, closeRef, focusRef, decisionControls, onBack, onConversation }: {
   approval: ApprovalDetailValue | null
   loading: boolean
   error: ApprovalDetailError
@@ -26,6 +43,8 @@ export function ApprovalDetail({ approval, loading, error, hidden, producing, co
   producing: boolean
   connection: ConnectionState
   closeRef?: Ref<HTMLButtonElement>
+  focusRef?: Ref<HTMLElement>
+  decisionControls?: ApprovalDecisionControls
   onBack(): void
   onConversation(conversationId: string): void
 }) {
@@ -36,7 +55,7 @@ export function ApprovalDetail({ approval, loading, error, hidden, producing, co
     onBack()
   }
 
-  return <section className="approval-detail" aria-label="Approval detail" aria-hidden={hidden} inert={hidden ? true : undefined} data-open={open} onKeyDown={handleKeyDown}>
+  return <section ref={focusRef} className="approval-detail" aria-label="Approval detail" aria-hidden={hidden} inert={hidden ? true : undefined} data-open={open} tabIndex={-1} onKeyDown={handleKeyDown}>
     {open ? <button ref={closeRef} className="approval-back" type="button" onClick={onBack}>Back to approvals</button> : null}
     {!producing ? <div className="approval-core-notice" role="status"><strong>Core approval production is off</strong><span>Existing approval history remains available, but new approval production and decisions are disabled.</span></div> : null}
     {loading ? <div className="approval-detail-state" role="status">Loading approval…</div> : error ? <div className="approval-detail-state" role="alert"><h2>{error === "forbidden" ? "Approval access denied" : error === "not_found" ? "Approval not found" : connection === "offline" ? "Approval unavailable offline" : "Approval unavailable"}</h2><p>{error === "forbidden" ? "Your identity cannot view this approval." : error === "not_found" ? "This approval no longer exists or is outside the visible history window." : "Reconnect to Switchboard, then try again."}</p></div> : approval ? <>
@@ -45,6 +64,13 @@ export function ApprovalDetail({ approval, loading, error, hidden, producing, co
         <div className="approval-risk-mark" data-risk={approval.risk}><span className="approval-live-trace" aria-hidden="true"><i /></span><strong>{titleCase(approval.risk)} risk</strong><small>{titleCase(approval.state)}</small></div>
       </header>
       <div className="approval-detail-scroll">
+        {decisionControls ? <section className="approval-decision-controls" aria-label="Approval decisions">
+          <div><p className="eyebrow">Protected decision</p><strong>Act on the exact held effect shown below.</strong>{decisionControls.guidance ? <p role="status">{decisionControls.guidance}</p> : null}</div>
+          <div><button type="button" disabled={decisionControls.disabled} onClick={() => decisionControls.onDecision("deny")}>Deny</button><button type="button" disabled={decisionControls.disabled} onClick={() => decisionControls.onDecision("grant")}>Grant</button></div>
+        </section> : null}
+
+        {approvalOutcomeMessage(approval) ? <section className="approval-outcome" aria-label="Canonical approval outcome"><p>{approvalOutcomeMessage(approval)}</p></section> : null}
+
         <section className="approval-detail-section" aria-labelledby="approval-request-heading"><header><p className="eyebrow">Request</p><h3 id="approval-request-heading">Requested operation</h3></header><dl className="approval-facts">
           <div><dt>Kind</dt><dd>{approval.kind}</dd></div>
           <div><dt>Requested by</dt><dd className="approval-principal">{approval.requestedBy.surface}:{approval.requestedBy.id}</dd></div>

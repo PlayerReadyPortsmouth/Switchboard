@@ -82,8 +82,13 @@ function deferred<T>() {
 function fakeApi(options: {
   list?: (query: ApprovalListQuery) => Promise<ApprovalListPage>
   get?: (id: string) => Promise<ApprovalDetail>
+  decide?: ApprovalsApi["decideApproval"]
 } = {}) {
-  const calls = { list: [] as ApprovalListQuery[], get: [] as string[] }
+  const calls = {
+    list: [] as ApprovalListQuery[],
+    get: [] as string[],
+    decide: [] as Parameters<ApprovalsApi["decideApproval"]>[],
+  }
   const api: ApprovalsApi = {
     listApprovals: async query => {
       calls.list.push({ ...query })
@@ -93,7 +98,10 @@ function fakeApi(options: {
       calls.get.push(id)
       return options.get ? options.get(id) : detail({ id })
     },
-    decideApproval: async (): Promise<ApprovalDecisionResult> => ({ approval: detail() }),
+    decideApproval: async (...input): Promise<ApprovalDecisionResult> => {
+      calls.decide.push(input)
+      return options.decide ? options.decide(...input) : { approval: detail() }
+    },
   }
   return { api, calls }
 }
@@ -355,6 +363,24 @@ describe("ApprovalsWorkspace", () => {
     await waitFor(() => expect(calls.list.length).toBeGreaterThan(listCalls))
     await waitFor(() => expect(calls.get).toEqual(["approval-1", "approval-1"]))
     expect((screen.getByRole("searchbox", { name: "Search approvals" }) as HTMLInputElement).value).toBe("deploy")
+  })
+
+  test("does not allow a stale selected detail to decide while a revision reload is pending", async () => {
+    const reloading = deferred<ApprovalDetail>()
+    let detailCalls = 0
+    const { api, calls } = fakeApi({
+      get: async () => ++detailCalls === 1 ? detail() : reloading.promise,
+    })
+    const view = renderWorkspace({ api, session: workspaceSession({ role: "operator" }), routeApprovalId: "approval-1", revision: 0 })
+    expect(await screen.findByRole("button", { name: "Grant" })).toBeTruthy()
+
+    view.rerender(<ApprovalsWorkspace api={api} session={workspaceSession({ role: "operator" })} routeApprovalId="approval-1" connection="live" revision={1} pendingCount={2} onNavigate={() => {}} onNewConversation={() => {}} />)
+
+    expect(screen.queryByRole("button", { name: "Grant" })).toBeNull()
+    expect(screen.queryByRole("button", { name: "Deny" })).toBeNull()
+    expect(calls.decide).toHaveLength(0)
+    act(() => reloading.resolve(detail({ version: "v2" })))
+    expect(await screen.findByRole("button", { name: "Grant" })).toBeTruthy()
   })
 
   test("long approval evidence wraps locally without horizontal viewport overflow", async () => {
