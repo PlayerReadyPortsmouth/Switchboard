@@ -4,7 +4,8 @@ import { ConversationStream } from "./conversationStream"
 import { AgentStream } from "./agentStream"
 import { DraftStore } from "./drafts"
 import { AgentsWorkspace } from "./components/AgentsWorkspace"
-import { AppRail } from "./components/AppRail"
+import { ApprovalsWorkspace } from "./components/ApprovalsWorkspace"
+import { AppRail, workspaceDestinationFeatures } from "./components/AppRail"
 import { ConversationList } from "./components/ConversationList"
 import { Inspector } from "./components/Inspector"
 import { Transcript, canonicalMessages } from "./components/Transcript"
@@ -15,7 +16,7 @@ import { useModalDialog } from "./components/useModalDialog"
 import { initialWorkspaceState, workspaceReducer } from "./state"
 import type { ConnectionState, Conversation, ConversationEvent, ConversationInput, ConversationUpdate, Message, PostMessageInput, Session, TransportLink } from "./types"
 import type { PwaController, PwaState } from "./pwa"
-import { parseWorkspaceRoute, pathForAgent, pathForConversation, type WorkspaceRoute } from "./routes"
+import { parseWorkspaceRoute, pathForAgent, pathForApproval, pathForConversation, type WorkspaceDestination, type WorkspaceRoute } from "./routes"
 
 export interface AppApi {
   session(): Promise<Session>
@@ -32,6 +33,9 @@ export interface AppApi {
   confirmAgentConfig?: WorkspaceApi["confirmAgentConfig"]
   previewAgentAction?: WorkspaceApi["previewAgentAction"]
   confirmAgentAction?: WorkspaceApi["confirmAgentAction"]
+  listApprovals?: WorkspaceApi["listApprovals"]
+  getApproval?: WorkspaceApi["getApproval"]
+  decideApproval?: WorkspaceApi["decideApproval"]
 }
 
 export interface ConversationViewApi {
@@ -53,7 +57,7 @@ interface ConversationWorkspaceProps extends AppProps {
   session?: Session | null
   controllerState?: PwaState
   onSessionLoaded?(session: Session): void
-  onNavigateDestination?(destination: "conversations" | "agents"): void
+  onNavigateDestination?(destination: WorkspaceDestination): void
 }
 
 type LoadState = "loading" | "ready" | "forbidden" | "unavailable"
@@ -473,11 +477,12 @@ export function ConversationWorkspace({ api: suppliedApi, drafts: suppliedDrafts
       <PwaIssueBanner issue={pwaState.issue} />
       <AppRail
         active="conversations"
-        features={state.session.features}
+        features={workspaceDestinationFeatures(state.session)}
+        pendingApprovals={state.session.approvalState.pendingCount}
         connection={displayedConnection}
         install={pwa ? { available: pwaState.installAvailable, run: () => pwa.install() } : install ? { available: true, run: async () => install.run() } : undefined}
         onNew={() => openDialog("new")}
-        onNavigate={destination => destination === "conversations" ? navigate(null) : onNavigateDestination?.("agents")}
+        onNavigate={destination => destination === "conversations" ? navigate(null) : onNavigateDestination?.(destination)}
       />
       <ConversationList
         conversations={state.conversations}
@@ -534,6 +539,11 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, st
     previewAgentAction: (name: string, action: Parameters<WorkspaceApi["previewAgentAction"]>[1]) => api.previewAgentAction ? api.previewAgentAction(name, action) : Promise.reject(new ApiError(503, "operation_unavailable")),
     confirmAgentAction: (name: string, previewId: string, idempotencyKey: string) => api.confirmAgentAction ? api.confirmAgentAction(name, previewId, idempotencyKey) : Promise.reject(new ApiError(503, "operation_unavailable")),
   } : null, [api])
+  const approvalsApi = useMemo(() => api.listApprovals && api.getApproval && api.decideApproval ? {
+    listApprovals: (query: Parameters<WorkspaceApi["listApprovals"]>[0]) => api.listApprovals!(query),
+    getApproval: (approvalId: string) => api.getApproval!(approvalId),
+    decideApproval: (approvalId: string, decision: Parameters<WorkspaceApi["decideApproval"]>[1], expectedVersion: string, idempotencyKey: string) => api.decideApproval!(approvalId, decision, expectedVersion, idempotencyKey),
+  } : null, [api])
   const [route, setRoute] = useState<WorkspaceRoute>(() => parseWorkspaceRoute(location.pathname))
   const [session, setSession] = useState<Session | null>(null)
   const [sessionState, setSessionState] = useState<LoadState>("loading")
@@ -565,15 +575,16 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, st
   }, [api])
 
   useEffect(() => {
-    if (route.destination !== "agents" || session) return
+    if ((route.destination !== "agents" && route.destination !== "approvals") || session) return
     void loadSession()
     return () => { sessionGeneration.current++ }
   }, [loadSession, route.destination, session])
 
-  const navigate = useCallback((destination: "conversations" | "agents", agent: string | null = null) => {
-    const path = destination === "agents" ? pathForAgent(agent) : pathForConversation(null)
+  const navigate = useCallback((destination: WorkspaceDestination, resource: string | null = null) => {
+    const approvalSearch = destination === "approvals" && location.pathname.startsWith("/approvals") ? location.search : ""
+    const path = destination === "agents" ? pathForAgent(resource) : destination === "approvals" ? `${pathForApproval(resource)}${approvalSearch}` : pathForConversation(resource)
     history.pushState(null, "", path)
-    setRoute(parseWorkspaceRoute(path))
+    setRoute(parseWorkspaceRoute(new URL(path, location.origin).pathname))
   }, [])
 
   if (route.destination === "not_found") return <NotFound />
@@ -589,8 +600,31 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, st
         session={session}
         routeAgent={route.agent}
         connection={pwa && !pwaState.online ? "offline" : navigator.onLine ? "live" : "offline"}
+        pendingApprovals={session.approvalState.pendingCount}
         install={pwa ? { available: pwaState.installAvailable, run: () => pwa.install() } : install ? { available: true, run: async () => install.run() } : undefined}
         streamFactory={agentStreamFactory}
+        onNavigate={navigate}
+        onNewConversation={() => navigate("conversations")}
+      />
+    </>
+  }
+
+  if (route.destination === "approvals") {
+    if (sessionState === "forbidden") return <main className="status-page"><section role="alert"><h1>Workspace access denied</h1><p>Ask a Switchboard administrator to grant your identity access.</p></section></main>
+    if (sessionState === "unavailable") return <main className="status-page"><section role="alert"><h1>Switchboard is unavailable</h1><p>Check the service connection, then try again.</p><button type="button" onClick={() => void loadSession()}>Try again</button></section></main>
+    if (sessionState === "loading" || !session) return <main className="status-page"><div role="status"><span className="status-node" />Loading your workspace…</div></main>
+    if (!session.features.approvals || session.permissions.approvals === "hidden" || !approvalsApi) return <NotFound />
+    const connection: ConnectionState = pwa && !pwaState.online ? "offline" : navigator.onLine ? "live" : "offline"
+    return <>
+      <PwaIssueBanner issue={pwaState.issue} />
+      <ApprovalsWorkspace
+        api={approvalsApi}
+        session={session}
+        routeApprovalId={route.approvalId}
+        connection={connection}
+        revision={0}
+        pendingCount={session.approvalState.pendingCount}
+        install={pwa ? { available: pwaState.installAvailable, run: () => pwa.install() } : install ? { available: true, run: async () => install.run() } : undefined}
         onNavigate={navigate}
         onNewConversation={() => navigate("conversations")}
       />

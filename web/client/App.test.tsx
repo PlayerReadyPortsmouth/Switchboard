@@ -7,7 +7,7 @@ import { ApiError } from "./api"
 import { App, createWorkspaceStream, type AppApi } from "./App"
 import type { ConversationStreamHandlers } from "./conversationStream"
 import { DraftStore } from "./drafts"
-import type { AgentDetail, AgentSummary, Conversation, ConversationInput, Message, Session } from "./types"
+import type { AgentDetail, AgentSummary, ApprovalDetail, ApprovalSummary, Conversation, ConversationInput, Message, Session } from "./types"
 
 const screen = within(document.body)
 
@@ -32,6 +32,26 @@ const conversation = (overrides: Partial<Conversation> = {}): Conversation => ({
   archivedAt: null,
   ...overrides,
 })
+
+const approvalSummary = (): ApprovalSummary => ({
+  id: "approval-1", version: "v1", kind: "outbound_http", target: "https://example.test/deploy",
+  summary: "Deploy release", risk: "elevated", requestedBy: { surface: "agent", id: "architect" },
+  createdAt: 1_700_000_000_000, expiresAt: 1_700_000_300_000, terminalAt: null,
+  state: "pending", execution: "not_applicable", conversationId: "design/review",
+})
+
+const approvalDetail = (): ApprovalDetail => ({
+  ...approvalSummary(), detail: { method: "POST" }, executionDetail: null, decisionBy: null,
+  decisionAt: null, outcomeReason: null, audit: [], permissions: { canDecide: false },
+})
+
+function approvalApi(approvalSession: Session) {
+  return Object.assign(fakeApi({ session: approvalSession }), {
+    listApprovals: async () => ({ items: [approvalSummary()], nextCursor: null, pendingCount: approvalSession.approvalState.pendingCount, querySummary: null }),
+    getApproval: async () => approvalDetail(),
+    decideApproval: async () => ({ approval: approvalDetail() }),
+  })
+}
 
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -108,6 +128,40 @@ describe("responsive workspace shell", () => {
     history.replaceState(null, "", "/agents")
     render(<App api={fakeApi({ session: disabled })} />)
     expect(await screen.findByRole("heading", { name: "Not found" })).toBeTruthy()
+  })
+
+  test("shows an accessible Approvals badge and renders the authorized viewer destination", async () => {
+    const visible: Session = {
+      ...session,
+      features: { ...session.features, approvals: true },
+      permissions: { ...session.permissions, approvals: "viewer" },
+      approvalState: { producing: true, canDecide: false, pendingCount: 3 },
+    }
+    render(<App api={approvalApi(visible)} streamFactory={null} agentStreamFactory={null} />)
+    const approvals = await screen.findByRole("link", { name: "Approvals, 3 pending" })
+    expect(approvals.querySelector(".rail-count")?.textContent).toBe("3")
+    await userEvent.click(approvals)
+    expect(location.pathname).toBe("/approvals")
+    expect(await screen.findByRole("heading", { name: "Approvals" })).toBeTruthy()
+  })
+
+  test("omits hidden Approvals navigation and rejects direct list and detail routes", async () => {
+    const hidden: Session = {
+      ...session,
+      features: { ...session.features, approvals: true },
+      permissions: { ...session.permissions, approvals: "hidden" },
+    }
+    const view = render(<App api={approvalApi(hidden)} streamFactory={null} agentStreamFactory={null} />)
+    await screen.findByRole("heading", { name: "Switchboard" })
+    expect(screen.queryByRole("link", { name: /Approvals/ })).toBeNull()
+    view.unmount()
+
+    for (const path of ["/approvals", "/approvals/approval-1"]) {
+      history.replaceState(null, "", path)
+      const direct = render(<App api={approvalApi(hidden)} streamFactory={null} agentStreamFactory={null} />)
+      expect(await screen.findByRole("heading", { name: "Not found" })).toBeTruthy()
+      direct.unmount()
+    }
   })
 
   test("uses live PWA install availability and issue feedback on the Agents route", async () => {

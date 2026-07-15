@@ -63,7 +63,7 @@ afterEach(() => {
 
 describe("AgentsWorkspace", () => {
   test("searches status-labeled agents and opens read-only detail", async () => {
-    render(<AgentsWorkspace api={fakeApi()} session={session} routeAgent={null} connection="live" streamFactory={null} onNavigate={() => {}} onNewConversation={() => {}} />)
+    render(<AgentsWorkspace api={fakeApi()} session={session} routeAgent={null} connection="live" pendingApprovals={0} streamFactory={null} onNavigate={() => {}} onNewConversation={() => {}} />)
     expect(await screen.findByRole("list", { name: "Agents" })).toBeTruthy()
     expect(screen.getByText("Busy")).toBeTruthy()
     await userEvent.type(screen.getByRole("searchbox", { name: "Search agents" }), "qa")
@@ -77,14 +77,14 @@ describe("AgentsWorkspace", () => {
 
   test("shows real mutation flows to permitted operators but omits them for viewers", async () => {
     const mutable = detail({ permissions: { configure: true, reset: true, restart: true, remove: false } })
-    const view = render(<AgentsWorkspace api={fakeApi({ detail: mutable })} session={session} routeAgent="qa" connection="live" streamFactory={null} onNavigate={() => {}} onNewConversation={() => {}} />)
+    const view = render(<AgentsWorkspace api={fakeApi({ detail: mutable })} session={session} routeAgent="qa" connection="live" pendingApprovals={0} streamFactory={null} onNavigate={() => {}} onNewConversation={() => {}} />)
     await screen.findByRole("heading", { name: "qa" })
     expect(screen.queryByRole("button", { name: "Configure agent" })).toBeNull()
     expect(screen.queryByRole("button", { name: "Reset agent" })).toBeNull()
     expect(screen.queryByRole("button", { name: "Restart agent" })).toBeNull()
 
     const operator = { ...session, permissions: { ...session.permissions, agents: "operator" as const } }
-    view.rerender(<AgentsWorkspace api={fakeApi({ detail: mutable })} session={operator} routeAgent="qa" connection="live" streamFactory={null} onNavigate={() => {}} onNewConversation={() => {}} />)
+    view.rerender(<AgentsWorkspace api={fakeApi({ detail: mutable })} session={operator} routeAgent="qa" connection="live" pendingApprovals={0} streamFactory={null} onNavigate={() => {}} onNewConversation={() => {}} />)
     expect(await screen.findByRole("tab", { name: "Overview" })).toBeTruthy()
     const overviewTab = screen.getByRole("tab", { name: "Overview" })
     overviewTab.focus()
@@ -119,16 +119,16 @@ describe("AgentsWorkspace", () => {
   test("renders loading, empty, forbidden, missing, and unavailable states", async () => {
     let resolve!: (agents: AgentSummary[]) => void
     const pending = new Promise<AgentSummary[]>(yes => { resolve = yes })
-    const view = render(<AgentsWorkspace api={{ ...fakeApi(), listAgents: () => pending, getAgent: async () => detail() }} session={session} routeAgent={null} connection="connecting" streamFactory={null} onNavigate={() => {}} onNewConversation={() => {}} />)
+    const view = render(<AgentsWorkspace api={{ ...fakeApi(), listAgents: () => pending, getAgent: async () => detail() }} session={session} routeAgent={null} connection="connecting" pendingApprovals={0} streamFactory={null} onNavigate={() => {}} onNewConversation={() => {}} />)
     expect(screen.getByRole("status").textContent).toContain("Loading agents")
     resolve([])
     expect(await screen.findByText("No agents available")).toBeTruthy()
 
-    view.rerender(<AgentsWorkspace api={fakeApi({ listError: new ApiError(403, "forbidden") })} session={session} routeAgent={null} connection="live" streamFactory={null} onNavigate={() => {}} onNewConversation={() => {}} />)
+    view.rerender(<AgentsWorkspace api={fakeApi({ listError: new ApiError(403, "forbidden") })} session={session} routeAgent={null} connection="live" pendingApprovals={0} streamFactory={null} onNavigate={() => {}} onNewConversation={() => {}} />)
     expect((await screen.findByRole("alert")).textContent).toContain("Agent access denied")
-    view.rerender(<AgentsWorkspace api={fakeApi({ detailError: new ApiError(404, "not_found") })} session={session} routeAgent="missing" connection="live" streamFactory={null} onNavigate={() => {}} onNewConversation={() => {}} />)
+    view.rerender(<AgentsWorkspace api={fakeApi({ detailError: new ApiError(404, "not_found") })} session={session} routeAgent="missing" connection="live" pendingApprovals={0} streamFactory={null} onNavigate={() => {}} onNewConversation={() => {}} />)
     expect((await screen.findByRole("alert")).textContent).toContain("Agent not found")
-    view.rerender(<AgentsWorkspace api={fakeApi({ listError: new ApiError(503, "offline") })} session={session} routeAgent={null} connection="offline" streamFactory={null} onNavigate={() => {}} onNewConversation={() => {}} />)
+    view.rerender(<AgentsWorkspace api={fakeApi({ listError: new ApiError(503, "offline") })} session={session} routeAgent={null} connection="offline" pendingApprovals={0} streamFactory={null} onNavigate={() => {}} onNewConversation={() => {}} />)
     expect((await screen.findByRole("alert")).textContent).toContain("Agents are unavailable offline")
   })
 
@@ -136,13 +136,13 @@ describe("AgentsWorkspace", () => {
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 500 })
     const navigations: Array<string | null> = []
     const api = fakeApi()
-    const view = render(<AgentsWorkspace api={api} session={session} routeAgent={null} connection="live" streamFactory={null} onNavigate={(_destination, agent) => navigations.push(agent ?? null)} onNewConversation={() => {}} />)
+    const view = render(<AgentsWorkspace api={api} session={session} routeAgent={null} connection="live" pendingApprovals={0} streamFactory={null} onNavigate={(_destination, agent) => navigations.push(agent ?? null)} onNewConversation={() => {}} />)
     const row = await screen.findByRole("button", { name: "Open qa" })
     await userEvent.click(row)
-    view.rerender(<AgentsWorkspace api={api} session={session} routeAgent="qa" connection="live" streamFactory={null} onNavigate={(_destination, agent) => navigations.push(agent ?? null)} onNewConversation={() => {}} />)
+    view.rerender(<AgentsWorkspace api={api} session={session} routeAgent="qa" connection="live" pendingApprovals={0} streamFactory={null} onNavigate={(_destination, agent) => navigations.push(agent ?? null)} onNewConversation={() => {}} />)
     await screen.findByRole("heading", { name: "qa" })
     await userEvent.click(screen.getByRole("button", { name: "Back to agents" }))
-    view.rerender(<AgentsWorkspace api={api} session={session} routeAgent={null} connection="live" streamFactory={null} onNavigate={(_destination, agent) => navigations.push(agent ?? null)} onNewConversation={() => {}} />)
+    view.rerender(<AgentsWorkspace api={api} session={session} routeAgent={null} connection="live" pendingApprovals={0} streamFactory={null} onNavigate={(_destination, agent) => navigations.push(agent ?? null)} onNewConversation={() => {}} />)
     await waitFor(() => expect(document.activeElement?.getAttribute("aria-label")).toBe("Open qa"))
     expect(navigations).toEqual(["qa", null])
   })
@@ -160,7 +160,7 @@ describe("AgentsWorkspace", () => {
       online: () => true,
       open: (_url, handlers) => { sourceHandlers = handlers; return { close() {} } },
     })
-    render(<AgentsWorkspace api={api} session={session} routeAgent="qa" connection="live" streamFactory={() => stream} onNavigate={() => {}} onNewConversation={() => {}} />)
+    render(<AgentsWorkspace api={api} session={session} routeAgent="qa" connection="live" pendingApprovals={0} streamFactory={() => stream} onNavigate={() => {}} onNewConversation={() => {}} />)
     const panel = await screen.findByRole("tabpanel")
     expect(await within(panel).findByText("v1")).toBeTruthy()
     expect(listCalls).toBe(1)
@@ -175,7 +175,7 @@ describe("AgentsWorkspace", () => {
 
   test("uses a closed tablet detail drawer, moves focus into it, and restores focus on Escape", async () => {
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 900 })
-    render(<AgentsWorkspace api={fakeApi()} session={session} routeAgent={null} connection="live" streamFactory={null} onNavigate={() => {}} onNewConversation={() => {}} />)
+    render(<AgentsWorkspace api={fakeApi()} session={session} routeAgent={null} connection="live" pendingApprovals={0} streamFactory={null} onNavigate={() => {}} onNewConversation={() => {}} />)
     const row = await screen.findByRole("button", { name: "Open qa" })
     const shell = document.querySelector(".agents-shell")!
     const drawer = document.querySelector<HTMLElement>('.agent-detail[aria-label="Agent detail"]')!
@@ -200,5 +200,21 @@ describe("AgentsWorkspace", () => {
     expect(css).toContain('.agents-shell[data-layout="tablet"] .agent-detail')
     expect(css).toContain('.agents-shell[data-layout="tablet"] .agent-detail[data-open="false"]')
     expect(css).toContain("inset: 0 0 0 calc(var(--rail-width) + var(--list-width))")
+  })
+
+  test("propagates the Approvals destination and pending count through desktop and mobile navigation", async () => {
+    const enabled: Session = {
+      ...session,
+      features: { ...session.features, approvals: true },
+      permissions: { ...session.permissions, approvals: "viewer" },
+      approvalState: { producing: true, canDecide: false, pendingCount: 4 },
+    }
+    const destinations: string[] = []
+    render(<AgentsWorkspace api={fakeApi()} session={enabled} routeAgent={null} connection="live" pendingApprovals={4} streamFactory={null} onNavigate={destination => destinations.push(destination)} onNewConversation={() => {}} />)
+    await screen.findByRole("list", { name: "Agents" })
+
+    await userEvent.click(screen.getByRole("link", { name: "Approvals, 4 pending" }))
+    await userEvent.click(screen.getByRole("button", { name: "Approvals, 4 pending" }))
+    expect(destinations).toEqual(["approvals", "approvals"])
   })
 })

@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react"
 import { ApiError } from "../api"
 import { AgentStream } from "../agentStream"
+import type { WorkspaceDestination } from "../routes"
 import type { AgentDetail as AgentDetailValue, AgentSummary, ConnectionState, Session } from "../types"
 import { AgentDetail } from "./AgentDetail"
 import type { AgentActionApi } from "./AgentActionDialog"
 import type { AgentConfigApi } from "./AgentConfigEditor"
 import { AgentList } from "./AgentList"
-import { AppRail } from "./AppRail"
+import { AppRail, workspaceDestinationFeatures } from "./AppRail"
 import { DestinationMobileNav } from "./DestinationMobileNav"
 
 export type AgentsApi = AgentConfigApi & AgentActionApi & {
@@ -19,14 +20,15 @@ type DetailError = "forbidden" | "not_found" | "unavailable" | null
 type AgentsLayout = "desktop" | "tablet" | "mobile"
 const createDefaultAgentStream = () => new AgentStream()
 
-export function AgentsWorkspace({ api, session, routeAgent, connection: suppliedConnection, install, streamFactory = createDefaultAgentStream, onNavigate, onNewConversation }: {
+export function AgentsWorkspace({ api, session, routeAgent, connection: suppliedConnection, pendingApprovals, install, streamFactory = createDefaultAgentStream, onNavigate, onNewConversation }: {
   api: AgentsApi
   session: Session
   routeAgent: string | null
   connection: ConnectionState
+  pendingApprovals: number
   install?: { available: boolean; run(): Promise<void> }
   streamFactory?: (() => AgentStream) | null
-  onNavigate(destination: "conversations" | "agents", agent?: string | null): void
+  onNavigate(destination: WorkspaceDestination, agent?: string | null): void
   onNewConversation(): void
 }) {
   const [agents, setAgents] = useState<AgentSummary[]>([])
@@ -40,6 +42,7 @@ export function AgentsWorkspace({ api, session, routeAgent, connection: supplied
   const [announcement, setAnnouncement] = useState("")
   const [activeAgent, setActiveAgent] = useState(routeAgent)
   const [layout, setLayout] = useState<AgentsLayout>(() => readLayout())
+  const destinationFeatures = workspaceDestinationFeatures(session)
   const rows = useRef(new Map<string, HTMLButtonElement>())
   const detailCloseRef = useRef<HTMLButtonElement>(null)
   const restoreFocus = useRef<string | null>(null)
@@ -125,14 +128,14 @@ export function AgentsWorkspace({ api, session, routeAgent, connection: supplied
     }
   }
 
-  if (loadError) return <main className="agents-shell agents-state-shell" data-layout={layout}><AppRail active="agents" connection={connection} features={session.features} install={install} onNew={onNewConversation} onNavigate={destination => onNavigate(destination)} /><section className="status-page"><div role="alert"><h1>{loadError === "forbidden" ? "Agent access denied" : connection === "offline" ? "Agents are unavailable offline" : "Agents are unavailable"}</h1><p>{loadError === "forbidden" ? "Ask a Switchboard administrator to grant agent access." : "Reconnect to Switchboard, then try again."}</p></div></section><DestinationMobileNav active="agents" features={session.features} onNavigate={destination => onNavigate(destination)} /></main>
+  if (loadError) return <main className="agents-shell agents-state-shell" data-layout={layout}><AppRail active="agents" connection={connection} features={destinationFeatures} pendingApprovals={pendingApprovals} install={install} onNew={onNewConversation} onNavigate={destination => onNavigate(destination)} /><section className="status-page"><div role="alert"><h1>{loadError === "forbidden" ? "Agent access denied" : connection === "offline" ? "Agents are unavailable offline" : "Agents are unavailable"}</h1><p>{loadError === "forbidden" ? "Ask a Switchboard administrator to grant agent access." : "Reconnect to Switchboard, then try again."}</p></div></section><DestinationMobileNav active="agents" features={destinationFeatures} pendingApprovals={pendingApprovals} onNavigate={destination => onNavigate(destination)} /></main>
 
   return <main className="agents-shell" data-layout={layout} data-mobile-pane={activeAgent ? "detail" : "list"}>
     <span className="sr-only" aria-live="polite">{announcement || (connection === "live" ? "Agent telemetry live." : `Agent telemetry ${connection}.`)}</span>
-    <AppRail active="agents" connection={connection} features={session.features} install={install} onNew={onNewConversation} onNavigate={destination => onNavigate(destination)} />
+    <AppRail active="agents" connection={connection} features={destinationFeatures} pendingApprovals={pendingApprovals} install={install} onNew={onNewConversation} onNavigate={destination => onNavigate(destination)} />
     {loading ? <section className="agent-list agent-loading" role="status">Loading agents…</section> : <AgentList agents={agents} selected={activeAgent} query={query} onQueryChange={setQuery} onSelect={selectAgent} rowRef={registerRow} />}
     <AgentDetail agent={selected} connection={connection} sessionPermission={session.permissions.agents} api={api} loading={detailLoading} error={detailError} hidden={layout === "tablet" && !activeAgent} closeRef={detailCloseRef} onBack={showList} onReload={() => { if (activeAgentRef.current) void loadDetail(activeAgentRef.current); void loadList() }} onAnnounce={setAnnouncement} />
-    <DestinationMobileNav active="agents" features={session.features} onNavigate={destination => onNavigate(destination)} />
+    <DestinationMobileNav active="agents" features={destinationFeatures} pendingApprovals={pendingApprovals} onNavigate={destination => onNavigate(destination)} />
   </main>
 }
 
