@@ -72,6 +72,13 @@ function page(items: ApprovalSummary[], nextCursor: string | null = null): Appro
   return { items, nextCursor, pendingCount: 2, querySummary: null }
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason: unknown) => void
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no })
+  return { promise, resolve, reject }
+}
+
 function fakeApi(options: {
   list?: (query: ApprovalListQuery) => Promise<ApprovalListPage>
   get?: (id: string) => Promise<ApprovalDetail>
@@ -212,6 +219,62 @@ describe("ApprovalsWorkspace", () => {
     await userEvent.keyboard("{Escape}")
     expect(drawer.getAttribute("data-open")).toBe("false")
     await waitFor(() => expect(document.activeElement).toBe(row))
+  })
+
+  test("stacks tablet drawer evidence so operational values keep a readable measure", async () => {
+    const css = await Bun.file(new URL("../styles.css", import.meta.url)).text()
+    expect(css).toMatch(/\.approvals-shell\[data-layout="tablet"\] \.approval-detail-header\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/)
+    expect(css).toMatch(/\.approvals-shell\[data-layout="tablet"\] \.approval-facts\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/)
+  })
+
+  test("keeps one focused Back control while tablet detail loads and fails", async () => {
+    setViewport(900)
+    const pendingDetail = deferred<ApprovalDetail>()
+    const { api } = fakeApi({ get: async () => pendingDetail.promise })
+    const navigations: Array<[string, string | null | undefined]> = []
+    renderWorkspace({
+      api,
+      routeApprovalId: "approval-1",
+      onNavigate: (destination, id) => navigations.push([destination, id]),
+    })
+
+    expect(await screen.findByText("Loading approval…")).toBeTruthy()
+    const back = screen.getByRole("button", { name: "Back to approvals" })
+    await waitFor(() => expect(document.activeElement).toBe(back))
+
+    act(() => pendingDetail.reject(new ApiError(503, "unavailable")))
+    expect((await screen.findByRole("alert")).textContent).toContain("Approval unavailable")
+    expect(screen.getByRole("button", { name: "Back to approvals" })).toBe(back)
+    expect(document.activeElement).toBe(back)
+
+    await userEvent.keyboard("{Escape}")
+    expect(navigations).toContainEqual(["approvals", null])
+  })
+
+  test("uses a canonical list fallback when mobile detail was opened directly", async () => {
+    setViewport(500)
+    history.replaceState(null, "", "/approvals/approval-1?group=history")
+    const navigations: Array<[string, string | null | undefined]> = []
+    renderWorkspace({
+      routeApprovalId: "approval-1",
+      onNavigate: (destination, id) => navigations.push([destination, id]),
+    })
+
+    expect(await screen.findByRole("heading", { name: "Deploy the release candidate" })).toBeTruthy()
+    await userEvent.click(screen.getByRole("button", { name: "Back to approvals" }))
+    expect(navigations).toContainEqual(["approvals", null])
+  })
+
+  test("implements keyboard tabs with a labelled results panel", async () => {
+    renderWorkspace()
+    const pending = await screen.findByRole("tab", { name: "Pending" })
+    pending.focus()
+    await userEvent.keyboard("{ArrowRight}")
+
+    const historyTab = screen.getByRole("tab", { name: "History" })
+    expect(historyTab.getAttribute("aria-selected")).toBe("true")
+    expect(document.activeElement).toBe(historyTab)
+    expect(screen.getByRole("tabpanel", { name: "History" })).toBeTruthy()
   })
 
   test("mobile detail uses its encoded route and browser Back restores the selected row", async () => {

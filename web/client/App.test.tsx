@@ -145,6 +145,28 @@ describe("responsive workspace shell", () => {
     expect(await screen.findByRole("heading", { name: "Approvals" })).toBeTruthy()
   })
 
+  test("offers top-level destinations alongside conversation panes on mobile", async () => {
+    setViewport(500)
+    const visible: Session = {
+      ...session,
+      features: { agents: true, approvals: true },
+      permissions: { agents: "operator", approvals: "viewer" },
+      approvalState: { producing: true, canDecide: false, pendingCount: 3 },
+    }
+    render(<App api={approvalApi(visible)} streamFactory={null} agentStreamFactory={null} />)
+    await screen.findByRole("heading", { name: "Switchboard" })
+
+    expect(screen.getByRole("navigation", { name: "Mobile navigation" })).toBeTruthy()
+    const destinations = screen.getByRole("navigation", { name: "Destinations" })
+    const approvals = within(destinations).getByRole("button", { name: "Approvals, 3 pending" })
+    await userEvent.click(approvals)
+
+    expect(location.pathname).toBe("/approvals")
+    expect(await screen.findByRole("heading", { name: "Approvals" })).toBeTruthy()
+    const css = await Bun.file(new URL("./styles.css", import.meta.url)).text()
+    expect(css).toMatch(/\.workspace-shell \.mobile-nav\s*\{[^}]*bottom:\s*calc\(64px \+ env\(safe-area-inset-bottom\)\)/)
+  })
+
   test("omits hidden Approvals navigation and rejects direct list and detail routes", async () => {
     const hidden: Session = {
       ...session,

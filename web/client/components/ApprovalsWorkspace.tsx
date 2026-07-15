@@ -144,6 +144,7 @@ export function ApprovalsWorkspace({ api, session, routeApprovalId, connection, 
   const detailCloseRef = useRef<HTMLButtonElement>(null)
   const restoreFocus = useRef<string | null>(null)
   const activeApprovalRef = useRef(routeApprovalId)
+  const internalMobileDetail = useRef<string | null>(null)
   const listGeneration = useRef(0)
   const detailGeneration = useRef(0)
 
@@ -165,6 +166,7 @@ export function ApprovalsWorkspace({ api, session, routeApprovalId, connection, 
   }, [])
 
   useEffect(() => {
+    if (internalMobileDetail.current !== routeApprovalId) internalMobileDetail.current = null
     activeApprovalRef.current = routeApprovalId
     setActiveApproval(routeApprovalId)
     if (routeApprovalId === null) {
@@ -242,8 +244,8 @@ export function ApprovalsWorkspace({ api, session, routeApprovalId, connection, 
   }, [activeApproval, items, loading])
 
   useLayoutEffect(() => {
-    if ((layout === "tablet" || layout === "mobile") && activeApproval && selected) detailCloseRef.current?.focus()
-  }, [activeApproval, layout, selected])
+    if ((layout === "tablet" || layout === "mobile") && activeApproval) detailCloseRef.current?.focus()
+  }, [activeApproval, detailLoading, layout, selected, selectedError])
 
   const changeFilters = (next: ApprovalFilterState) => {
     setItems([])
@@ -254,6 +256,7 @@ export function ApprovalsWorkspace({ api, session, routeApprovalId, connection, 
   const selectApproval = (item: ApprovalSummary) => {
     restoreFocus.current = item.id
     activeApprovalRef.current = item.id
+    internalMobileDetail.current = layout === "mobile" ? item.id : null
     setActiveApproval(item.id)
     onNavigate("approvals", item.id)
   }
@@ -261,14 +264,17 @@ export function ApprovalsWorkspace({ api, session, routeApprovalId, connection, 
   const showList = () => {
     const current = activeApprovalRef.current
     if (current) restoreFocus.current = current
-    if (layout === "mobile") {
-      history.back()
-      return
-    }
+    const returnThroughHistory = layout === "mobile" && internalMobileDetail.current === current
+    internalMobileDetail.current = null
     activeApprovalRef.current = null
     setActiveApproval(null)
     setSelected(null)
     setSelectedError(null)
+    setDetailLoading(false)
+    if (returnThroughHistory) {
+      history.back()
+      return
+    }
     onNavigate("approvals", null)
   }
 

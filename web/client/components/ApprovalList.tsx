@@ -1,4 +1,4 @@
-import type { Ref } from "react"
+import { useRef, type KeyboardEvent } from "react"
 import type { ApprovalRisk, ApprovalState, ApprovalSummary, ConnectionState } from "../types"
 
 export interface ApprovalFilterState {
@@ -64,7 +64,24 @@ export function ApprovalList({
   onLoadMore(): void
   rowRef?(id: string, element: HTMLButtonElement | null): void
 }) {
+  const pendingTabRef = useRef<HTMLButtonElement>(null)
+  const historyTabRef = useRef<HTMLButtonElement>(null)
+  const pendingTabId = "approval-group-pending"
+  const historyTabId = "approval-group-history"
   const patch = (next: Partial<ApprovalFilterState>) => onFiltersChange({ ...filters, ...next })
+  const selectTab = (group: ApprovalFilterState["group"], focus = false) => {
+    patch({ group })
+    if (focus) (group === "pending" ? pendingTabRef : historyTabRef).current?.focus()
+  }
+  const handleTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
+    let group: ApprovalFilterState["group"] | null = null
+    if (event.key === "Home") group = "pending"
+    else if (event.key === "End") group = "history"
+    else if (event.key === "ArrowLeft" || event.key === "ArrowRight") group = filters.group === "pending" ? "history" : "pending"
+    if (!group) return
+    event.preventDefault()
+    selectTab(group, true)
+  }
   const emptyHeading = filters.group === "pending" ? "No pending approvals" : "No approval history"
   const emptyCopy = filters.search || filters.risk || filters.kind || filters.requester || filters.state
     ? "No approvals match the active queue filters."
@@ -79,8 +96,8 @@ export function ApprovalList({
     </header>
 
     <div className="approval-group-tabs" role="tablist" aria-label="Approval groups">
-      <button type="button" role="tab" aria-selected={filters.group === "pending"} aria-controls="approval-results" onClick={() => patch({ group: "pending" })}>Pending</button>
-      <button type="button" role="tab" aria-selected={filters.group === "history"} aria-controls="approval-results" onClick={() => patch({ group: "history" })}>History</button>
+      <button ref={pendingTabRef} id={pendingTabId} type="button" role="tab" aria-selected={filters.group === "pending"} aria-controls="approval-results" tabIndex={filters.group === "pending" ? 0 : -1} onClick={() => selectTab("pending")} onKeyDown={handleTabKeyDown}>Pending</button>
+      <button ref={historyTabRef} id={historyTabId} type="button" role="tab" aria-selected={filters.group === "history"} aria-controls="approval-results" tabIndex={filters.group === "history" ? 0 : -1} onClick={() => selectTab("history")} onKeyDown={handleTabKeyDown}>History</button>
     </div>
 
     <form className="approval-search" role="search" aria-label="Approval search" onSubmit={event => event.preventDefault()}>
@@ -103,7 +120,7 @@ export function ApprovalList({
       </div>
     </details>
 
-    <div id="approval-results" className="approval-results">
+    <div id="approval-results" className="approval-results" role="tabpanel" aria-labelledby={filters.group === "pending" ? pendingTabId : historyTabId}>
       {loading ? <div className="approval-list-state" role="status">Loading approvals…</div> : error ? <div className="approval-list-state" role="alert"><h2>{error === "forbidden" ? "Approval access denied" : connection === "offline" ? "Approvals are unavailable offline" : "Approvals are unavailable"}</h2><p>{error === "forbidden" ? "Ask a Switchboard administrator to grant approval access." : "Reconnect to Switchboard, then try again."}</p></div> : items.length ? <ul className="approval-items" aria-label="Approvals">
         {items.map(item => <li key={item.id}>
           <button

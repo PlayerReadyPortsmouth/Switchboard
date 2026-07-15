@@ -37,10 +37,10 @@ export function ApprovalDetail({ approval, loading, error, hidden, producing, co
   }
 
   return <section className="approval-detail" aria-label="Approval detail" aria-hidden={hidden} inert={hidden ? true : undefined} data-open={open} onKeyDown={handleKeyDown}>
+    {open ? <button ref={closeRef} className="approval-back" type="button" onClick={onBack}>Back to approvals</button> : null}
     {!producing ? <div className="approval-core-notice" role="status"><strong>Core approval production is off</strong><span>Existing approval history remains available, but new approval production and decisions are disabled.</span></div> : null}
-    {loading ? <div className="approval-detail-state" role="status">Loading approval…</div> : error ? <div className="approval-detail-state" role="alert"><h2>{error === "forbidden" ? "Approval access denied" : error === "not_found" ? "Approval not found" : connection === "offline" ? "Approval unavailable offline" : "Approval unavailable"}</h2><p>{error === "forbidden" ? "Your identity cannot view this approval." : error === "not_found" ? "This approval no longer exists or is outside the visible history window." : "Reconnect to Switchboard, then try again."}</p><button type="button" onClick={onBack}>Back to approvals</button></div> : approval ? <>
+    {loading ? <div className="approval-detail-state" role="status">Loading approval…</div> : error ? <div className="approval-detail-state" role="alert"><h2>{error === "forbidden" ? "Approval access denied" : error === "not_found" ? "Approval not found" : connection === "offline" ? "Approval unavailable offline" : "Approval unavailable"}</h2><p>{error === "forbidden" ? "Your identity cannot view this approval." : error === "not_found" ? "This approval no longer exists or is outside the visible history window." : "Reconnect to Switchboard, then try again."}</p></div> : approval ? <>
       <header className="approval-detail-header">
-        <button ref={closeRef} className="approval-back" type="button" onClick={onBack}>Back to approvals</button>
         <div><p className="eyebrow">Exact effect record</p><h2>{approval.summary}</h2><p className="approval-target">{approval.target}</p></div>
         <div className="approval-risk-mark" data-risk={approval.risk}><span className="approval-live-trace" aria-hidden="true"><i /></span><strong>{titleCase(approval.risk)} risk</strong><small>{titleCase(approval.state)}</small></div>
       </header>

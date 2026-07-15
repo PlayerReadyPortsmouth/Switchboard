@@ -6,6 +6,7 @@ import { DraftStore } from "./drafts"
 import { AgentsWorkspace } from "./components/AgentsWorkspace"
 import { ApprovalsWorkspace } from "./components/ApprovalsWorkspace"
 import { AppRail, workspaceDestinationFeatures } from "./components/AppRail"
+import { DestinationMobileNav } from "./components/DestinationMobileNav"
 import { ConversationList } from "./components/ConversationList"
 import { Inspector } from "./components/Inspector"
 import { Transcript, canonicalMessages } from "./components/Transcript"
@@ -518,6 +519,12 @@ export function ConversationWorkspace({ api: suppliedApi, drafts: suppliedDrafts
         <Inspector conversation={null} session={state.session} open={false} onClose={closeInspector} />
       </>}
       <MobileNav pane={mobilePane} hasConversation={Boolean(selected)} onChange={changeMobilePane} />
+      <DestinationMobileNav
+        active="conversations"
+        features={workspaceDestinationFeatures(state.session)}
+        pendingApprovals={state.session.approvalState.pendingCount}
+        onNavigate={destination => destination === "conversations" ? navigate(null) : onNavigateDestination?.(destination)}
+      />
       {dialog === "new" ? <NewConversationDialog session={state.session} error={actionError} onCancel={closeDialog} onCreate={createConversation} /> : null}
       {dialog === "archive" && selected ? <ConfirmArchiveDialog title={selected.title} error={actionError} onCancel={closeDialog} onArchive={archiveConversation} /> : null}
     </main>
