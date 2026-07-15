@@ -52,7 +52,13 @@ export class AuditLog {
   private scanSize(filter: AuditFilter): number {
     const display = filter.limit ?? 50
     const filtered =
-      filter.kind || filter.actor || filter.chat || filter.action || filter.outcome || filter.since
+      filter.kind !== undefined
+      || filter.actor !== undefined
+      || filter.chat !== undefined
+      || filter.corr !== undefined
+      || filter.action !== undefined
+      || filter.outcome !== undefined
+      || filter.since !== undefined
     return filtered ? Math.max(display * 20, 1000) : display
   }
 }

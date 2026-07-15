@@ -50,9 +50,9 @@ test("redactDetail with no secrets returns detail unchanged", () => {
 // ---- matchAudit ----
 
 const EV: AuditEvent[] = [
-  { ts: 10, kind: "route", actor: "user:1", action: "route", outcome: "ok", chat: "c1" },
-  { ts: 20, kind: "exec", actor: "user:1", action: "direct", outcome: "error", chat: "c1" },
-  { ts: 30, kind: "access", actor: "user:2", action: "deny", outcome: "deny", chat: "c2" },
+  { ts: 10, kind: "route", actor: "user:1", action: "route", outcome: "ok", chat: "c1", corr: "approval-1" },
+  { ts: 20, kind: "exec", actor: "user:1", action: "direct", outcome: "error", chat: "c1", corr: "approval-2" },
+  { ts: 30, kind: "access", actor: "user:2", action: "deny", outcome: "deny", chat: "c2", corr: "approval-1" },
   { ts: 40, kind: "outbound", actor: "agent:assistant", action: "deliver", outcome: "ok", chat: "c1" },
 ]
 
@@ -78,6 +78,12 @@ test("matchAudit since lower-bounds ts; limit keeps the most recent N", () => {
 
 test("matchAudit combines filters (AND)", () => {
   expect(matchAudit(EV, { chat: "c1", outcome: "ok" }).map(e => e.ts)).toEqual([10, 40])
+})
+
+test("matchAudit filters an exact approval correlation ID", () => {
+  expect(matchAudit(EV, { corr: "approval-1" }).map(e => e.ts)).toEqual([10, 30])
+  expect(matchAudit(EV, { corr: "approval" })).toEqual([])
+  expect(matchAudit(EV, { corr: "approval-1", actor: "user:2" }).map(e => e.ts)).toEqual([30])
 })
 
 // ---- summarize ----

@@ -527,6 +527,7 @@ export interface AuditFilter {
   kind?: AuditKind
   actor?: string
   chat?: string
+  corr?: string
   action?: string
   outcome?: AuditEvent["outcome"]
   since?: number

@@ -12,18 +12,22 @@ function harness(
   } = {},
 ) {
   const appended: AuditEvent[] = []
+  const readSizes: number[] = []
   const log = new AuditLog({
     append: (e) => {
       if (opts.appendThrows) throw new Error("disk full")
       appended.push(e)
     },
-    readTail: () => opts.tail ?? [],
+    readTail: (n) => {
+      readSizes.push(n)
+      return opts.tail ?? []
+    },
     now: () => 1234,
     enabled: opts.enabled ?? true,
     kinds: opts.kinds,
     secrets: opts.secrets,
   })
-  return { log, appended }
+  return { log, appended, readSizes }
 }
 
 // ---- record ----
@@ -63,10 +67,10 @@ test("record never throws and never propagates an append failure", () => {
 // ---- recent / summary (read surface) ----
 
 const TAIL: AuditEvent[] = [
-  { ts: 1, kind: "route", actor: "user:1", action: "route", outcome: "ok" },
-  { ts: 2, kind: "exec", actor: "user:1", action: "direct", outcome: "error" },
+  { ts: 1, kind: "route", actor: "user:1", action: "route", outcome: "ok", corr: "approval-1" },
+  { ts: 2, kind: "exec", actor: "user:1", action: "direct", outcome: "error", corr: "approval-2" },
   { ts: 3, kind: "access", actor: "user:2", action: "deny", outcome: "deny" },
-  { ts: 4, kind: "outbound", actor: "agent:a", action: "deliver", outcome: "ok", cost: 0.05 },
+  { ts: 4, kind: "outbound", actor: "agent:a", action: "deliver", outcome: "ok", cost: 0.05, corr: "approval-1" },
 ]
 
 test("recent applies the filter and keeps the most recent N", () => {
@@ -86,4 +90,13 @@ test("summary rolls up the filtered tail", () => {
     actors: 3,
   })
   expect(h.log.summary({ actor: "user:" })).toMatchObject({ total: 3, actors: 2, costUsd: 0 })
+})
+
+test("recent and summary use exact correlation matching with a bounded filtered scan", () => {
+  const h = harness({ tail: TAIL })
+
+  expect(h.log.recent({ corr: "approval-1", limit: 2 }).map(event => event.ts)).toEqual([1, 4])
+  expect(h.readSizes.at(-1)).toBe(1000)
+  expect(h.log.summary({ corr: "approval-2" })).toMatchObject({ total: 1, byKind: { exec: 1 } })
+  expect(h.readSizes.at(-1)).toBe(1000)
 })

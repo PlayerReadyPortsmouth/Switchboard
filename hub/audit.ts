@@ -56,6 +56,7 @@ export function matchAudit(events: AuditEvent[], f: AuditFilter): AuditEvent[] {
       (f.outcome === undefined || e.outcome === f.outcome) &&
       (f.actor === undefined || actorMatches(e.actor, f.actor)) &&
       (f.chat === undefined || e.chat === f.chat) &&
+      (f.corr === undefined || e.corr === f.corr) &&
       (f.since === undefined || e.ts >= f.since),
   )
   if (f.limit !== undefined && f.limit >= 0) out = out.slice(-f.limit)
