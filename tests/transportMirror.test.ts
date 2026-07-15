@@ -42,14 +42,16 @@ test("Discord inbound is deduped and is never echoed to its origin", async () =>
   expect(repo.listMessages(c.id)).toHaveLength(1); expect(deliveries).toBe(0)
 })
 
-test("canonical inbound registration leaves legacy card, modal, and reaction callbacks intact", () => {
+test("canonical inbound registration leaves legacy card, approval, lifecycle, modal, and reaction callbacks intact", () => {
   const gateway = Object.create(Gateway.prototype) as Gateway
   ;(gateway as any).onMessages = new InboundMultiplexer()
-  const calls: string[] = []; const legacy = () => calls.push("legacy"); const canonical = () => calls.push("canonical"); const reaction = () => {}; const card = () => {}; const modal = () => {}
+  const calls: string[] = []; const legacy = () => calls.push("legacy"); const canonical = () => calls.push("canonical"); const reaction = () => {}; const card = () => {}; const approval = () => {}; const connection = () => {}; const modal = () => {}
   gateway.handleInbound(legacy); gateway.handleInbound(canonical)
-  gateway.onReaction(reaction); gateway.onNotifyButton(card); gateway.onModalSubmit(modal)
+  gateway.onReaction(reaction); gateway.onNotifyButton(card); gateway.onApprovalButton(approval); gateway.onConnectionState(connection); gateway.onModalSubmit(modal)
   ;(gateway as any).onMessages.emit({}); expect(calls).toEqual(["legacy", "canonical"])
   expect((gateway as any).reactionCb).toBe(reaction)
   expect((gateway as any).notifyButtonCb).toBe(card)
+  expect((gateway as any).approvalButtonCb).toBe(approval)
+  expect((gateway as any).connectionStateCb).toBe(connection)
   expect((gateway as any).modalSubmitCb).toBe(modal)
 })

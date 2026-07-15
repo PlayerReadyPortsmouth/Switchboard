@@ -7,6 +7,7 @@ import { createHash } from "node:crypto"
 import type { AgentRegistry, InboundMessage, AgentReply, AgentConfig, HubConfig, CardSpec, CardModal } from "./types"
 import { chunk, formatOutbound } from "./format"
 import { buildModal } from "./modal"
+import { LEGACY_APPROVAL_VERSION, parseApprovalCustomId } from "./approval"
 
 export type Control =
   | { cmd: "agents"; arg: undefined }
@@ -183,7 +184,14 @@ export class Gateway {
   readonly client: Client
   private onMessages = new InboundMultiplexer<InboundMessage>()
   private permButtonCb: (requestId: string, behavior: "allow" | "deny") => void = () => {}
-  private notifyButtonCb: (customId: string, userId: string) => void = () => {}
+  private notifyButtonCb: (
+    customId: string,
+    userId: string,
+    interactionId: string,
+  ) => void | Promise<void> = () => {}
+  private approvalButtonCb: typeof this.notifyButtonCb | null = null
+  private connectionStateCb: (state: "ready" | "disconnected") => void = () => {}
+  private lastConnectionState: "ready" | "disconnected" | undefined
   private isAuthorized: (userId: string) => boolean = () => false
   private modalByCustomId = new Map<string, CardModal>()
   private notifyGate: (customId: string, userId: string) => boolean = () => true
@@ -199,6 +207,7 @@ export class Gateway {
   unregisterModals(customIds: string[]): void { for (const id of customIds) this.modalByCustomId.delete(id) }
   setNotifyButtonGate(fn: (customId: string, userId: string) => boolean): void { this.notifyGate = fn }
   onModalSubmit(cb: typeof this.modalSubmitCb): void { this.modalSubmitCb = cb }
+  onConnectionState(cb: typeof this.connectionStateCb): void { this.connectionStateCb = cb }
 
   constructor(private cfg: HubConfig, private registry: AgentRegistry) {
     this.client = new Client({
@@ -219,7 +228,30 @@ export class Gateway {
   onPermissionButton(cb: (requestId: string, behavior: "allow" | "deny") => void): void {
     this.permButtonCb = cb
   }
-  onNotifyButton(cb: (customId: string, userId: string) => void): void { this.notifyButtonCb = cb }
+  onNotifyButton(cb: typeof this.notifyButtonCb): void { this.notifyButtonCb = cb }
+  /**
+   * Opt in to shared approval-service routing. Until Task 7 registers this seam,
+   * approval cards stay on the legacy gated callback and cannot bypass its policy.
+   */
+  onApprovalButton(cb: typeof this.notifyButtonCb): void { this.approvalButtonCb = cb }
+
+  private emitConnectionState(state: "ready" | "disconnected"): void {
+    if (this.lastConnectionState === state) return
+    this.lastConnectionState = state
+    try { this.connectionStateCb(state) }
+    catch { process.stderr.write("gateway: connection state callback failed\n") }
+  }
+
+  private async invokeButtonCallback(
+    kind: "approval" | "notify",
+    callback: typeof this.notifyButtonCb,
+    customId: string,
+    userId: string,
+    interactionId: string,
+  ): Promise<void> {
+    try { await callback(customId, userId, interactionId) }
+    catch { process.stderr.write(`gateway: ${kind} button callback failed\n`) }
+  }
 
   /** DM each allowlisted user an Allow/Deny prompt for a tool-permission request. */
   async sendPermissionPrompt(
@@ -256,6 +288,10 @@ export class Gateway {
   }
 
   async start(token: string): Promise<void> {
+    this.client.on("clientReady", () => { this.emitConnectionState("ready") })
+    this.client.on("shardReady", () => { this.emitConnectionState("ready") })
+    this.client.on("shardResume", () => { this.emitConnectionState("ready") })
+    this.client.on("shardDisconnect", () => { this.emitConnectionState("disconnected") })
     this.client.on("messageCreate", (msg: Message) => {
       if (msg.author.bot) return
       void (async () => {
@@ -301,6 +337,26 @@ export class Gateway {
         return
       }
       if (!interaction.isButton()) return
+      const approval = parseApprovalCustomId(interaction.customId)
+      if (approval && approval.version !== LEGACY_APPROVAL_VERSION) {
+        // Discord authenticated interaction.user. The shared service owns actor
+        // authorization and audit, so canonical approvals bypass generic gates.
+        // An explicit registration is required to keep this staged Task 6 commit
+        // safe while hub/index.ts still owns the legacy registry.
+        if (!this.approvalButtonCb) {
+          await interaction.reply({ content: "Approval service unavailable.", ephemeral: true }).catch(() => {})
+          return
+        }
+        await interaction.deferUpdate().catch(() => {})
+        await this.invokeButtonCallback(
+          "approval",
+          this.approvalButtonCb,
+          interaction.customId,
+          interaction.user.id,
+          interaction.id,
+        )
+        return
+      }
       if (!this.isAuthorized(interaction.user.id)) {
         await interaction.reply({ content: "Not authorized.", ephemeral: true }).catch(() => {})
         return
@@ -336,7 +392,13 @@ export class Gateway {
       // feedback that the action was taken and prevents a double-click — then route
       // to the agent. The agent's later editCard replaces the Working row.
       await interaction.update({ components: [buildWorkingRow()] }).catch(() => {})
-      this.notifyButtonCb(interaction.customId, interaction.user.id)
+      await this.invokeButtonCallback(
+        "notify",
+        this.notifyButtonCb,
+        interaction.customId,
+        interaction.user.id,
+        interaction.id,
+      )
     })
     this.client.on("messageReactionAdd", async (reaction, user) => {
       try {
@@ -417,6 +479,16 @@ export class Gateway {
     } catch (e) {
       process.stderr.write(`gateway: editCard ${messageId} failed: ${e}\n`)
     }
+  }
+
+  /** Approval notification edits must reject so the service can audit failure. */
+  async editCardOrThrow(chatId: string, messageId: string, card: CardSpec): Promise<void> {
+    const ch = await this.client.channels.fetch(chatId)
+    if (!ch || !("messages" in ch) || typeof (ch as any).messages?.edit !== "function") {
+      throw new Error("discord_channel_not_editable")
+    }
+    const { embed, row } = buildCardComponents(card)
+    await (ch as any).messages.edit(messageId, { embeds: [embed], components: row ? [row] : [] })
   }
 
   async sendPlain(chatId: string, text: string): Promise<void> {

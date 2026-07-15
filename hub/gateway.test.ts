@@ -233,3 +233,260 @@ test("buildInboundFromMessage excludes forwards from reply normalization", () =>
   } as any
   expect(buildInboundFromMessage(msg, []).replyToMessageId).toBeUndefined()
 })
+
+class SyntheticDiscordClient {
+  private readonly handlers = new Map<string, Array<(...args: any[]) => unknown>>()
+
+  on(event: string, handler: (...args: any[]) => unknown): this {
+    const handlers = this.handlers.get(event) ?? []
+    handlers.push(handler)
+    this.handlers.set(event, handlers)
+    return this
+  }
+
+  async login(_token: string): Promise<string> { return "logged-in" }
+  destroy(): void {}
+
+  async dispatch(event: string, ...args: any[]): Promise<void> {
+    for (const handler of this.handlers.get(event) ?? []) await handler(...args)
+  }
+}
+
+function gatewayHarness() {
+  const gateway = Object.create(Gateway.prototype) as Gateway
+  const client = new SyntheticDiscordClient()
+  Object.assign(gateway as any, {
+    client,
+    onMessages: new InboundMultiplexer(),
+    permButtonCb: () => {},
+    notifyButtonCb: () => {},
+    approvalButtonCb: null,
+    isAuthorized: () => false,
+    modalByCustomId: new Map(),
+    notifyGate: () => true,
+    modalSubmitCb: () => {},
+    reactionCb: () => {},
+    threadArchivedCb: () => {},
+    connectionStateCb: () => {},
+    lastConnectionState: undefined,
+  })
+  return { gateway, client, start: () => gateway.start("token") }
+}
+
+function syntheticButton(customId: string, options: { id?: string; userId?: string } = {}) {
+  const replies: any[] = []
+  const updates: any[] = []
+  let deferred = 0
+  const interaction = {
+    id: options.id ?? "interaction-1",
+    customId,
+    user: { id: options.userId ?? "user-1" },
+    message: { content: "original card" },
+    isModalSubmit: () => false,
+    isButton: () => true,
+    reply: async (payload: any) => { replies.push(payload) },
+    update: async (payload: any) => { updates.push(payload) },
+    deferUpdate: async () => { deferred++ },
+  }
+  return { interaction, replies, updates, deferred: () => deferred }
+}
+
+test("registered approval-service buttons bypass generic gates, preserve the card, and are awaited", async () => {
+  const h = gatewayHarness()
+  let notifyCalls = 0
+  h.gateway.setPermissionAuthorizer(() => false)
+  h.gateway.setNotifyButtonGate(() => false)
+  h.gateway.onNotifyButton(() => { notifyCalls++ })
+
+  let release!: () => void
+  const wait = new Promise<void>(resolve => { release = resolve })
+  const calls: string[][] = []
+  h.gateway.onApprovalButton(async (customId, userId, interactionId) => {
+    calls.push([customId, userId, interactionId])
+    await wait
+  })
+  await h.start()
+
+  const button = syntheticButton("approval:grant:12:approval-7", { id: "interaction-9" })
+  let settled = false
+  const dispatch = h.client.dispatch("interactionCreate", button.interaction).finally(() => { settled = true })
+  await Promise.resolve()
+  await Promise.resolve()
+  expect(settled).toBe(false)
+  expect(calls).toEqual([["approval:grant:12:approval-7", "user-1", "interaction-9"]])
+  expect(button.deferred()).toBe(1)
+  expect(button.updates).toEqual([])
+  expect(button.replies).toEqual([])
+  expect(notifyCalls).toBe(0)
+
+  release()
+  await dispatch
+  expect(settled).toBe(true)
+})
+
+test("a canonical approval ID without service opt-in never reaches the legacy resolver", async () => {
+  const h = gatewayHarness()
+  h.gateway.setPermissionAuthorizer(() => true)
+  h.gateway.setNotifyButtonGate(() => true)
+  const calls: string[][] = []
+  h.gateway.onNotifyButton((...args) => { calls.push(args) })
+  await h.start()
+
+  const button = syntheticButton("approval:deny:3:approval-1")
+  await h.client.dispatch("interactionCreate", button.interaction)
+  expect(calls).toEqual([])
+  expect(button.deferred()).toBe(0)
+  expect(button.updates).toEqual([])
+  expect(button.replies).toEqual([expect.objectContaining({ ephemeral: true })])
+})
+
+test("reserved legacy approval IDs preserve base gate, notify gate, Working row, and interaction ID", async () => {
+  const h = gatewayHarness()
+  let baseAllowed = false
+  let notifyAllowed = false
+  h.gateway.setPermissionAuthorizer(() => baseAllowed)
+  h.gateway.setNotifyButtonGate(() => notifyAllowed)
+  const calls: string[][] = []
+  h.gateway.onNotifyButton((...args) => { calls.push(args) })
+  await h.start()
+
+  const deniedByBase = syntheticButton("approval:grant:legacy:appr-1", { id: "legacy-1" })
+  await h.client.dispatch("interactionCreate", deniedByBase.interaction)
+  expect(deniedByBase.replies[0]?.content).toBe("Not authorized.")
+
+  baseAllowed = true
+  const deniedByNotify = syntheticButton("approval:grant:legacy:appr-1", { id: "legacy-2" })
+  await h.client.dispatch("interactionCreate", deniedByNotify.interaction)
+  expect(deniedByNotify.replies[0]?.content).toContain("Not authorized for this action")
+
+  notifyAllowed = true
+  const allowed = syntheticButton("approval:grant:legacy:appr-1", { id: "legacy-3" })
+  await h.client.dispatch("interactionCreate", allowed.interaction)
+  expect(calls).toEqual([["approval:grant:legacy:appr-1", "user-1", "legacy-3"]])
+  expect(allowed.updates).toHaveLength(1)
+  const row = allowed.updates[0]!.components[0]
+  expect((row.components[0].data as any).custom_id).toBe("working:noop")
+  expect((row.components[0].data as any).disabled).toBe(true)
+})
+
+test("non-approval controls preserve existing gates and await the three-argument callback", async () => {
+  const h = gatewayHarness()
+  let baseAllowed = false
+  let notifyAllowed = false
+  h.gateway.setPermissionAuthorizer(() => baseAllowed)
+  h.gateway.setNotifyButtonGate(() => notifyAllowed)
+  const calls: string[][] = []
+  h.gateway.onNotifyButton(async (...args) => { calls.push(args) })
+  await h.start()
+
+  const deniedByBase = syntheticButton("action:run:job-1")
+  await h.client.dispatch("interactionCreate", deniedByBase.interaction)
+  expect(deniedByBase.replies[0]?.content).toBe("Not authorized.")
+
+  baseAllowed = true
+  const deniedByNotify = syntheticButton("action:run:job-1")
+  await h.client.dispatch("interactionCreate", deniedByNotify.interaction)
+  expect(deniedByNotify.replies[0]?.content).toContain("Not authorized for this action")
+
+  notifyAllowed = true
+  const allowed = syntheticButton("action:run:job-1", { id: "generic-3" })
+  await h.client.dispatch("interactionCreate", allowed.interaction)
+  expect(calls).toEqual([["action:run:job-1", "user-1", "generic-3"]])
+  const row = allowed.updates[0]!.components[0]
+  expect((row.components[0].data as any).label).toBe("Working")
+  expect((row.components[0].data as any).disabled).toBe(true)
+})
+
+test("rejected async approval callbacks are caught at the gateway boundary", async () => {
+  const h = gatewayHarness()
+  h.gateway.onApprovalButton(async () => { throw new Error("callback rejected") })
+  await h.start()
+  const button = syntheticButton("approval:grant:2:approval-1")
+  const originalWrite = process.stderr.write
+  let logged = ""
+  process.stderr.write = ((chunk: any) => { logged += String(chunk); return true }) as typeof process.stderr.write
+  try {
+    await expect(h.client.dispatch("interactionCreate", button.interaction)).resolves.toBeUndefined()
+  } finally {
+    process.stderr.write = originalWrite
+  }
+  expect(logged).toContain("approval button callback failed")
+})
+
+test("connection state deduplicates ready and disconnect events without changing inbound or button behavior", async () => {
+  const h = gatewayHarness()
+  const states: string[] = []
+  const inbound: string[] = []
+  const buttons: string[][] = []
+  h.gateway.onConnectionState(state => { states.push(state) })
+  h.gateway.handleInbound(message => { inbound.push(message.messageId) })
+  h.gateway.setPermissionAuthorizer(() => true)
+  h.gateway.setNotifyButtonGate(() => true)
+  h.gateway.onNotifyButton((...args) => { buttons.push(args) })
+  await h.start()
+
+  await h.client.dispatch("clientReady")
+  await h.client.dispatch("shardReady", 0)
+  await h.client.dispatch("shardResume", 0, 1)
+  await h.client.dispatch("shardDisconnect", {}, 0)
+  await h.client.dispatch("shardDisconnect", {}, 0)
+  await h.client.dispatch("shardResume", 0, 2)
+  await h.client.dispatch("clientReady")
+
+  await h.client.dispatch("messageCreate", {
+    id: "message-1",
+    channelId: "channel-1",
+    author: { id: "user-1", username: "Alice", bot: false },
+    content: "hello",
+    createdAt: new Date(0),
+    channel: { type: ChannelType.GuildText, isThread: () => false },
+    attachments: new Map(),
+    messageSnapshots: new Map(),
+    reference: null,
+  })
+  const button = syntheticButton("action:run:job-1", { id: "interaction-after-resume" })
+  await h.client.dispatch("interactionCreate", button.interaction)
+
+  expect(states).toEqual(["ready", "disconnected", "ready"])
+  expect(inbound).toEqual(["message-1"])
+  expect(buttons).toEqual([["action:run:job-1", "user-1", "interaction-after-resume"]])
+})
+
+test("connection state callbacks are synchronous, deduplicated, and exception-isolated", async () => {
+  const h = gatewayHarness()
+  const states: string[] = []
+  h.gateway.onConnectionState(state => { states.push(state); throw new Error("observer failed") })
+  await h.start()
+  const originalWrite = process.stderr.write
+  process.stderr.write = (() => true) as typeof process.stderr.write
+  try {
+    await expect(h.client.dispatch("clientReady")).resolves.toBeUndefined()
+    await expect(h.client.dispatch("shardReady", 0)).resolves.toBeUndefined()
+    await expect(h.client.dispatch("shardDisconnect", {}, 0)).resolves.toBeUndefined()
+  } finally {
+    process.stderr.write = originalWrite
+  }
+  expect(states).toEqual(["ready", "disconnected"])
+})
+
+test("editCardOrThrow propagates Discord failures while editCard remains compatible", async () => {
+  const gateway = Object.create(Gateway.prototype) as Gateway
+  ;(gateway as any).client = {
+    channels: {
+      fetch: async () => ({ messages: { edit: async () => { throw new Error("edit rejected") } } }),
+    },
+  }
+  const card = { title: "T", body: "B", buttons: [] }
+  await expect(gateway.editCardOrThrow("channel", "message", card)).rejects.toThrow("edit rejected")
+
+  const originalWrite = process.stderr.write
+  process.stderr.write = (() => true) as typeof process.stderr.write
+  try {
+    await expect(gateway.editCard("channel", "message", card)).resolves.toBeUndefined()
+  } finally {
+    process.stderr.write = originalWrite
+  }
+
+  ;(gateway as any).client = { channels: { fetch: async () => ({ send: async () => {} }) } }
+  await expect(gateway.editCardOrThrow("channel", "message", card)).rejects.toThrow("discord_channel_not_editable")
+})
