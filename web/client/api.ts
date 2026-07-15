@@ -8,6 +8,11 @@ import type {
   EditableAgentConfig,
   AgentRuntimeAction,
   AgentSummary,
+  ApprovalDecision,
+  ApprovalDecisionResult,
+  ApprovalDetail,
+  ApprovalListPage,
+  ApprovalListQuery,
   Conversation,
   ConversationInput,
   ConversationUpdate,
@@ -18,7 +23,7 @@ import type {
 } from "./types"
 
 export class ApiError extends Error {
-  constructor(readonly status: number, readonly code: string) {
+  constructor(readonly status: number, readonly code: string, readonly payload: unknown = null) {
     super(code)
     this.name = "ApiError"
   }
@@ -106,20 +111,64 @@ export class WorkspaceApi {
     })
   }
 
+  listApprovals(query: ApprovalListQuery): Promise<ApprovalListPage> {
+    const parameters = new URLSearchParams()
+    const append = (key: string, value: string | number | undefined): void => {
+      if (value !== undefined) parameters.set(key, String(value))
+    }
+    append("group", query.group)
+    append("search", query.search)
+    append("risk", query.risk)
+    append("kind", query.kind)
+    append("requester", query.requester)
+    append("state", query.state)
+    append("conversationId", query.conversationId)
+    append("createdFrom", query.createdFrom)
+    append("createdTo", query.createdTo)
+    append("decisionFrom", query.decisionFrom)
+    append("decisionTo", query.decisionTo)
+    append("limit", query.limit)
+    append("cursor", query.cursor)
+    return this.request(`/api/operations/approvals?${parameters.toString()}`)
+  }
+
+  getApproval(approvalId: string): Promise<ApprovalDetail> {
+    return this.request(`/api/operations/approvals/${encodeURIComponent(approvalId)}`)
+  }
+
+  decideApproval(
+    approvalId: string,
+    decision: ApprovalDecision,
+    expectedVersion: string,
+    idempotencyKey: string,
+  ): Promise<ApprovalDecisionResult> {
+    return this.request(`/api/operations/approvals/${encodeURIComponent(approvalId)}/decision`, {
+      method: "POST",
+      json: { decision, expectedVersion },
+      headers: { "idempotency-key": idempotencyKey },
+    })
+  }
+
   private async request<T>(path: string, options: { method?: string; json?: unknown; headers?: HeadersInit } = {}): Promise<T> {
     const headers = new Headers(options.headers)
     const body = options.json === undefined ? undefined : JSON.stringify(options.json)
     if (body !== undefined) headers.set("content-type", "application/json")
-    const response = await this.fetcher(new Request(new URL(path, this.baseUrl), { method: options.method, headers, body }))
+    const request = new Request(new URL(path, this.baseUrl), { method: options.method, headers, body })
+    let response: Response
+    try {
+      response = await this.fetcher(request)
+    } catch {
+      throw new ApiError(0, "request_failed")
+    }
     const contentType = response.headers.get("content-type") ?? ""
     const value = contentType.includes("application/json") ? await response.json().catch(() => null) : null
     if (!response.ok) {
       const code = value && typeof value === "object" && "error" in value && typeof value.error === "string"
         ? value.error
         : "request_failed"
-      throw new ApiError(response.status, code)
+      throw new ApiError(response.status, code, value)
     }
-    if (value === null) throw new ApiError(response.status, "invalid_response")
+    if (value === null || typeof value !== "object") throw new ApiError(response.status, "invalid_response")
     return value as T
   }
 }

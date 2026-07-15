@@ -30,8 +30,9 @@ const api: AppApi = {
   session: async () => ({
     identity: "ada@example.com",
     agents: [{ name: "architect", alive: true, busy: false }],
-    features: { agents: true },
-    permissions: { agents: "operator" },
+    features: { agents: true, approvals: false },
+    permissions: { agents: "operator", approvals: "hidden" },
+    approvalState: { producing: false, canDecide: false, pendingCount: 0 },
   }),
   listConversations: async () => [],
   createConversation: async () => { throw new Error("not used") },

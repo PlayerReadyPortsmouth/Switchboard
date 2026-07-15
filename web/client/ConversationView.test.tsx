@@ -13,8 +13,9 @@ const conversation: Conversation = {
 }
 const session: Session = {
   identity: "ada@example.com",
-  features: { agents: true },
-  permissions: { agents: "operator" },
+  features: { agents: true, approvals: false },
+  permissions: { agents: "operator", approvals: "hidden" },
+  approvalState: { producing: false, canDecide: false, pendingCount: 0 },
   agents: [{ name: "architect", alive: true, busy: false }, { name: "reviewer", alive: true, busy: false }, { name: "operator", alive: true, busy: false }],
 }
 const message = (overrides: Partial<Message> = {}): Message => ({

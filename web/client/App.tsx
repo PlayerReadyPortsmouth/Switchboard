@@ -132,8 +132,9 @@ export function ConversationView({ api, conversation: suppliedConversation, mess
   const session = suppliedSession ?? {
     identity: suppliedConversation.createdBy,
     agents: [{ name: conversation.primaryAgent, alive: true, busy: false }],
-    features: { agents: false },
-    permissions: { agents: "hidden" as const },
+    features: { agents: false, approvals: false },
+    permissions: { agents: "hidden" as const, approvals: "hidden" as const },
+    approvalState: { producing: false, canDecide: false, pendingCount: 0 },
   }
   const links = suppliedLinks ?? loadedLinks
 
@@ -310,7 +311,13 @@ export function ConversationWorkspace({ api: suppliedApi, drafts: suppliedDrafts
         const now = Date.now()
         dispatch({
           type: "session/loaded",
-          session: { identity: "", agents: [], features: { agents: false }, permissions: { agents: "hidden" } },
+          session: {
+            identity: "",
+            agents: [],
+            features: { agents: false, approvals: false },
+            permissions: { agents: "hidden", approvals: "hidden" },
+            approvalState: { producing: false, canDecide: false, pendingCount: 0 },
+          },
         })
         if (!current()) return
         dispatch({ type: "conversations/loaded", conversations: [{

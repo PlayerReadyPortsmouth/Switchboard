@@ -11,8 +11,9 @@ import { AgentsWorkspace, type AgentsApi } from "./AgentsWorkspace"
 const screen = within(document.body)
 const session: Session = {
   identity: "viewer@example.com",
-  features: { agents: true },
-  permissions: { agents: "viewer" },
+  features: { agents: true, approvals: false },
+  permissions: { agents: "viewer", approvals: "hidden" },
+  approvalState: { producing: false, canDecide: false, pendingCount: 0 },
   agents: [{ name: "qa", alive: true, busy: true }],
 }
 
@@ -82,7 +83,7 @@ describe("AgentsWorkspace", () => {
     expect(screen.queryByRole("button", { name: "Reset agent" })).toBeNull()
     expect(screen.queryByRole("button", { name: "Restart agent" })).toBeNull()
 
-    const operator = { ...session, permissions: { agents: "operator" as const } }
+    const operator = { ...session, permissions: { ...session.permissions, agents: "operator" as const } }
     view.rerender(<AgentsWorkspace api={fakeApi({ detail: mutable })} session={operator} routeAgent="qa" connection="live" streamFactory={null} onNavigate={() => {}} onNewConversation={() => {}} />)
     expect(await screen.findByRole("tab", { name: "Overview" })).toBeTruthy()
     const overviewTab = screen.getByRole("tab", { name: "Overview" })

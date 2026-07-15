@@ -2,14 +2,96 @@ export type MessageOrigin = "web" | "agent" | "transport" | "system"
 export type MessageState = "committed" | "queued" | "working" | "streaming" | "completed" | "failed"
 export type SyncMode = "two_way" | "inbound_only" | "outbound_only" | "notifications_only"
 export type ConnectionState = "connecting" | "live" | "reconnecting" | "offline"
+export type WorkspaceRole = "hidden" | "viewer" | "operator"
+export type ApprovalRisk = "low" | "elevated" | "destructive"
+export type ApprovalState = "pending" | "granted" | "denied" | "expired" | "interrupted"
+export type ApprovalExecution = "not_applicable" | "pending" | "succeeded" | "failed" | "interrupted"
+export type ApprovalDecision = "grant" | "deny"
+export type SafeValue = null | boolean | number | string | SafeValue[] | { [key: string]: SafeValue }
 
 export interface SessionAgentSummary { name: string; alive: boolean; busy: boolean }
 export interface Session {
   identity: string
   agents: SessionAgentSummary[]
-  features: { agents: boolean }
-  permissions: { agents: "hidden" | "viewer" | "operator" }
+  features: { agents: boolean; approvals: boolean }
+  permissions: { agents: WorkspaceRole; approvals: WorkspaceRole }
+  approvalState: { producing: boolean; canDecide: boolean; pendingCount: number }
 }
+
+export interface ApprovalPrincipal { surface: string; id: string }
+
+export interface ApprovalSummary {
+  id: string
+  version: string
+  kind: string
+  target: string
+  summary: string
+  risk: ApprovalRisk
+  requestedBy: ApprovalPrincipal
+  createdAt: number
+  expiresAt: number
+  terminalAt: number | null
+  state: ApprovalState
+  execution: ApprovalExecution
+  conversationId?: string
+}
+
+export interface ApprovalDetail extends ApprovalSummary {
+  detail: SafeValue
+  executionDetail: SafeValue | null
+  decisionBy: ApprovalPrincipal | null
+  decisionAt: number | null
+  outcomeReason: string | null
+  audit: Array<{ ts: number; actor: string; action: string; outcome: string }>
+  permissions: { canDecide: boolean }
+}
+
+export interface ApprovalListQuery {
+  group: "pending" | "history"
+  search?: string
+  risk?: ApprovalRisk
+  kind?: string
+  requester?: string
+  state?: ApprovalState
+  conversationId?: string
+  createdFrom?: number
+  createdTo?: number
+  decisionFrom?: number
+  decisionTo?: number
+  cursor?: string
+  limit?: number
+}
+
+export interface ApprovalPendingAggregate {
+  count: number
+  highestRisk: ApprovalRisk | null
+  nearestExpiry: number | null
+  firstId: string | null
+}
+
+export interface ApprovalListPage {
+  items: ApprovalSummary[]
+  nextCursor: string | null
+  pendingCount: number
+  querySummary: ApprovalPendingAggregate | null
+}
+
+export interface ApprovalDecisionResult { approval: ApprovalDetail }
+
+export type ApprovalOperationsEvent = ({
+  kind: "approval_changed"
+  approvalId: string
+  pendingCount: number
+  ts: number
+} | {
+  kind: "approvals_snapshot"
+  pendingCount: number
+  ts: number
+} | {
+  kind: "snapshot_required"
+  pendingCount?: number
+  ts: number
+}) & { sequence: number }
 
 export interface AgentPermissions {
   configure: boolean

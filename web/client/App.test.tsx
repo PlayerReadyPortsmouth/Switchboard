@@ -13,8 +13,9 @@ const screen = within(document.body)
 
 const session: Session = {
   identity: "ada@example.com",
-  features: { agents: true },
-  permissions: { agents: "operator" },
+  features: { agents: true, approvals: false },
+  permissions: { agents: "operator", approvals: "hidden" },
+  approvalState: { producing: false, canDecide: false, pendingCount: 0 },
   agents: [
     { name: "architect", alive: true, busy: false },
     { name: "reviewer", alive: true, busy: true },
@@ -95,7 +96,11 @@ describe("responsive workspace shell", () => {
   })
 
   test("hides Agents and rejects direct access when the feature is disabled", async () => {
-    const disabled = { ...session, features: { agents: false }, permissions: { agents: "hidden" as const } }
+    const disabled = {
+      ...session,
+      features: { ...session.features, agents: false },
+      permissions: { ...session.permissions, agents: "hidden" as const },
+    }
     const view = render(<App api={fakeApi({ session: disabled })} />)
     await screen.findByRole("heading", { name: "Switchboard" })
     expect(screen.queryByRole("link", { name: "Agents" })).toBeNull()
