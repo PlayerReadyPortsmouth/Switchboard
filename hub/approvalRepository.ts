@@ -1,9 +1,11 @@
 import { Database, SQLiteError, type SQLQueryBindings } from "bun:sqlite"
 import type {
+  ApprovalDecision,
   ApprovalExecutionOutcome,
   ApprovalLifecycleState,
   ApprovalListQuery,
   ApprovalPendingAggregate,
+  ApprovalPrincipal,
   ApprovalRecord,
   ApprovalRisk,
   ApprovalStorageState,
@@ -27,11 +29,60 @@ export class ApprovalRepositoryError extends Error {
   }
 }
 
+export interface ApprovalDecisionReservationInput {
+  approvalId: string
+  principal: ApprovalPrincipal
+  decision: ApprovalDecision
+  expectedVersion: number
+  idempotencyKey: string
+  requestHash: string
+  now: number
+}
+
+export interface ApprovalStoredDecisionResult {
+  approvalId: string
+  version: number
+  lifecycle: ApprovalLifecycleState
+  execution: ApprovalExecutionOutcome
+  executionDetail: SafeValue | null
+}
+
+export type ApprovalDecisionReservation =
+  | { kind: "won"; record: ApprovalRecord }
+  | { kind: "replay"; result: ApprovalStoredDecisionResult }
+  | { kind: "in_flight" }
+  | {
+    kind: "conflict"
+    code: "idempotency_conflict" | "stale_version" | "already_resolved" | "expired" | "interrupted"
+    record: ApprovalRecord | null
+  }
+
+export interface ApprovalGrantExecutionFinalization {
+  outcome: "succeeded" | "failed" | "interrupted"
+  detail?: unknown
+  now: number
+}
+
+export interface ApprovalReconciliation {
+  lifecycleInterrupted: ApprovalRecord[]
+  executionInterrupted: ApprovalRecord[]
+  notifications: Array<{ approvalId: string; adapter: string; reference: string }>
+}
+
 export interface ApprovalHistoryRepository {
   insertRegistering(record: ApprovalRecord): { kind: "inserted" } | { kind: "id_collision" }
   activate(id: string, expectedVersion: number): ApprovalRecord | null
   interruptRegistration(id: string, now: number, reason: string): ApprovalRecord | null
+  reserveDecision(input: ApprovalDecisionReservationInput): ApprovalDecisionReservation
+  finalizeGrantExecution(
+    principal: ApprovalPrincipal,
+    idempotencyKey: string,
+    expectedVersion: number,
+    result: ApprovalGrantExecutionFinalization,
+  ): ApprovalRecord | null
   expire(id: string, now: number): ApprovalRecord | null
+  expireDue(now: number, limit: number): ApprovalRecord[]
+  reconcileStartup(now: number): ApprovalReconciliation
   getVisible(id: string): ApprovalRecord | null
   list(query: ApprovalListQuery): { items: ApprovalRecord[]; nextCursor: string | null }
   summarizePending(query: Omit<ApprovalListQuery, "group" | "cursor" | "limit">): ApprovalPendingAggregate
@@ -96,6 +147,20 @@ interface NotificationRow {
   approval_id: unknown
   adapter: unknown
   reference: unknown
+}
+
+interface IdempotencyRow {
+  approval_id: unknown
+  request_hash: unknown
+  status: unknown
+  result_json: unknown
+  created_at: unknown
+  completed_at: unknown
+}
+
+interface ReconciliationCandidateRow {
+  id: unknown
+  state: unknown
 }
 
 interface NormalizedFilters {
@@ -171,7 +236,17 @@ const MAX_SAFE_VALUE_NODES = 10_000
 const MAX_APPROVAL_ID_BYTES = 4_096
 const MAX_CURSOR_BYTES = Math.ceil(((MAX_APPROVAL_ID_BYTES * 6) + 512) * 4 / 3)
 const MAX_FILTER_BYTES = 4_096
+const MAX_EXPIRY_BATCH = 100
 const PROTOTYPE_KEYS = new Set(["__proto__", "prototype", "constructor"])
+const STORED_RESULT_KEYS = new Set([
+  "approvalId", "version", "lifecycle", "execution", "executionDetail",
+])
+const DECISION_INPUT_KEYS = new Set([
+  "approvalId", "principal", "decision", "expectedVersion", "idempotencyKey", "requestHash", "now",
+])
+const PRINCIPAL_KEYS = new Set(["surface", "id"])
+const FINALIZATION_KEYS = new Set(["outcome", "detail", "now"])
+const FINALIZATION_BINDING_MISS = Object.freeze({ kind: "finalization_binding_miss" })
 const encoder = new TextEncoder()
 const fatalDecoder = new TextDecoder("utf-8", { fatal: true })
 
@@ -326,6 +401,58 @@ function validStateExecution(state: ApprovalStorageState, execution: ApprovalExe
   return state === "granted"
     ? execution === "pending" || execution === "succeeded" || execution === "failed" || execution === "interrupted"
     : execution === "not_applicable"
+}
+
+function storedResultFromRecord(record: ApprovalRecord): ApprovalStoredDecisionResult {
+  if (!LIFECYCLE_STATES.has(record.state as ApprovalLifecycleState) || record.execution === "pending") corrupt()
+  return {
+    approvalId: record.id,
+    version: record.version,
+    lifecycle: record.state as ApprovalLifecycleState,
+    execution: record.execution,
+    executionDetail: record.executionDetail,
+  }
+}
+
+function encodeStoredDecisionResult(record: ApprovalRecord): string {
+  return encodeSafeJson(storedResultFromRecord(record))
+}
+
+function decodeStoredDecisionResult(
+  value: unknown,
+  boundApprovalId: string,
+): ApprovalStoredDecisionResult {
+  const decoded = decodeSafeJson(value)
+  if (!isPlainObject(decoded)) corrupt()
+  const keys = Reflect.ownKeys(decoded)
+  if (keys.length !== STORED_RESULT_KEYS.size
+    || keys.some(key => typeof key !== "string" || !STORED_RESULT_KEYS.has(key))) {
+    corrupt()
+  }
+  const data: Record<string, unknown> = Object.create(null) as Record<string, unknown>
+  for (const key of STORED_RESULT_KEYS) {
+    const descriptor = Object.getOwnPropertyDescriptor(decoded, key)
+    if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) corrupt()
+    data[key] = descriptor.value
+  }
+  const approvalId = rowString(data.approvalId, true, MAX_APPROVAL_ID_BYTES)
+  const version = rowInteger(data.version, true)
+  const lifecycleValue = data.lifecycle
+  if (typeof lifecycleValue !== "string"
+    || !LIFECYCLE_STATES.has(lifecycleValue as ApprovalLifecycleState)) {
+    corrupt()
+  }
+  const lifecycle = lifecycleValue as ApprovalLifecycleState
+  const execution = rowExecution(data.execution)
+  const executionDetail = data.executionDetail as SafeValue
+  const validCompletedPair = lifecycle === "granted"
+    ? execution === "succeeded" || execution === "failed" || execution === "interrupted"
+    : lifecycle === "denied" && execution === "not_applicable"
+  if (!validCompletedPair || (execution === "not_applicable" && executionDetail !== null)
+    || approvalId !== boundApprovalId) {
+    corrupt()
+  }
+  return { approvalId, version, lifecycle, execution, executionDetail }
 }
 
 function decodeApprovalRow(row: ApprovalRow): ApprovalRecord {
@@ -652,6 +779,78 @@ function requireInputInteger(value: unknown): number {
   return value as number
 }
 
+function inputDataRecord(
+  value: unknown,
+  allowedKeys: ReadonlySet<string>,
+  requiredKeys: ReadonlySet<string>,
+): Record<string, unknown> {
+  if (!isPlainObject(value)) invalidRecord()
+  let keys: Array<string | symbol>
+  try {
+    keys = Reflect.ownKeys(value)
+  } catch {
+    invalidRecord()
+  }
+  if (keys!.some(key => typeof key !== "string" || !allowedKeys.has(key))) invalidRecord()
+  for (const key of requiredKeys) {
+    if (!keys!.includes(key)) invalidRecord()
+  }
+  const result: Record<string, unknown> = Object.create(null) as Record<string, unknown>
+  for (const key of keys!) {
+    let descriptor: PropertyDescriptor | undefined
+    try {
+      descriptor = Object.getOwnPropertyDescriptor(value, key)
+    } catch {
+      invalidRecord()
+    }
+    if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) invalidRecord()
+    result[key as string] = descriptor.value
+  }
+  return result
+}
+
+function normalizePrincipal(value: unknown): ApprovalPrincipal {
+  const raw = inputDataRecord(value, PRINCIPAL_KEYS, PRINCIPAL_KEYS)
+  return {
+    surface: requireInputString(raw.surface),
+    id: requireInputString(raw.id),
+  }
+}
+
+function normalizeDecisionReservationInput(
+  value: ApprovalDecisionReservationInput,
+): ApprovalDecisionReservationInput {
+  const raw = inputDataRecord(value, DECISION_INPUT_KEYS, DECISION_INPUT_KEYS)
+  if (raw.decision !== "grant" && raw.decision !== "deny") invalidRecord()
+  const expectedVersion = requireInputInteger(raw.expectedVersion)
+  if (expectedVersion <= 0) invalidRecord()
+  return {
+    approvalId: requireInputString(raw.approvalId),
+    principal: normalizePrincipal(raw.principal),
+    decision: raw.decision,
+    expectedVersion,
+    idempotencyKey: requireInputString(raw.idempotencyKey),
+    requestHash: requireInputString(raw.requestHash),
+    now: requireInputInteger(raw.now),
+  }
+}
+
+function normalizeGrantExecutionFinalization(
+  value: ApprovalGrantExecutionFinalization,
+): { outcome: "succeeded" | "failed" | "interrupted"; detailJson: string | null; now: number } {
+  const required = new Set(["outcome", "now"])
+  const raw = inputDataRecord(value, FINALIZATION_KEYS, required)
+  if (raw.outcome !== "succeeded" && raw.outcome !== "failed" && raw.outcome !== "interrupted") {
+    invalidRecord()
+  }
+  const detail = raw.detail === undefined ? null : validateSafeValue(raw.detail)
+  return {
+    outcome: raw.outcome,
+    detailJson: detail === null ? null : encodeSafeJson(detail),
+    now: requireInputInteger(raw.now),
+  }
+}
+
 export class SqliteApprovalHistoryRepository implements ApprovalHistoryRepository {
   constructor(private readonly db: Database) {}
 
@@ -737,6 +936,226 @@ export class SqliteApprovalHistoryRepository implements ApprovalHistoryRepositor
     }).immediate()
   }
 
+  reserveDecision(rawInput: ApprovalDecisionReservationInput): ApprovalDecisionReservation {
+    const input = normalizeDecisionReservationInput(rawInput)
+    return this.db.transaction((): ApprovalDecisionReservation => {
+      const binding = this.db.query<IdempotencyRow, [string, string, string]>(`
+        SELECT
+          approval_id, request_hash, status, result_json, created_at, completed_at
+        FROM approval_idempotency
+        WHERE principal_surface=? AND principal_id=? AND idempotency_key=?
+      `).get(input.principal.surface, input.principal.id, input.idempotencyKey)
+      if (binding !== null) {
+        const boundApprovalId = rowString(binding.approval_id, true, MAX_APPROVAL_ID_BYTES)
+        const boundHash = rowString(binding.request_hash, true)
+        if (boundHash !== input.requestHash) {
+          return {
+            kind: "conflict",
+            code: "idempotency_conflict",
+            record: this.readVisible(boundApprovalId),
+          }
+        }
+        rowInteger(binding.created_at)
+        if (binding.status === "in_flight") {
+          if (binding.result_json !== null || binding.completed_at !== null) corrupt()
+          return { kind: "in_flight" }
+        }
+        if (binding.status !== "completed" || binding.result_json === null) corrupt()
+        rowInteger(binding.completed_at)
+        return {
+          kind: "replay",
+          result: decodeStoredDecisionResult(binding.result_json, boundApprovalId),
+        }
+      }
+
+      const current = this.readVisible(input.approvalId)
+      if (current === null) {
+        return { kind: "conflict", code: "already_resolved", record: null }
+      }
+      if (current.state === "interrupted") {
+        return { kind: "conflict", code: "interrupted", record: current }
+      }
+      if (current.state !== "pending") {
+        return { kind: "conflict", code: "already_resolved", record: current }
+      }
+
+      const changed = input.decision === "grant"
+        ? this.db.query(`
+          UPDATE approval_records
+          SET
+            state='granted',
+            version=version+1,
+            terminal_at=?,
+            decision_surface=?,
+            decision_id=?,
+            decision_at=?,
+            decision_key=?,
+            outcome_reason=NULL,
+            execution_outcome='pending',
+            execution_detail_json=NULL,
+            execution_started_at=?,
+            execution_finished_at=NULL
+          WHERE id=? AND state='pending' AND version=? AND expires_at>?
+        `).run(
+          input.now,
+          input.principal.surface,
+          input.principal.id,
+          input.now,
+          input.idempotencyKey,
+          input.now,
+          input.approvalId,
+          input.expectedVersion,
+          input.now,
+        )
+        : this.db.query(`
+          UPDATE approval_records
+          SET
+            state='denied',
+            version=version+1,
+            terminal_at=?,
+            decision_surface=?,
+            decision_id=?,
+            decision_at=?,
+            decision_key=?,
+            outcome_reason='denied',
+            execution_outcome='not_applicable',
+            execution_detail_json=NULL,
+            execution_started_at=NULL,
+            execution_finished_at=NULL
+          WHERE id=? AND state='pending' AND version=? AND expires_at>?
+        `).run(
+          input.now,
+          input.principal.surface,
+          input.principal.id,
+          input.now,
+          input.idempotencyKey,
+          input.approvalId,
+          input.expectedVersion,
+          input.now,
+        )
+
+      if (changed.changes === 1) {
+        const decided = this.readVisible(input.approvalId)
+        if (decided === null) corrupt()
+        const completed = input.decision === "deny"
+        const resultJson = completed ? encodeStoredDecisionResult(decided) : null
+        this.db.query(`
+          INSERT INTO approval_idempotency(
+            principal_surface, principal_id, idempotency_key, approval_id,
+            request_hash, status, result_json, created_at, completed_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          input.principal.surface,
+          input.principal.id,
+          input.idempotencyKey,
+          input.approvalId,
+          input.requestHash,
+          completed ? "completed" : "in_flight",
+          resultJson,
+          input.now,
+          completed ? input.now : null,
+        )
+        return { kind: "won", record: decided }
+      }
+
+      let canonical = this.readVisible(input.approvalId)
+      if (canonical?.state === "pending" && canonical.expiresAt <= input.now) {
+        const expired = this.db.query(`
+          UPDATE approval_records
+          SET state='expired', version=version+1, terminal_at=?, outcome_reason='expired'
+          WHERE id=? AND state='pending' AND expires_at<=?
+        `).run(input.now, input.approvalId, input.now)
+        if (expired.changes === 1) {
+          canonical = this.readVisible(input.approvalId)
+          if (canonical === null) corrupt()
+          return { kind: "conflict", code: "expired", record: canonical }
+        }
+        canonical = this.readVisible(input.approvalId)
+      }
+      if (canonical === null) {
+        return { kind: "conflict", code: "already_resolved", record: null }
+      }
+      if (canonical.state === "interrupted") {
+        return { kind: "conflict", code: "interrupted", record: canonical }
+      }
+      if (canonical.state === "pending") {
+        return { kind: "conflict", code: "stale_version", record: canonical }
+      }
+      return { kind: "conflict", code: "already_resolved", record: canonical }
+    }).immediate()
+  }
+
+  finalizeGrantExecution(
+    rawPrincipal: ApprovalPrincipal,
+    idempotencyKey: string,
+    expectedVersion: number,
+    rawResult: ApprovalGrantExecutionFinalization,
+  ): ApprovalRecord | null {
+    const principal = normalizePrincipal(rawPrincipal)
+    const key = requireInputString(idempotencyKey)
+    const version = requireInputInteger(expectedVersion)
+    if (version <= 0) invalidRecord()
+    const result = normalizeGrantExecutionFinalization(rawResult)
+    try {
+      return this.db.transaction(() => {
+        const changed = this.db.query(`
+          UPDATE approval_records
+          SET
+            version=version+1,
+            execution_outcome=?,
+            execution_detail_json=?,
+            execution_finished_at=?,
+            outcome_reason=?
+          WHERE id=(
+            SELECT approval_id
+            FROM approval_idempotency
+            WHERE principal_surface=? AND principal_id=? AND idempotency_key=?
+          )
+            AND state='granted'
+            AND execution_outcome='pending'
+            AND version=?
+        `).run(
+          result.outcome,
+          result.detailJson,
+          result.now,
+          result.outcome === "interrupted" ? "execution_outcome_unknown" : null,
+          principal.surface,
+          principal.id,
+          key,
+          version,
+        )
+        if (changed.changes !== 1) return null
+        const binding = this.db.query<{ approval_id: unknown }, [string, string, string]>(`
+          SELECT approval_id
+          FROM approval_idempotency
+          WHERE principal_surface=? AND principal_id=? AND idempotency_key=?
+        `).get(principal.surface, principal.id, key)
+        if (binding === null) throw FINALIZATION_BINDING_MISS
+        const approvalId = rowString(binding.approval_id, true, MAX_APPROVAL_ID_BYTES)
+        const finalized = this.readVisible(approvalId)
+        if (finalized === null) corrupt()
+        const completed = this.db.query(`
+          UPDATE approval_idempotency
+          SET status='completed', result_json=?, completed_at=?
+          WHERE principal_surface=? AND principal_id=? AND idempotency_key=?
+            AND approval_id=? AND status='in_flight'
+        `).run(
+          encodeStoredDecisionResult(finalized),
+          result.now,
+          principal.surface,
+          principal.id,
+          key,
+          approvalId,
+        )
+        if (completed.changes !== 1) throw FINALIZATION_BINDING_MISS
+        return finalized
+      }).immediate()
+    } catch (error) {
+      if (error === FINALIZATION_BINDING_MISS) return null
+      throw error
+    }
+  }
+
   expire(id: string, now: number): ApprovalRecord | null {
     requireInputString(id)
     requireInputInteger(now)
@@ -747,6 +1166,102 @@ export class SqliteApprovalHistoryRepository implements ApprovalHistoryRepositor
         WHERE id=? AND state='pending' AND expires_at<=?
       `).run(now, id, now)
       return result.changes === 1 ? this.readVisible(id) : null
+    }).immediate()
+  }
+
+  expireDue(now: number, limit: number): ApprovalRecord[] {
+    requireInputInteger(now)
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_EXPIRY_BATCH) invalidFilter()
+    return this.db.transaction(() => {
+      const candidates = this.db.query<{ id: unknown }, [number, number]>(`
+        SELECT id
+        FROM approval_records
+        WHERE state='pending' AND expires_at<=?
+        ORDER BY expires_at ASC, created_at ASC, id ASC
+        LIMIT ?
+      `).all(now, limit)
+      const expired: ApprovalRecord[] = []
+      for (const candidate of candidates) {
+        const id = rowString(candidate.id, true, MAX_APPROVAL_ID_BYTES)
+        const changed = this.db.query(`
+          UPDATE approval_records
+          SET state='expired', version=version+1, terminal_at=?, outcome_reason='expired'
+          WHERE id=? AND state='pending' AND expires_at<=?
+        `).run(now, id, now)
+        if (changed.changes !== 1) continue
+        const record = this.readVisible(id)
+        if (record === null) corrupt()
+        expired.push(record)
+      }
+      return expired
+    }).immediate()
+  }
+
+  reconcileStartup(now: number): ApprovalReconciliation {
+    requireInputInteger(now)
+    return this.db.transaction(() => {
+      const candidates = this.db.query<ReconciliationCandidateRow, []>(`
+        SELECT id, state
+        FROM approval_records
+        WHERE state IN ('registering','pending')
+          OR (state='granted' AND execution_outcome='pending')
+        ORDER BY id ASC
+      `).all()
+      const lifecycleInterrupted: ApprovalRecord[] = []
+      const executionInterrupted: ApprovalRecord[] = []
+      const affectedIds: string[] = []
+
+      for (const candidate of candidates) {
+        const id = rowString(candidate.id, true, MAX_APPROVAL_ID_BYTES)
+        const state = rowState(candidate.state)
+        if (state === "registering" || state === "pending") {
+          const changed = this.db.query(`
+            UPDATE approval_records
+            SET
+              state='interrupted',
+              version=version+1,
+              terminal_at=?,
+              outcome_reason=?
+            WHERE id=? AND state=?
+          `).run(
+            now,
+            state === "registering" ? "registration_interrupted" : "restart_interrupted",
+            id,
+            state,
+          )
+          if (changed.changes !== 1) corrupt()
+          const interrupted = this.readVisible(id)
+          if (interrupted === null) corrupt()
+          lifecycleInterrupted.push(interrupted)
+          affectedIds.push(id)
+          continue
+        }
+        if (state !== "granted") corrupt()
+        const changed = this.db.query(`
+          UPDATE approval_records
+          SET
+            version=version+1,
+            execution_outcome='interrupted',
+            execution_detail_json=NULL,
+            execution_finished_at=?,
+            outcome_reason='execution_outcome_unknown'
+          WHERE id=? AND state='granted' AND execution_outcome='pending'
+        `).run(now, id)
+        if (changed.changes !== 1) corrupt()
+        const interrupted = this.readVisible(id)
+        if (interrupted === null) corrupt()
+        this.db.query(`
+          UPDATE approval_idempotency
+          SET status='completed', result_json=?, completed_at=?
+          WHERE approval_id=? AND status='in_flight'
+        `).run(encodeStoredDecisionResult(interrupted), now, id)
+        executionInterrupted.push(interrupted)
+        affectedIds.push(id)
+      }
+
+      const notifications: ApprovalReconciliation["notifications"] = []
+      for (const id of affectedIds) notifications.push(...this.listNotifications(id))
+      return { lifecycleInterrupted, executionInterrupted, notifications }
     }).immediate()
   }
 
