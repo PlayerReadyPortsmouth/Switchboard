@@ -18,7 +18,7 @@ const input = (over: Partial<WebInput> = {}): WebInput => ({
   now: 61_000, startedAt: 0,
   status: { now: 61_000, agents: [agent()], overseers: [], routes: [], routeRate10m: 4,
     ephemerals: [{ jobId: "j1", agent: "worker", task: "build", startedAt: 0 }] },
-  audit: summary(), recent, pendingApprovals: 1, pendingApprovalList: [], ...over,
+  audit: summary(), recent, pendingApprovals: 1, ...over,
 })
 
 // ---- renderDashboardJson ----
@@ -52,4 +52,11 @@ test("DASHBOARD_HTML is a self-contained page that polls the status endpoint rel
   expect(DASHBOARD_HTML).toContain("fetch('api/status')")
   expect(DASHBOARD_HTML).not.toContain("fetch('/api/status')")
   expect(DASHBOARD_HTML).toContain("Switchboard")
+})
+
+test("DASHBOARD_HTML loads authenticated approvals separately from aggregate status", () => {
+  expect(DASHBOARD_HTML).toContain("fetch('api/approvals')")
+  expect(DASHBOARD_HTML).not.toContain("pendingApprovalList")
+  expect(DASHBOARD_HTML).toContain("'Idempotency-Key': key")
+  expect(DASHBOARD_HTML).toContain("expectedVersion: version")
 })

@@ -7,6 +7,7 @@ import { RepositoryConflictError, RepositoryNotFoundError } from "../hub/convers
 import type { ConversationEvent } from "../hub/conversations/events"
 import type { Conversation, Message, TransportLink } from "../hub/conversations/types"
 import { AgentOperationsError } from "../hub/operations/agentService"
+import { ApprovalOperationsError, ApprovalOperationsService } from "../hub/approvalService"
 
 const conversation: Conversation = { id: "c/1", title: "Design", primaryAgent: "architect", createdBy: "owner@example.com", createdAt: 1, updatedAt: 1, archivedAt: null }
 const message: Message = { id: "m1", conversationId: "c/1", sequence: 1, author: "owner@example.com", origin: "web", content: "hello", replyTo: null, state: "committed", clientKey: "key-1", createdAt: 2 }
@@ -14,8 +15,16 @@ const link: TransportLink = { id: "l1", conversationId: "c/1", adapter: "discord
 
 function deps(overrides: Partial<WebDeps> = {}): WebDeps {
   return {
-    collect: () => ({ now: 1, startedAt: 0, status: { now: 1, agents: [], overseers: [], routes: [], routeRate10m: 0, ephemerals: [] }, audit: { total: 0, byKind: {}, byOutcome: {}, costUsd: 0, actors: 0 }, recent: [], pendingApprovals: 0, pendingApprovalList: [] }),
-    requireUser: req => req.headers.get("x-switchboard-user"), resolveApproval: async () => "not_found", listChannels: () => [], fetchChannelHistory: async () => [], fetchChannelTimeline: async () => [], subscribeChannel: () => () => {}, sendChannelMessage: async () => {}, runCommand: async () => null,
+    collect: () => ({ now: 1, startedAt: 0, status: { now: 1, agents: [], overseers: [], routes: [], routeRate10m: 0, ephemerals: [] }, audit: { total: 0, byKind: {}, byOutcome: {}, costUsd: 0, actors: 0 }, recent: [], pendingApprovals: 0 }),
+    requireUser: req => req.headers.get("x-switchboard-user"),
+    approvalOperations: {
+      session: () => ({ feature: false, coreEnabled: false, role: "hidden", canDecide: false, pendingCount: 0 }),
+      list: () => { throw new ApprovalOperationsError(404, "not_found", "none") },
+      get: () => { throw new ApprovalOperationsError(404, "not_found", "none") },
+      decide: async () => { throw new ApprovalOperationsError(404, "not_found", "none") },
+      subscribe: () => ({ unsubscribe() {} }),
+    },
+    listChannels: () => [], fetchChannelHistory: async () => [], fetchChannelTimeline: async () => [], subscribeChannel: () => () => {}, sendChannelMessage: async () => {}, runCommand: async () => null,
     agentOperations: { list: () => [], get: () => { throw new AgentOperationsError(404, "not_found") }, listLegacyConfigs: () => ({}), previewLegacyConfig: async () => { throw new AgentOperationsError(400, "unused") }, confirmLegacyConfig: async () => { throw new AgentOperationsError(409, "unused") }, previewConfig: async () => { throw new AgentOperationsError(400, "unused") }, confirmConfig: async () => { throw new AgentOperationsError(409, "unused") }, previewAction: () => { throw new AgentOperationsError(400, "unused") }, confirmAction: async () => { throw new AgentOperationsError(409, "unused") }, subscribe: () => ({ unsubscribe() {} }) },
     agentSessionAccess: () => ({ feature: true, role: "operator" }), listHubConfig: async () => ({}), previewHubConfigChange: async () => ({ error: "unused" }), confirmHubConfigChange: async () => ({ state: "not_found", fullRestart: [] }),
     createConversation: () => conversation, listConversations: () => [conversation], getConversation: () => conversation, updateConversation: () => conversation, archiveConversation: () => conversation,
@@ -39,11 +48,69 @@ test("workspace session uses the configured trusted header and exposes status-sa
     collect: () => ({ now: 1, startedAt: 0, status: { now: 1, agents: [
       { name: "qa", emoji: "Q", alive: true, busy: false, mode: "persistent", queueDepth: 0, fillPct: 0, lastActivityMs: 1 },
       { name: "temp", emoji: "T", alive: true, busy: false, mode: "ephemeral", queueDepth: 0, fillPct: 0, lastActivityMs: 1 },
-    ], overseers: [], routes: [], routeRate10m: 0, ephemerals: [] }, audit: { total: 0, byKind: {}, byOutcome: {}, costUsd: 0, actors: 0 }, recent: [], pendingApprovals: 0, pendingApprovalList: [] }),
+    ], overseers: [], routes: [], routeRate10m: 0, ephemerals: [] }, audit: { total: 0, byKind: {}, byOutcome: {}, costUsd: 0, actors: 0 }, recent: [], pendingApprovals: 0 }),
+    approvalOperations: {
+      ...deps().approvalOperations,
+      session: principal => {
+        expect(principal).toEqual({ surface: "web", id: "ada@example.com" })
+        return { feature: true, coreEnabled: false, role: "operator", canDecide: false, pendingCount: 3 }
+      },
+    },
   }))
   expect(response.status).toBe(200)
-  expect(await response.json()).toEqual({ identity: "ada@example.com", agents: [{ name: "qa", alive: true, busy: false }], features: { agents: true }, permissions: { agents: "operator" } })
+  expect(response.headers.get("cache-control")).toBe("no-store")
+  expect(await response.json()).toEqual({
+    identity: "ada@example.com",
+    agents: [{ name: "qa", alive: true, busy: false }],
+    features: { agents: true, approvals: true },
+    permissions: { agents: "operator", approvals: "operator" },
+    approvalState: { producing: false, canDecide: false, pendingCount: 3 },
+  })
   expect((await handleWebRequest(new Request("http://x/api/session"), deps())).status).toBe(400)
+})
+
+test("workspace session never exposes a hidden approval count", async () => {
+  const response = await handleWebRequest(req("/api/session"), deps({
+    approvalOperations: {
+      ...deps().approvalOperations,
+      session: () => ({ feature: true, coreEnabled: true, role: "hidden", canDecide: false, pendingCount: 99 }),
+    },
+  }))
+  expect(response.status).toBe(200)
+  expect((await response.json()).approvalState.pendingCount).toBe(0)
+})
+
+test("approval conversation authorization runs before page and aggregate repository reads", async () => {
+  const repositoryCalls: string[] = []
+  const approvalOperations = new ApprovalOperationsService({
+    repository: {
+      list: () => { repositoryCalls.push("list"); return { items: [], nextCursor: null } },
+      summarizePending: () => {
+        repositoryCalls.push("summarizePending")
+        return { count: 0, highestRisk: null, nearestExpiry: null, firstId: null }
+      },
+      pendingCount: () => 0,
+    } as any,
+    held: {} as any,
+    policies: {} as any,
+    events: {} as any,
+    workspace: { features: { approvals: true }, operators: ["owner@example.com"] },
+    approvals: { enabled: true },
+    approversBySurface: {},
+    audit: () => {},
+    relatedAudit: () => [],
+    canViewConversation: () => false,
+    now: () => 1,
+    id: () => "unused",
+    ttlMs: 1_000,
+  })
+  const response = await handleWebRequest(
+    req("/api/operations/approvals?group=pending&conversationId=private-conversation"),
+    deps({ approvalOperations }),
+  )
+  expect(response.status).toBe(404)
+  expect(response.headers.get("cache-control")).toBe("no-store")
+  expect(repositoryCalls).toEqual([])
 })
 
 test("PATCH conversation validates input and dispatches an owner update", async () => {

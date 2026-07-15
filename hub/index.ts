@@ -90,7 +90,7 @@ import { resolveOutboxFile } from "./outboxAttach"
 import { makeAttachHandler } from "./attachHandler"
 import { publishArtifact } from "./publishLink"
 import { selectExpired } from "./publishCleanup"
-import { createHash, randomBytes, randomUUID } from "crypto"
+import { randomBytes, randomUUID } from "crypto"
 import { Database } from "bun:sqlite"
 import { ConversationEventStream, ConversationService, createDiscordConversationMigrator, inboundLinkRoute, LegacyDiscordCompatibilityRouter, ProductionIngressGate, SqliteConversationRepository, TurnCoordinator } from "./conversations"
 import { DeliveryWorker, DiscordAdapter, SurfaceRouter } from "./surfaces"
@@ -2425,36 +2425,12 @@ if (metricsServer) console.error(`switchboard hub: metrics/health on ${hub.metri
 // Read-only web dashboard: the same data, plus a recent-activity feed, as a page
 // on webPort. Off unless webPort is set. Serves only aggregated, non-secret data.
 function collectWeb(): WebInput {
-  return { ...collectMetrics(), recent: audit.recent({ limit: 30 }), pendingApprovalList: [] }
+  return { ...collectMetrics(), recent: audit.recent({ limit: 30 }) }
 }
 const webDeps: WebDeps = {
   collect: collectWeb,
   requireUser: (req) => req.headers.get(hub.webIdentityHeader ?? "X-Switchboard-User"),
-
-  resolveApproval: async (id, decision, actor) => {
-    const principal: ApprovalPrincipal = { surface: "web", id: actor }
-    try {
-      const current = approvalService.get(principal, "legacy", id)
-      const idempotencyKey = `legacy-web:${createHash("sha256")
-        .update(JSON.stringify({ id, version: current.version, decision, actor }))
-        .digest("hex")}`
-      const result = await approvalService.decide(principal, "legacy", {
-        approvalId: id,
-        decision,
-        expectedVersion: current.version,
-        idempotencyKey,
-      })
-      return result.approval.state === "granted" ? "granted"
-        : result.approval.state === "denied" ? "denied"
-          : "not_found"
-    } catch (error) {
-      if (!(error instanceof ApprovalOperationsError)
-        || !["not_found", "forbidden", "already_resolved", "stale_version"].includes(error.code)) {
-        auditApprovalBoundaryFailure("approval_legacy_web_decision_failed", "legacy-web", id)
-      }
-      return "not_found"
-    }
-  },
+  approvalOperations: approvalService,
 
   listChannels: (): ChannelInfo[] => {
     const now = Date.now()

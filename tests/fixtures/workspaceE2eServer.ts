@@ -9,6 +9,7 @@ import { AgentActionPreviewRegistry, IdempotencyRegistry } from "../../hub/opera
 import { AgentConfigPreviewRegistry } from "../../hub/agentConfigPreview"
 import type { AgentRegistry, HubConfig } from "../../hub/types"
 import type { AgentStatus } from "../../hub/statusRegistry"
+import { ApprovalOperationsError } from "../../hub/approvalService"
 
 const HOST = "127.0.0.1"
 const PORT = 4173
@@ -95,13 +96,19 @@ const dashboard = (): WebInput => ({
     overseers: [], routes: [], routeRate10m: 0, ephemerals: [],
   },
   audit: { total: 0, byKind: {}, byOutcome: {}, costUsd: 0, actors: 1 },
-  recent: [], pendingApprovals: 0, pendingApprovalList: [],
+  recent: [], pendingApprovals: 0,
 })
 
 const deps: WebDeps = {
   collect: dashboard,
   requireUser: request => request.headers.get("x-switchboard-user"),
-  resolveApproval: async () => "not_found",
+  approvalOperations: {
+    session: () => ({ feature: false, coreEnabled: false, role: "hidden", canDecide: false, pendingCount: 0 }),
+    list: () => { throw new ApprovalOperationsError(404, "not_found", "none") },
+    get: () => { throw new ApprovalOperationsError(404, "not_found", "none") },
+    decide: async () => { throw new ApprovalOperationsError(404, "not_found", "none") },
+    subscribe: () => ({ unsubscribe() {} }),
+  },
   listChannels: () => [],
   fetchChannelHistory: async () => [],
   fetchChannelTimeline: async () => [],

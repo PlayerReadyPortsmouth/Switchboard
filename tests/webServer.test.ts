@@ -5,19 +5,77 @@ import type { WebDeps } from "../hub/webServer"
 import type { AgentConfig } from "../hub/types"
 import type { WorkspaceAssetHandler } from "../hub/webAssets"
 import { AgentOperationsError } from "../hub/operations/agentService"
+import { ApprovalOperationsError, ApprovalOperationsService } from "../hub/approvalService"
+import type { ApprovalDetailView, ApprovalListPage, ApprovalSummaryView } from "../hub/approvalTypes"
+import type { ApprovalOperationsEvent } from "../hub/approvalEvents"
 
 const baseInput = (): WebInput => ({
   now: 1000, startedAt: 0,
   status: { now: 1000, agents: [], overseers: [], routes: [], routeRate10m: 0, ephemerals: [] },
   audit: { total: 0, byKind: {}, byOutcome: {}, costUsd: 0, actors: 0 },
-  recent: [], pendingApprovals: 0, pendingApprovalList: [],
+  recent: [], pendingApprovals: 2,
 })
+
+const approvalSummary = (overrides: Partial<ApprovalSummaryView> = {}): ApprovalSummaryView => ({
+  id: "approval-1",
+  version: "2",
+  kind: "outbound",
+  target: "route-a",
+  summary: "Deploy route A",
+  risk: "elevated",
+  requestedBy: { surface: "agent", id: "qa" },
+  createdAt: 100,
+  expiresAt: 200,
+  terminalAt: null,
+  state: "pending",
+  execution: "not_applicable",
+  ...overrides,
+})
+
+const approvalDetail = (overrides: Partial<ApprovalDetailView> = {}): ApprovalDetailView => ({
+  ...approvalSummary(),
+  detail: { method: "POST" },
+  executionDetail: null,
+  decisionBy: null,
+  decisionAt: null,
+  outcomeReason: null,
+  executionStartedAt: null,
+  executionFinishedAt: null,
+  audit: [],
+  permissions: { canDecide: true },
+  ...overrides,
+})
+
+const approvalPage = (overrides: Partial<ApprovalListPage> = {}): ApprovalListPage => ({
+  items: [approvalSummary()],
+  nextCursor: null,
+  pendingCount: 2,
+  querySummary: { count: 2, highestRisk: "elevated", nearestExpiry: 200, firstId: "approval-1" },
+  ...overrides,
+})
+
+type FakeApprovalOperations = Pick<ApprovalOperationsService, "session" | "list" | "get" | "decide" | "subscribe">
+
+function fakeApprovalOperations(overrides: Partial<FakeApprovalOperations> = {}): FakeApprovalOperations {
+  return {
+    session: () => ({ feature: true, coreEnabled: true, role: "operator", canDecide: true, pendingCount: 2 }),
+    list: () => approvalPage(),
+    get: () => approvalDetail(),
+    decide: async () => ({ approval: approvalDetail({
+      version: "3", terminalAt: 150, state: "granted", execution: "succeeded",
+      decisionBy: { surface: "web", id: "operator@example.com" }, decisionAt: 150,
+      executionStartedAt: 150, executionFinishedAt: 151,
+    }) }),
+    subscribe: () => ({ unsubscribe() {} }),
+    ...overrides,
+  }
+}
 
 function fakeDeps(overrides: Partial<WebDeps> = {}): WebDeps {
   return {
     collect: baseInput,
     requireUser: (req) => req.headers.get("x-switchboard-user"),
-    resolveApproval: async () => "not_found",
+    approvalOperations: fakeApprovalOperations(),
     listChannels: () => [],
     fetchChannelHistory: async () => [],
     fetchChannelTimeline: async () => [],
@@ -50,6 +108,7 @@ const post = (path: string, body: unknown, headers: Record<string, string> = {})
   new Request(`http://hub${path}`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) })
 const del = (path: string, headers: Record<string, string> = {}) =>
   new Request(`http://hub${path}`, { method: "DELETE", headers })
+const auth = { "x-switchboard-user": "operator@example.com" }
 
 test("web server exposes asynchronous stop completion", () => {
   const start: (port: number, deps: WebDeps, host?: string) => { stop: () => Promise<void> } | null = startWebServer
@@ -67,12 +126,14 @@ test("root uses workspace assets and legacy keeps the embedded dashboard", async
   expect(await (await handleWebRequest(new Request("http://x/legacy"), fakeDeps(), workspace)).text()).toContain("Switchboard")
 })
 
-test("GET /api/status → 200 JSON payload (no auth required)", async () => {
-  const res = await handleWebRequest(get("/api/status"), fakeDeps())
-  expect(res.status).toBe(200)
-  const json = (await res.json()) as DashboardJson
-  expect(json.status).toBe("ok")
-  expect(json.pendingApprovalList).toEqual([])
+test("unauthenticated status exposes only the aggregate approval count", async () => {
+  const response = await handleWebRequest(get("/api/status"), fakeDeps())
+  expect(response.status).toBe(200)
+  const body = await response.json() as DashboardJson & Record<string, unknown>
+  expect(body.status).toBe("ok")
+  expect(body.pendingApprovals).toBe(2)
+  expect(body).not.toHaveProperty("pendingApprovalList")
+  expect(JSON.stringify(body)).not.toContain("approval-1")
 })
 
 test("POST / → 405, unknown non-API GET → 503", async () => {
@@ -80,28 +141,328 @@ test("POST / → 405, unknown non-API GET → 503", async () => {
   expect((await handleWebRequest(get("/nope"), fakeDeps())).status).toBe(503)
 })
 
-test("POST /api/approvals/:id without X-Switchboard-User → 400", async () => {
-  const res = await handleWebRequest(post("/api/approvals/appr-1", { decision: "grant" }), fakeDeps())
-  expect(res.status).toBe(400)
+test("approval routes authenticate before method dispatch", async () => {
+  const guarded = [
+    ["/api/operations/approvals", "DELETE"],
+    ["/api/operations/approvals/approval-1", "POST"],
+    ["/api/operations/approvals/approval-1/decision", "GET"],
+    ["/api/operations/approvals/events", "POST"],
+    ["/api/approvals", "DELETE"],
+    ["/api/approvals/approval-1", "GET"],
+  ] as const
+  for (const [path, method] of guarded) {
+    const hidden = await handleWebRequest(new Request(`http://hub${path}`, { method }), fakeDeps())
+    expect(hidden.status).toBe(400)
+    expect(hidden.headers.get("cache-control")).toBe("no-store")
+    expect(await hidden.json()).toEqual({ error: "missing_identity" })
+    const known = await handleWebRequest(new Request(`http://hub${path}`, { method, headers: auth }), fakeDeps())
+    expect(known.status).toBe(405)
+  }
 })
 
-test("POST /api/approvals/:id grant → 200, calls resolveApproval with the header identity", async () => {
-  // Wrapped in an object (not a bare `let`) so TS's control-flow narrowing doesn't
-  // collapse the read below to the closure-unreachable `null` initializer type.
-  const called: { v: [string, string, string] | null } = { v: null }
-  const deps = fakeDeps({
-    resolveApproval: async (id, decision, actor) => { called.v = [id, decision, actor]; return "granted" },
+test("workspace and compatibility lists use trusted web principals and distinct contexts", async () => {
+  const sessions: unknown[] = []
+  const lists: unknown[] = []
+  const operations = fakeApprovalOperations({
+    session: (principal, context) => {
+      sessions.push(principal, context)
+      return principal.id === "hidden@example.com"
+        ? { feature: false, coreEnabled: true, role: "hidden", canDecide: false, pendingCount: 0 }
+        : { feature: false, coreEnabled: true, role: "operator", canDecide: true, pendingCount: 2 }
+    },
+    list: (principal, context, query) => {
+      lists.push(principal, context, query)
+      return approvalPage()
+    },
   })
-  const res = await handleWebRequest(post("/api/approvals/appr-1", { decision: "grant" }, { "x-switchboard-user": "aurora@player-ready.co.uk" }), deps)
-  expect(res.status).toBe(200)
-  expect(await res.json()).toEqual({ state: "granted" })
-  expect(called.v).toEqual(["appr-1", "grant", "aurora@player-ready.co.uk"])
+  const deps = fakeDeps({ approvalOperations: operations })
+
+  const disabledWorkspace = await handleWebRequest(get("/api/operations/approvals?group=pending", auth), deps)
+  expect(disabledWorkspace.status).toBe(404)
+  expect(disabledWorkspace.headers.get("cache-control")).toBe("no-store")
+  const legacy = await handleWebRequest(get("/api/approvals", auth), deps)
+  expect(legacy.status).toBe(200)
+  expect(legacy.headers.get("cache-control")).toBe("no-store")
+  const hiddenLegacy = await handleWebRequest(get("/api/approvals", { "x-switchboard-user": "hidden@example.com" }), deps)
+  expect(hiddenLegacy.status).toBe(404)
+  expect(sessions).toEqual([
+    { surface: "web", id: "operator@example.com" }, "workspace",
+    { surface: "web", id: "operator@example.com" }, "legacy",
+    { surface: "web", id: "hidden@example.com" }, "legacy",
+  ])
+  expect(lists).toEqual([
+    { surface: "web", id: "operator@example.com" }, "legacy", { group: "pending" },
+  ])
 })
 
-test("POST /api/approvals/:id already resolved → 409", async () => {
-  const deps = fakeDeps({ resolveApproval: async () => "not_found" })
-  const res = await handleWebRequest(post("/api/approvals/appr-1", { decision: "deny" }, { "x-switchboard-user": "a@b.com" }), deps)
-  expect(res.status).toBe(409)
+test("operations list decodes the complete filter contract exactly", async () => {
+  const seen: unknown[] = []
+  const deps = fakeDeps({ approvalOperations: fakeApprovalOperations({
+    list: (principal, context, query) => { seen.push(principal, context, query); return approvalPage({ querySummary: null }) },
+  }) })
+  const response = await handleWebRequest(get(
+    "/api/operations/approvals?group=history&state=denied&risk=elevated&kind=outbound%2Fweb&requester=agent%3Aqa%40example.com&conversationId=conversation%2F1&createdFrom=-1&createdTo=2&decisionFrom=3&decisionTo=4&search=%3Cscript%3E&cursor=opaque%2Bcursor&limit=1",
+    auth,
+  ), deps)
+  expect(response.status).toBe(200)
+  expect(response.headers.get("cache-control")).toBe("no-store")
+  expect(seen).toEqual([
+    { surface: "web", id: "operator@example.com" },
+    "workspace",
+    {
+      group: "history", state: "denied", risk: "elevated", kind: "outbound/web",
+      requester: "agent:qa@example.com", conversationId: "conversation/1",
+      createdFrom: -1, createdTo: 2, decisionFrom: 3, decisionTo: 4,
+      search: "<script>", cursor: "opaque+cursor", limit: 1,
+    },
+  ])
+})
+
+test("pending list returns the query-scoped aggregate while history returns null", async () => {
+  const aggregate = { count: 8, highestRisk: "destructive" as const, nearestExpiry: 123, firstId: "approval-first" }
+  const deps = fakeDeps({ approvalOperations: fakeApprovalOperations({
+    list: (_principal, _context, query) => approvalPage({
+      items: [approvalSummary()],
+      querySummary: query.group === "pending" ? aggregate : null,
+    }),
+  }) })
+  const pending = await handleWebRequest(get("/api/operations/approvals?group=pending&limit=1", auth), deps)
+  expect((await pending.json()).querySummary).toEqual(aggregate)
+  const history = await handleWebRequest(get("/api/operations/approvals?group=history&state=granted&limit=1", auth), deps)
+  expect((await history.json()).querySummary).toBeNull()
+})
+
+test("approval filters, cursors, duplicate keys, and URI decoding fail safely", async () => {
+  const invalid = [
+    "/api/operations/approvals",
+    "/api/operations/approvals?group=unknown",
+    "/api/operations/approvals?group=pending&state=granted",
+    "/api/operations/approvals?group=history&state=pending",
+    "/api/operations/approvals?group=pending&risk=critical",
+    "/api/operations/approvals?group=pending&requester=missing-surface",
+    "/api/operations/approvals?group=pending&createdFrom=1.5",
+    "/api/operations/approvals?group=pending&createdFrom=2&createdTo=1",
+    "/api/operations/approvals?group=pending&limit=0",
+    "/api/operations/approvals?group=pending&group=history",
+    "/api/operations/approvals?group=pending&unknown=value",
+    "/api/operations/approvals?group=pending&kind=%E0%A4%A",
+  ]
+  for (const path of invalid) {
+    const response = await handleWebRequest(get(path, auth), fakeDeps())
+    expect(response.status).toBe(400)
+    expect(response.headers.get("cache-control")).toBe("no-store")
+    expect(await response.json()).toEqual({ error: "invalid_request", recovery: "none" })
+  }
+
+  const malformedCursor = await handleWebRequest(get("/api/operations/approvals?group=pending&cursor=bad", auth), fakeDeps({
+    approvalOperations: fakeApprovalOperations({ list: () => { throw new ApprovalOperationsError(400, "invalid_cursor", "none") } }),
+  }))
+  expect(malformedCursor.status).toBe(400)
+  expect(await malformedCursor.json()).toEqual({ error: "invalid_cursor", recovery: "none" })
+
+  const malformedId = await handleWebRequest(get("/api/operations/approvals/%E0%A4%A", auth), fakeDeps())
+  expect(malformedId.status).toBe(400)
+  expect(await malformedId.json()).toEqual({ error: "invalid_request", recovery: "none" })
+})
+
+test("hidden approval callers receive 404 before query, URI, body, or SSE cursor probing", async () => {
+  const calls: string[] = []
+  const approvalOperations = fakeApprovalOperations({
+    session: () => ({ feature: false, coreEnabled: false, role: "hidden", canDecide: false, pendingCount: 0 }),
+    list: () => { calls.push("list"); return approvalPage() },
+    get: () => { calls.push("get"); return approvalDetail() },
+    decide: async () => { calls.push("decide"); return { approval: approvalDetail() } },
+    subscribe: () => { calls.push("subscribe"); return { unsubscribe() {} } },
+  })
+  const deps = fakeDeps({ approvalOperations })
+  const hidden = { "x-switchboard-user": "hidden@example.com" }
+  const requests = [
+    get("/api/operations/approvals?group=invalid", hidden),
+    get("/api/operations/approvals/%E0%A4%A", hidden),
+    new Request("http://hub/api/operations/approvals/approval-1/decision", {
+      method: "POST", headers: { ...hidden, "content-type": "text/plain" }, body: "bad",
+    }),
+    get("/api/operations/approvals/events?after=invalid", hidden),
+    get("/api/approvals?unknown=value", hidden),
+  ]
+  for (const request of requests) {
+    const response = await handleWebRequest(request, deps)
+    expect(response.status).toBe(404)
+    expect(await response.json()).toEqual({ error: "not_found", recovery: "none" })
+  }
+  expect(calls).toEqual([])
+})
+
+test("approval detail decodes the ID and returns canonical no-store JSON", async () => {
+  const seen: unknown[] = []
+  const detail = approvalDetail({ id: "approval/1" })
+  const response = await handleWebRequest(get("/api/operations/approvals/approval%2F1", auth), fakeDeps({
+    approvalOperations: fakeApprovalOperations({ get: (principal, context, id) => { seen.push(principal, context, id); return detail } }),
+  }))
+  expect(response.status).toBe(200)
+  expect(response.headers.get("cache-control")).toBe("no-store")
+  expect(await response.json()).toEqual(detail)
+  expect(seen).toEqual([{ surface: "web", id: "operator@example.com" }, "workspace", "approval/1"])
+})
+
+test("workspace and compatibility decisions forward trusted principal, opaque version, and key", async () => {
+  const seen: unknown[] = []
+  const operations = fakeApprovalOperations({
+    decide: async (principal, context, input) => { seen.push(principal, context, input); return { approval: approvalDetail({ id: input.approvalId }) } },
+  })
+  const deps = fakeDeps({ approvalOperations: operations })
+  const workspace = await handleWebRequest(post(
+    "/api/operations/approvals/approval%2F1/decision",
+    { decision: "grant", expectedVersion: "opaque-v2", actor: "attacker@example.com" },
+    { ...auth, "Idempotency-Key": "attempt-1" },
+  ), deps)
+  const legacy = await handleWebRequest(post(
+    "/api/approvals/approval%2F1",
+    { decision: "deny", expectedVersion: "opaque-v3" },
+    { ...auth, "Idempotency-Key": "attempt-2" },
+  ), deps)
+  expect(workspace.status).toBe(200)
+  expect(legacy.status).toBe(200)
+  expect(workspace.headers.get("cache-control")).toBe("no-store")
+  expect(seen).toEqual([
+    { surface: "web", id: "operator@example.com" }, "workspace",
+    { approvalId: "approval/1", decision: "grant", expectedVersion: "opaque-v2", idempotencyKey: "attempt-1" },
+    { surface: "web", id: "operator@example.com" }, "legacy",
+    { approvalId: "approval/1", decision: "deny", expectedVersion: "opaque-v3", idempotencyKey: "attempt-2" },
+  ])
+})
+
+test("approval decisions require JSON, a grant/deny decision, opaque version, and nonblank key", async () => {
+  const requests = [
+    post("/api/operations/approvals/approval-1/decision", { decision: "grant", expectedVersion: "2" }, auth),
+    post("/api/operations/approvals/approval-1/decision", { decision: "grant", expectedVersion: "2" }, { ...auth, "Idempotency-Key": "   " }),
+    post("/api/operations/approvals/approval-1/decision", { decision: "grant" }, { ...auth, "Idempotency-Key": "key" }),
+    post("/api/operations/approvals/approval-1/decision", { decision: "grant", expectedVersion: " " }, { ...auth, "Idempotency-Key": "key" }),
+    post("/api/operations/approvals/approval-1/decision", { decision: "approve", expectedVersion: "2" }, { ...auth, "Idempotency-Key": "key" }),
+    new Request("http://hub/api/operations/approvals/approval-1/decision", { method: "POST", headers: { ...auth, "Idempotency-Key": "key", "content-type": "text/plain" }, body: "{}" }),
+    new Request("http://hub/api/operations/approvals/approval-1/decision", { method: "POST", headers: { ...auth, "Idempotency-Key": "key", "content-type": "application/json" }, body: "{" }),
+  ]
+  for (const request of requests) {
+    const response = await handleWebRequest(request, fakeDeps())
+    expect(response.status).toBe(400)
+    expect(response.headers.get("cache-control")).toBe("no-store")
+    expect(await response.json()).toEqual({ error: "invalid_request", recovery: "none" })
+  }
+})
+
+test("approval decisions authorize visible viewers before parsing attacker-controlled input", async () => {
+  const gets: unknown[] = []
+  const audits: unknown[] = []
+  const service = new ApprovalOperationsService({
+    repository: {
+      getVisible: () => ({
+        id: "approval-1", version: 2, kind: "outbound", target: "route-a", summary: "Deploy route A",
+        detail: { method: "POST" }, requestedBy: { surface: "agent", id: "qa" }, originConversationId: null,
+        risk: "elevated", effectFingerprint: "f".repeat(64), createdAt: 100, expiresAt: 200,
+        terminalAt: null, state: "pending", decisionBy: null, decisionAt: null, decisionKey: null,
+        outcomeReason: null, execution: "not_applicable", executionDetail: null, executionStartedAt: null,
+        executionFinishedAt: null, correlationId: "corr-approval-1",
+      }),
+      pendingCount: () => 2,
+    } as any,
+    held: {} as any,
+    policies: {} as any,
+    events: {} as any,
+    workspace: { features: { approvals: true }, viewers: ["operator@example.com"], operators: [] },
+    approvals: { enabled: true },
+    approversBySurface: {},
+    audit: input => { audits.push(input) },
+    relatedAudit: () => [],
+    canViewConversation: () => false,
+    now: () => 100,
+    id: () => "unused",
+    ttlMs: 1_000,
+  })
+  const approvalOperations = fakeApprovalOperations({
+    session: () => ({ feature: true, coreEnabled: true, role: "viewer", canDecide: false, pendingCount: 2 }),
+    get: (principal, context, id) => {
+      gets.push([principal, context, id])
+      return approvalDetail({ permissions: { canDecide: false } })
+    },
+    decide: service.decide.bind(service),
+  })
+  for (const path of [
+    "/api/operations/approvals/approval-1/decision",
+    "/api/approvals/approval-1",
+  ]) {
+    const requests = [
+      new Request(`http://hub${path}`, { method: "POST", headers: auth, body: "{}" }),
+      post(path, { decision: "grant", expectedVersion: "2" }, auth),
+      new Request(`http://hub${path}`, {
+        method: "POST",
+        headers: { ...auth, "content-type": "application/json", "idempotency-key": "key" },
+        body: "{",
+      }),
+    ]
+    for (const request of requests) {
+      const response = await handleWebRequest(request, fakeDeps({ approvalOperations }))
+      expect(response.status).toBe(403)
+      expect(response.headers.get("cache-control")).toBe("no-store")
+      expect(await response.json()).toEqual({ error: "forbidden", recovery: "none" })
+    }
+  }
+  expect(gets).toHaveLength(6)
+  expect(audits).toEqual(Array.from({ length: 6 }, () => ({
+    kind: "approval",
+    actor: "web:operator@example.com",
+    action: "approval_decision_forbidden",
+    outcome: "deny",
+    corr: "corr-approval-1",
+  })))
+})
+
+test("approval decision errors are safe, typed, and expose canonical state only when authorized", async () => {
+  const canonical = approvalDetail({ version: "3", state: "denied", terminalAt: 150 })
+  const cases = [
+    [new ApprovalOperationsError(403, "forbidden", "none"), 403, { error: "forbidden", recovery: "none" }],
+    [new ApprovalOperationsError(404, "not_found", "none"), 404, { error: "not_found", recovery: "none" }],
+    [new ApprovalOperationsError(409, "stale_version", "reload", canonical), 409, { error: "stale_version", recovery: "reload", canonical }],
+    [new ApprovalOperationsError(409, "idempotency_conflict", "reload"), 409, { error: "idempotency_conflict", recovery: "reload" }],
+    [new ApprovalOperationsError(409, "expired", "reload", canonical), 409, { error: "expired", recovery: "reload", canonical }],
+    [new ApprovalOperationsError(409, "already_resolved", "reload", canonical), 409, { error: "already_resolved", recovery: "reload", canonical }],
+  ] as const
+  for (const [error, status, body] of cases) {
+    const response = await handleWebRequest(post(
+      "/api/operations/approvals/approval-1/decision",
+      { decision: "grant", expectedVersion: "2" },
+      { ...auth, "Idempotency-Key": "key" },
+    ), fakeDeps({ approvalOperations: fakeApprovalOperations({ decide: async () => { throw error } }) }))
+    expect(response.status).toBe(status)
+    expect(response.headers.get("cache-control")).toBe("no-store")
+    expect(await response.json()).toEqual(body)
+  }
+})
+
+test("winning grants return definitive failed and interrupted execution as HTTP 200", async () => {
+  for (const execution of ["failed", "interrupted"] as const) {
+    const canonical = approvalDetail({
+      version: "3", state: "granted", terminalAt: 150, execution,
+      executionDetail: execution === "failed" ? { failureCode: "delivery_failed" } : null,
+    })
+    const response = await handleWebRequest(post(
+      "/api/operations/approvals/approval-1/decision",
+      { decision: "grant", expectedVersion: "2" },
+      { ...auth, "Idempotency-Key": `key-${execution}` },
+    ), fakeDeps({ approvalOperations: fakeApprovalOperations({ decide: async () => ({ approval: canonical }) }) }))
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ approval: canonical })
+  }
+})
+
+test("unexpected approval failures return a fixed safe 500 without exception details", async () => {
+  const response = await handleWebRequest(get("/api/operations/approvals?group=pending", auth), fakeDeps({
+    approvalOperations: fakeApprovalOperations({ list: () => { throw new Error("database password leaked") } }),
+  }))
+  expect(response.status).toBe(500)
+  expect(response.headers.get("cache-control")).toBe("no-store")
+  const body = await response.text()
+  expect(JSON.parse(body)).toEqual({ error: "approval_unavailable", recovery: "reload" })
+  expect(body).not.toContain("password")
 })
 
 test("DELETE /api/channels with valid identity header → 405 (known guarded path, wrong method)", async () => {
@@ -309,6 +670,85 @@ test("GET agent operation events emits SSE IDs, honors after, and unsubscribes o
   expect(resumed.status).toBe(200)
   expect(seenAfter).toBe(8)
   await resumed.body!.cancel()
+})
+
+test("approval SSE authenticates and authorizes before subscribing", async () => {
+  let sessions = 0
+  let subscriptions = 0
+  const operations = fakeApprovalOperations({
+    session: () => { sessions += 1; throw new ApprovalOperationsError(404, "not_found", "none") },
+    subscribe: () => { subscriptions += 1; return { unsubscribe() {} } },
+  })
+  const deps = fakeDeps({ approvalOperations: operations })
+  const unauthenticated = await handleWebRequest(get("/api/operations/approvals/events"), deps)
+  expect(unauthenticated.status).toBe(400)
+  expect(sessions).toBe(0)
+  expect(subscriptions).toBe(0)
+
+  const hidden = await handleWebRequest(get("/api/operations/approvals/events", auth), deps)
+  expect(hidden.status).toBe(404)
+  expect(sessions).toBe(1)
+  expect(subscriptions).toBe(0)
+})
+
+test("approval SSE prefers query after, validates safe cursors, frames safe events, and cancels", async () => {
+  let seenAfter = -1
+  let sessionInput: unknown[] = []
+  let unsubscribed = false
+  const operations = fakeApprovalOperations({
+    session: (principal, context) => {
+      sessionInput = [principal, context]
+      return { feature: true, coreEnabled: false, role: "viewer", canDecide: false, pendingCount: 1 }
+    },
+    subscribe: (after, callback) => {
+      seenAfter = after
+      callback({
+        kind: "approval_changed", approvalId: "approval-1", pendingCount: 1,
+        ts: 10, sequence: 5, conversationId: "secret-conversation", detail: { secret: true },
+      } as unknown as ApprovalOperationsEvent)
+      return { unsubscribe: () => { unsubscribed = true } }
+    },
+  })
+  const response = await handleWebRequest(get(
+    "/api/operations/approvals/events?after=4",
+    { ...auth, "last-event-id": "invalid-but-ignored" },
+  ), fakeDeps({ approvalOperations: operations }))
+  expect(response.status).toBe(200)
+  expect(response.headers.get("content-type")).toContain("text/event-stream")
+  expect(response.headers.get("cache-control")).toBe("no-cache")
+  expect(response.headers.get("x-accel-buffering")).toBe("no")
+  expect(sessionInput).toEqual([{ surface: "web", id: "operator@example.com" }, "workspace"])
+  expect(seenAfter).toBe(4)
+  const reader = response.body!.getReader()
+  const frame = new TextDecoder().decode((await reader.read()).value)
+  expect(frame).toBe(`id: 5\ndata: ${JSON.stringify({ kind: "approval_changed", approvalId: "approval-1", pendingCount: 1, ts: 10, sequence: 5 })}\n\n`)
+  expect(frame).not.toContain("conversation")
+  expect(frame).not.toContain("detail")
+  await reader.cancel()
+  expect(unsubscribed).toBe(true)
+
+  const invalid = ["", "-1", "1.5", "9007199254740992"]
+  for (const after of invalid) {
+    const rejected = await handleWebRequest(get(`/api/operations/approvals/events?after=${after}`, auth), fakeDeps())
+    expect(rejected.status).toBe(400)
+    expect(rejected.headers.get("cache-control")).toBe("no-store")
+    expect(await rejected.json()).toEqual({ error: "invalid_request", recovery: "none" })
+  }
+})
+
+test("approval SSE accepts Last-Event-ID and preserves restart snapshot resets", async () => {
+  let after = -1
+  const reset: ApprovalOperationsEvent = { kind: "snapshot_required", pendingCount: 4, ts: 20, sequence: 0 }
+  const response = await handleWebRequest(get(
+    "/api/operations/approvals/events",
+    { ...auth, "last-event-id": "8" },
+  ), fakeDeps({ approvalOperations: fakeApprovalOperations({
+    subscribe: (cursor, callback) => { after = cursor; callback(reset); return { unsubscribe() {} } },
+  }) }))
+  expect(after).toBe(8)
+  const reader = response.body!.getReader()
+  expect(new TextDecoder().decode((await reader.read()).value)).toBe(`id: 0\ndata: ${JSON.stringify(reset)}\n\n`)
+  await reader.cancel()
 })
 
 test("GET /api/hub-config → 200 JSON config", async () => {

@@ -1,8 +1,6 @@
 import type { StatusSnapshot } from "./statusRegistry"
 import type { AuditEvent, AuditSummary } from "./types"
-import type { PendingApproval } from "./approval"
 import { renderHealth } from "./metrics"
-import { pendingApprovalsToJson, type PendingApprovalJson } from "./webActions"
 
 export interface WebInput {
   now: number
@@ -11,7 +9,6 @@ export interface WebInput {
   audit: AuditSummary
   recent: AuditEvent[]       // recent ledger rows for the activity feed
   pendingApprovals: number
-  pendingApprovalList: PendingApproval[]   // NEW
 }
 
 export interface DashboardJson {
@@ -19,7 +16,6 @@ export interface DashboardJson {
   uptimeSec: number
   routeRate10m: number
   pendingApprovals: number
-  pendingApprovalList: PendingApprovalJson[]   // NEW
   agents: { name: string; alive: boolean; busy: boolean; contextFill: number; queueDepth: number; costUsd: number; replicas: number }[]
   ephemerals: { jobId: string; agent: string; task: string }[]
   audit: AuditSummary
@@ -36,7 +32,6 @@ export function renderDashboardJson(i: WebInput): DashboardJson {
     uptimeSec: body.uptimeSec,
     routeRate10m: i.status.routeRate10m,
     pendingApprovals: i.pendingApprovals,
-    pendingApprovalList: pendingApprovalsToJson(i.pendingApprovalList),
     agents: i.status.agents.map((a) => ({
       name: a.name, alive: a.alive, busy: a.busy, contextFill: a.fillPct,
       queueDepth: a.queueDepth, costUsd: a.costUsd ?? 0, replicas: a.replicas ?? 1,
@@ -156,26 +151,138 @@ function render(d){
     return '<div>'+fmtTime(e.ts)+'  '+esc(e.kind)+'  '+esc(e.actor)+'  '+esc(e.action)+
       (e.target?'  '+esc(e.target):'')+(e.outcome!=='ok'?'  ['+esc(e.outcome)+']':'')+'</div>';
   }).join('') || '<div class="muted">no events</div>';
-  renderApprovals(d.pendingApprovalList);
   $('updated').textContent='updated '+fmtTime(Date.now());
 }
-function poll(){ fetch('api/status').then(function(r){ return r.json(); }).then(render).catch(function(){}); }
+var approvalDecisionPending = false, approvalReloadRequired = false, approvalLoadGeneration = 0;
+function poll(){
+  fetch('api/status').then(function(r){ return r.json(); }).then(render).catch(function(){});
+  if (!approvalDecisionPending) {
+    var generation = ++approvalLoadGeneration;
+    loadApprovals(generation).then(function(items){
+      if (items === null || generation !== approvalLoadGeneration) return;
+      approvalReloadRequired = false;
+      setApprovalButtonsDisabled(false);
+    }).catch(function(){});
+  }
+}
 poll(); setInterval(poll, 3000);
 
 function renderApprovals(list){
-  $('approvals').innerHTML = list.length ? list.map(function(a){
-    return '<div style="margin-bottom:8px">'+esc(a.summary)+' <span class="muted">('+esc(a.kind)+' · '+esc(a.target)+' · by '+esc(a.actor)+')</span> '+
-      '<button data-appr="'+a.id+'" data-decision="grant">Approve</button> '+
-      '<button data-appr="'+a.id+'" data-decision="deny">Deny</button></div>';
-  }).join('') : 'no pending approvals';
+  var root = $('approvals');
+  root.textContent = '';
+  if (!Array.isArray(list) || list.length === 0) {
+    root.textContent = 'no pending approvals';
+    return;
+  }
+  list.forEach(function(a){
+    var row = document.createElement('div');
+    row.style.marginBottom = '8px';
+    var summary = document.createElement('span');
+    summary.textContent = String(a.summary);
+    row.appendChild(summary);
+    row.appendChild(document.createTextNode(' '));
+    var context = document.createElement('span');
+    context.className = 'muted';
+    var requestedBy = a.requestedBy || {};
+    context.textContent = '('+String(a.kind)+' · '+String(a.target)+' · by '+
+      String(requestedBy.surface || '')+':'+String(requestedBy.id || '')+') ';
+    row.appendChild(context);
+    ['grant', 'deny'].forEach(function(decision){
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = decision === 'grant' ? 'Approve' : 'Deny';
+      button.setAttribute('data-appr', String(a.id));
+      button.setAttribute('data-version', String(a.version));
+      button.setAttribute('data-decision', decision);
+      row.appendChild(button);
+      row.appendChild(document.createTextNode(' '));
+    });
+    root.appendChild(row);
+  });
+}
+function findApprovalButton(id, decision, version){
+  var buttons = document.querySelectorAll('#approvals [data-appr]');
+  for (var i=0; i<buttons.length; i++) {
+    if (buttons[i].getAttribute('data-appr') === id &&
+      buttons[i].getAttribute('data-decision') === decision &&
+      buttons[i].getAttribute('data-version') === version) return buttons[i];
+  }
+  return null;
+}
+function setApprovalButtonsDisabled(disabled){
+  var buttons = document.querySelectorAll('#approvals [data-appr]');
+  for (var i=0; i<buttons.length; i++) buttons[i].disabled = disabled;
+}
+function loadApprovals(generation){
+  return fetch('api/approvals').then(function(response){
+    if (!response.ok) throw new Error('approval_list_failed');
+    return response.json();
+  }).then(function(page){
+    if (generation !== approvalLoadGeneration) return null;
+    var items = page && Array.isArray(page.items) ? page.items : [];
+    renderApprovals(items);
+    return items;
+  });
+}
+function reloadCanonicalApprovals(){
+  approvalDecisionPending = false;
+  approvalReloadRequired = true;
+  var generation = ++approvalLoadGeneration;
+  return loadApprovals(generation).then(function(items){
+    if (items === null || generation !== approvalLoadGeneration) return;
+    approvalReloadRequired = false;
+    setApprovalButtonsDisabled(false);
+  }).catch(function(){
+    if (generation !== approvalLoadGeneration) return;
+    setApprovalButtonsDisabled(true);
+  });
+}
+function recoverAmbiguousApproval(id, decision, version, key, retried){
+  approvalReloadRequired = true;
+  var generation = ++approvalLoadGeneration;
+  return loadApprovals(generation).then(function(items){
+    if (items === null || generation !== approvalLoadGeneration) return;
+    if (!retried) {
+      var current = items.find(function(item){
+        return String(item.id) === id && String(item.version) === version && item.state === 'pending';
+      });
+      var retryButton = current ? findApprovalButton(id, decision, version) : null;
+      if (retryButton) return decideApproval(retryButton, key, true);
+    }
+    approvalDecisionPending = false;
+    approvalReloadRequired = false;
+    setApprovalButtonsDisabled(false);
+  }).catch(function(){
+    if (generation !== approvalLoadGeneration) return;
+    approvalDecisionPending = false;
+    approvalReloadRequired = true;
+    setApprovalButtonsDisabled(true);
+  });
+}
+function decideApproval(btn, key, retried){
+  var id = btn.getAttribute('data-appr');
+  var decision = btn.getAttribute('data-decision');
+  var version = btn.getAttribute('data-version');
+  if (!id || !version || (decision !== 'grant' && decision !== 'deny')) return Promise.resolve();
+  approvalLoadGeneration += 1;
+  approvalDecisionPending = true;
+  setApprovalButtonsDisabled(true);
+  return fetch('api/approvals/'+encodeURIComponent(id), {
+    method: 'POST', headers: {'content-type':'application/json', 'Idempotency-Key': key},
+    body: JSON.stringify({decision: decision, expectedVersion: version}),
+  }).then(function(response){
+    if (response.status === 409) return reloadCanonicalApprovals();
+    if (!response.ok) return reloadCanonicalApprovals();
+    return reloadCanonicalApprovals();
+  }, function(){
+    return recoverAmbiguousApproval(id, decision, version, key, retried);
+  });
 }
 document.addEventListener('click', function(ev){
   var btn = ev.target.closest('[data-appr]');
-  if (!btn) return;
-  fetch('api/approvals/'+btn.getAttribute('data-appr'), {
-    method: 'POST', headers: {'content-type':'application/json'},
-    body: JSON.stringify({decision: btn.getAttribute('data-decision')}),
-  }).then(poll);
+  if (!btn || approvalDecisionPending || approvalReloadRequired) return;
+  var key = crypto.randomUUID();
+  void decideApproval(btn, key, false);
 });
 
 var currentChannel = null, es = null, currentMode = 'chat';

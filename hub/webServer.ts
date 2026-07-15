@@ -6,6 +6,9 @@ import type { HubChangeClassification } from "./hubConfigDraft"
 import { AgentOperationsError, type AgentOperationsService } from "./operations/agentService"
 import type { AgentOperationsEvent } from "./operations/agentEvents"
 import type { WorkspaceRole } from "./operations/access"
+import { ApprovalOperationsError, type ApprovalAccessContext, type ApprovalOperationsService } from "./approvalService"
+import type { ApprovalListQuery, ApprovalPrincipal } from "./approvalTypes"
+import type { ApprovalOperationsEvent } from "./approvalEvents"
 import type { Conversation, ConversationUpdate, Message, SyncMode, TransportLink } from "./conversations/types"
 import type { ConversationEvent } from "./conversations/events"
 import { ConversationForbiddenError, ConversationValidationError, MAX_MESSAGES_PAGE_SIZE } from "./conversations/service"
@@ -17,7 +20,7 @@ export interface ChannelInfo { channelId: string; name?: string; agent: string }
 export interface WebDeps {
   collect: () => WebInput
   requireUser: (req: Request) => string | null
-  resolveApproval: (id: string, decision: "grant" | "deny", actor: string) => Promise<"granted" | "denied" | "not_found">
+  approvalOperations: Pick<ApprovalOperationsService, "session" | "list" | "get" | "decide" | "subscribe">
   listChannels: () => ChannelInfo[]
   fetchChannelHistory: (channelId: string) => Promise<ChannelEvent[]>
   fetchChannelTimeline: (channelId: string) => Promise<TraceRecord[]>
@@ -49,6 +52,28 @@ export interface WebDeps {
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } })
+
+const approvalJson = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
+  status,
+  headers: { "content-type": "application/json", "cache-control": "no-store" },
+})
+
+const invalidApprovalRequest = (): ApprovalOperationsError =>
+  new ApprovalOperationsError(400, "invalid_request", "none")
+
+function approvalErrorResponse(error: unknown): Response {
+  if (error instanceof ApprovalOperationsError) {
+    return approvalJson({
+      error: error.code,
+      recovery: error.recovery,
+      ...(error.status === 409 && error.canonical !== null ? { canonical: error.canonical } : {}),
+    }, error.status)
+  }
+  if (error instanceof URIError) {
+    return approvalJson({ error: "invalid_request", recovery: "none" }, 400)
+  }
+  return approvalJson({ error: "approval_unavailable", recovery: "reload" }, 500)
+}
 
 function sseResponse(subscribe: (cb: (evt: ChannelEvent) => void) => () => void): Response {
   let unsubscribe: () => void = () => {}
@@ -89,12 +114,164 @@ function agentOperationsSseResponse(subscribe: (cb: (event: AgentOperationsEvent
   return new Response(stream, { status: 200, headers: { "content-type": "text/event-stream", "cache-control": "no-cache" } })
 }
 
+function safeApprovalEvent(event: ApprovalOperationsEvent): ApprovalOperationsEvent {
+  if (event.kind === "approval_changed") {
+    return {
+      kind: event.kind,
+      approvalId: event.approvalId,
+      pendingCount: event.pendingCount,
+      ts: event.ts,
+      sequence: event.sequence,
+    }
+  }
+  if (event.kind === "approvals_snapshot") {
+    return {
+      kind: event.kind,
+      pendingCount: event.pendingCount,
+      ts: event.ts,
+      sequence: event.sequence,
+    }
+  }
+  return {
+    kind: event.kind,
+    ...(event.pendingCount === undefined ? {} : { pendingCount: event.pendingCount }),
+    ts: event.ts,
+    sequence: event.sequence,
+  }
+}
+
+function approvalOperationsSseResponse(
+  subscribe: (cb: (event: ApprovalOperationsEvent) => void) => { unsubscribe(): void },
+): Response {
+  let unsubscribe: () => void = () => {}
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      const encoder = new TextEncoder()
+      const subscription = subscribe(event => {
+        const safe = safeApprovalEvent(event)
+        controller.enqueue(encoder.encode(`id: ${safe.sequence}\ndata: ${JSON.stringify(safe)}\n\n`))
+      })
+      unsubscribe = () => subscription.unsubscribe()
+    },
+    cancel() { unsubscribe() },
+  })
+  return new Response(stream, {
+    status: 200,
+    headers: {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      "x-accel-buffering": "no",
+    },
+  })
+}
+
 const bodyJson = async (req: Request) => await req.json().catch(() => null) as Record<string, unknown> | null
 const nonNegativeInteger = (value: string | null, fallback: number): number | null => {
   if (value === null) return fallback
   if (!/^\d+$/.test(value)) return null
   const parsed = Number(value)
   return Number.isSafeInteger(parsed) ? parsed : null
+}
+
+const APPROVAL_QUERY_KEYS = new Set([
+  "group", "state", "risk", "kind", "requester", "conversationId", "createdFrom", "createdTo",
+  "decisionFrom", "decisionTo", "search", "cursor", "limit",
+])
+const APPROVAL_GROUPS = new Set(["pending", "history"])
+const APPROVAL_STATES = new Set(["pending", "granted", "denied", "expired", "interrupted"])
+const APPROVAL_RISKS = new Set(["low", "elevated", "destructive"])
+
+function validateRawQueryEncoding(url: URL): void {
+  if (url.search.length <= 1) return
+  for (const pair of url.search.slice(1).split("&")) {
+    const separator = pair.indexOf("=")
+    const rawName = separator < 0 ? pair : pair.slice(0, separator)
+    const rawValue = separator < 0 ? "" : pair.slice(separator + 1)
+    decodeURIComponent(rawName.replace(/\+/g, " "))
+    decodeURIComponent(rawValue.replace(/\+/g, " "))
+  }
+}
+
+function approvalInteger(value: string, limit: boolean): number {
+  const syntax = limit ? /^(?:0|[1-9][0-9]*)$/ : /^-?(?:0|[1-9][0-9]*)$/
+  if (!syntax.test(value)) throw invalidApprovalRequest()
+  const parsed = Number(value)
+  if (!Number.isSafeInteger(parsed)) throw invalidApprovalRequest()
+  return parsed
+}
+
+function approvalListQuery(url: URL, defaultGroup?: "pending"): ApprovalListQuery {
+  try {
+    validateRawQueryEncoding(url)
+  } catch (error) {
+    if (error instanceof URIError) throw error
+    throw invalidApprovalRequest()
+  }
+  const values = new Map<string, string>()
+  for (const [key, value] of url.searchParams) {
+    if (!APPROVAL_QUERY_KEYS.has(key) || values.has(key)) throw invalidApprovalRequest()
+    values.set(key, value)
+  }
+
+  const group = values.get("group") ?? defaultGroup
+  if (group === undefined || !APPROVAL_GROUPS.has(group)) throw invalidApprovalRequest()
+  const state = values.get("state")
+  if (state !== undefined && (!APPROVAL_STATES.has(state)
+    || (group === "pending" && state !== "pending")
+    || (group === "history" && state === "pending"))) {
+    throw invalidApprovalRequest()
+  }
+  const risk = values.get("risk")
+  if (risk !== undefined && !APPROVAL_RISKS.has(risk)) throw invalidApprovalRequest()
+  const requester = values.get("requester")
+  if (requester !== undefined) {
+    const separator = requester.indexOf(":")
+    if (separator <= 0 || separator === requester.length - 1
+      || !/^[a-z0-9_-]+$/.test(requester.slice(0, separator))) {
+      throw invalidApprovalRequest()
+    }
+  }
+
+  const nonEmpty = (key: string): string | undefined => {
+    const value = values.get(key)
+    if (value !== undefined && value.length === 0) throw invalidApprovalRequest()
+    return value
+  }
+  const createdFrom = values.has("createdFrom") ? approvalInteger(values.get("createdFrom")!, false) : undefined
+  const createdTo = values.has("createdTo") ? approvalInteger(values.get("createdTo")!, false) : undefined
+  const decisionFrom = values.has("decisionFrom") ? approvalInteger(values.get("decisionFrom")!, false) : undefined
+  const decisionTo = values.has("decisionTo") ? approvalInteger(values.get("decisionTo")!, false) : undefined
+  if (createdFrom !== undefined && createdTo !== undefined && createdFrom > createdTo) throw invalidApprovalRequest()
+  if (decisionFrom !== undefined && decisionTo !== undefined && decisionFrom > decisionTo) throw invalidApprovalRequest()
+  const limit = values.has("limit") ? approvalInteger(values.get("limit")!, true) : undefined
+  if (limit !== undefined && (limit < 1 || limit > 100)) throw invalidApprovalRequest()
+
+  return {
+    group: group as "pending" | "history",
+    ...(state === undefined ? {} : { state: state as ApprovalListQuery["state"] }),
+    ...(risk === undefined ? {} : { risk: risk as ApprovalListQuery["risk"] }),
+    ...(nonEmpty("kind") === undefined ? {} : { kind: values.get("kind")! }),
+    ...(requester === undefined ? {} : { requester }),
+    ...(nonEmpty("conversationId") === undefined ? {} : { conversationId: values.get("conversationId")! }),
+    ...(createdFrom === undefined ? {} : { createdFrom }),
+    ...(createdTo === undefined ? {} : { createdTo }),
+    ...(decisionFrom === undefined ? {} : { decisionFrom }),
+    ...(decisionTo === undefined ? {} : { decisionTo }),
+    ...(nonEmpty("search") === undefined ? {} : { search: values.get("search")! }),
+    ...(nonEmpty("cursor") === undefined ? {} : { cursor: values.get("cursor")! }),
+    ...(limit === undefined ? {} : { limit }),
+  }
+}
+
+function requireApprovalAccess(
+  operations: WebDeps["approvalOperations"],
+  principal: ApprovalPrincipal,
+  context: Exclude<ApprovalAccessContext, "adapter">,
+): void {
+  const access = operations.session(principal, context)
+  const visible = access.role !== "hidden"
+    && (context === "workspace" ? access.feature : access.coreEnabled)
+  if (!visible) throw new ApprovalOperationsError(404, "not_found", "none")
 }
 
 /** Route a workspace/legacy dashboard/API request. Workspace GETs and
@@ -128,7 +305,14 @@ export async function handleWebRequest(
   if (path === "/" || path === "/api/status") return new Response("method", { status: 405 })
 
   // Every route below requires the identity header the ReadyApp proxy sets.
-  const approvalMatch = /^\/api\/approvals\/([^/]+)$/.exec(path)
+  const approvalsMatch = path === "/api/approvals"
+  const approvalDecisionMatch = /^\/api\/approvals\/([^/]+)$/.exec(path)
+  const operationsApprovalsMatch = path === "/api/operations/approvals"
+  const operationsApprovalEventsMatch = path === "/api/operations/approvals/events"
+  const operationsApprovalDecisionMatch = /^\/api\/operations\/approvals\/([^/]+)\/decision$/.exec(path)
+  const operationsApprovalDetailMatch = /^\/api\/operations\/approvals\/([^/]+)$/.exec(path)
+  const isApprovalRoute = approvalsMatch || approvalDecisionMatch || operationsApprovalsMatch
+    || operationsApprovalEventsMatch || operationsApprovalDecisionMatch || operationsApprovalDetailMatch
   const channelHistoryMatch = /^\/api\/channel\/([^/]+)\/history$/.exec(path)
   const channelTimelineMatch = /^\/api\/channel\/([^/]+)\/timeline$/.exec(path)
   const channelStreamMatch = /^\/api\/channel\/([^/]+)\/stream$/.exec(path)
@@ -153,7 +337,7 @@ export async function handleWebRequest(
   const conversationMessagesMatch = /^\/api\/conversations\/([^/]+)\/messages$/.exec(path)
   const conversationEventsMatch = /^\/api\/conversations\/([^/]+)\/events$/.exec(path)
   const conversationLinksMatch = /^\/api\/conversations\/([^/]+)\/links$/.exec(path)
-  const isGuardedRoute = path === "/api/channels" || approvalMatch || channelHistoryMatch ||
+  const isGuardedRoute = path === "/api/channels" || isApprovalRoute || channelHistoryMatch ||
     channelTimelineMatch || channelStreamMatch || channelMessageMatch || commandMatch ||
     agentsMatch || agentPreviewMatch || agentConfirmMatch || operationsAgentsMatch || operationsAgentEventsMatch ||
     operationsAgentDetailMatch || operationsAgentConfigPreviewMatch || operationsAgentConfigConfirmMatch ||
@@ -166,16 +350,32 @@ export async function handleWebRequest(
     // the identity header returns 400 (missing_identity) rather than 405 — intentional,
     // so an unauthenticated caller can't probe which methods/routes exist.
     const email = deps.requireUser(req)
-    if (!email) return json({ error: "missing_identity" }, 400)
+    if (!email) {
+      return isApprovalRoute
+        ? approvalJson({ error: "missing_identity" }, 400)
+        : json({ error: "missing_identity" }, 400)
+    }
 
     if (sessionMatch && method === "GET") {
-      const access = deps.agentSessionAccess(email)
-      return json({
-        identity: email,
-        agents: deps.collect().status.agents.filter(({ mode }) => mode === "persistent").map(({ name, alive, busy }) => ({ name, alive, busy })),
-        features: { agents: access.feature },
-        permissions: { agents: access.role },
-      })
+      try {
+        const agentAccess = deps.agentSessionAccess(email)
+        const approvalAccess = deps.approvalOperations.session({ surface: "web", id: email }, "workspace")
+        return approvalJson({
+          identity: email,
+          agents: deps.collect().status.agents.filter(({ mode }) => mode === "persistent").map(({ name, alive, busy }) => ({ name, alive, busy })),
+          features: { agents: agentAccess.feature, approvals: approvalAccess.feature },
+          permissions: { agents: agentAccess.role, approvals: approvalAccess.role },
+          approvalState: {
+            producing: approvalAccess.coreEnabled,
+            canDecide: approvalAccess.canDecide,
+            pendingCount: approvalAccess.feature && approvalAccess.role !== "hidden"
+              ? approvalAccess.pendingCount
+              : 0,
+          },
+        })
+      } catch (error) {
+        return approvalErrorResponse(error)
+      }
     }
 
     const conversationAction = (conversationsMatch && (method === "GET" || method === "POST")) ||
@@ -255,14 +455,97 @@ export async function handleWebRequest(
       throw error
     }
 
-    if (method === "GET" && path === "/api/channels") return json(deps.listChannels())
+    if (isApprovalRoute) {
+      const principal: ApprovalPrincipal = { surface: "web", id: email }
+      try {
+        if (method === "GET" && operationsApprovalEventsMatch) {
+          requireApprovalAccess(deps.approvalOperations, principal, "workspace")
+          validateRawQueryEncoding(url)
+          for (const key of url.searchParams.keys()) {
+            if (key !== "after") throw invalidApprovalRequest()
+          }
+          if (url.searchParams.getAll("after").length > 1) throw invalidApprovalRequest()
+          const cursorText = url.searchParams.has("after")
+            ? url.searchParams.get("after")
+            : req.headers.get("last-event-id")
+          const after = nonNegativeInteger(cursorText, 0)
+          if (after === null) throw invalidApprovalRequest()
+          return approvalOperationsSseResponse(callback => deps.approvalOperations.subscribe(after, callback))
+        }
 
-    if (method === "POST" && approvalMatch) {
-      const body = (await req.json().catch(() => null)) as { decision?: "grant" | "deny" } | null
-      if (body?.decision !== "grant" && body?.decision !== "deny") return json({ error: "bad_decision" }, 400)
-      const state = await deps.resolveApproval(approvalMatch[1], body.decision, email)
-      return state === "not_found" ? json({ state }, 409) : json({ state })
+        if (method === "GET" && operationsApprovalsMatch) {
+          requireApprovalAccess(deps.approvalOperations, principal, "workspace")
+          return approvalJson(deps.approvalOperations.list(
+            principal,
+            "workspace",
+            approvalListQuery(url),
+          ))
+        }
+        if (method === "GET" && approvalsMatch) {
+          requireApprovalAccess(deps.approvalOperations, principal, "legacy")
+          return approvalJson(deps.approvalOperations.list(
+            principal,
+            "legacy",
+            approvalListQuery(url, "pending"),
+          ))
+        }
+
+        if (method === "POST" && (operationsApprovalDecisionMatch || approvalDecisionMatch)) {
+          const context = operationsApprovalDecisionMatch ? "workspace" : "legacy"
+          const match = operationsApprovalDecisionMatch ?? approvalDecisionMatch!
+          requireApprovalAccess(deps.approvalOperations, principal, context)
+          const approvalId = decodeURIComponent(match[1])
+          // Establish resource visibility before parsing attacker-controlled body fields.
+          const approval = deps.approvalOperations.get(principal, context, approvalId)
+          if (!approval.permissions.canDecide) {
+            // The service authorizes and audits before it validates version/key. Empty sentinels
+            // preserve that service-owned evidence without permitting a mutation if access changes
+            // between this projection and the authorization probe.
+            try {
+              await deps.approvalOperations.decide(principal, context, {
+                approvalId,
+                decision: "grant",
+                expectedVersion: "",
+                idempotencyKey: "",
+              })
+            } catch (error) {
+              if (!(error instanceof ApprovalOperationsError) || error.status !== 400) throw error
+            }
+            throw new ApprovalOperationsError(403, "forbidden", "none")
+          }
+          const contentType = req.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase()
+          if (contentType !== "application/json") throw invalidApprovalRequest()
+          const idempotencyKey = req.headers.get("idempotency-key")
+          if (idempotencyKey === null || idempotencyKey.trim().length === 0) throw invalidApprovalRequest()
+          const body = await bodyJson(req)
+          if ((body?.decision !== "grant" && body?.decision !== "deny")
+            || typeof body.expectedVersion !== "string" || body.expectedVersion.trim().length === 0) {
+            throw invalidApprovalRequest()
+          }
+          return approvalJson(await deps.approvalOperations.decide(principal, context, {
+            approvalId,
+            decision: body.decision,
+            expectedVersion: body.expectedVersion,
+            idempotencyKey,
+          }))
+        }
+
+        if (method === "GET" && operationsApprovalDetailMatch) {
+          requireApprovalAccess(deps.approvalOperations, principal, "workspace")
+          return approvalJson(deps.approvalOperations.get(
+            principal,
+            "workspace",
+            decodeURIComponent(operationsApprovalDetailMatch[1]),
+          ))
+        }
+
+        return new Response("method", { status: 405, headers: { "cache-control": "no-store" } })
+      } catch (error) {
+        return approvalErrorResponse(error)
+      }
     }
+
+    if (method === "GET" && path === "/api/channels") return json(deps.listChannels())
 
     if (method === "GET" && channelHistoryMatch) {
       return json(await deps.fetchChannelHistory(channelHistoryMatch[1]))

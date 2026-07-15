@@ -1,25 +1,4 @@
 import type { InboundMessage } from "./types"
-import type { PendingApproval } from "./approval"
-
-export interface PendingApprovalJson {
-  id: string
-  kind: string
-  target: string
-  actor: string
-  chat?: string
-  summary: string
-  createdAt: number
-  expiresAt: number
-}
-
-/** Project pending approvals for the web panel — drops `fire` (a closure,
- *  not serializable) and `state` (the list only ever contains "pending"). */
-export function pendingApprovalsToJson(list: PendingApproval[]): PendingApprovalJson[] {
-  return list.map((e) => ({
-    id: e.id, kind: e.kind, target: e.target, actor: e.actor, chat: e.chat,
-    summary: e.summary, createdAt: e.createdAt, expiresAt: e.expiresAt,
-  }))
-}
 
 /** Build the InboundMessage for a web-sent chat message — routed through the
  *  exact same orchestrator.handleMessage() path as a Discord message, tagged

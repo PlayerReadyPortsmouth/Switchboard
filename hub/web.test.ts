@@ -1,6 +1,6 @@
 import { test, expect } from "bun:test"
+import { Window } from "happy-dom"
 import { DASHBOARD_HTML, renderDashboardJson } from "./web"
-import type { PendingApproval } from "./approval"
 
 test("the dashboard polls a RELATIVE api/status (works under a subpath mount)", () => {
   expect(DASHBOARD_HTML).toContain("fetch('api/status')")
@@ -24,21 +24,146 @@ test("the dashboard's <script> block is syntactically valid JS", () => {
   expect(() => new Function(m![1]!)).not.toThrow()
 })
 
-test("renderDashboardJson projects pendingApprovalList via webActions", () => {
-  const e: PendingApproval = {
-    id: "appr-1", kind: "outbound", target: "route-a", actor: "hub",
-    summary: "POST → route-a", createdAt: 100, expiresAt: 200, state: "pending", fire: () => {},
-  }
+test("renderDashboardJson keeps only the aggregate approval count", () => {
   const json = renderDashboardJson({
     now: 1000, startedAt: 0,
     status: { now: 1000, agents: [], overseers: [], routes: [], routeRate10m: 0, ephemerals: [] },
     audit: { total: 0, byKind: {}, byOutcome: {}, costUsd: 0, actors: 0 },
-    recent: [], pendingApprovals: 1, pendingApprovalList: [e],
+    recent: [], pendingApprovals: 1,
   })
-  expect(json.pendingApprovalList).toEqual([{
-    id: "appr-1", kind: "outbound", target: "route-a", actor: "hub", chat: undefined,
-    summary: "POST → route-a", createdAt: 100, expiresAt: 200,
+  expect(json.pendingApprovals).toBe(1)
+  expect(json).not.toHaveProperty("pendingApprovalList")
+})
+
+test("legacy approvals load separately and send version-bound idempotent decisions", () => {
+  expect(DASHBOARD_HTML).toContain("fetch('api/approvals')")
+  expect(DASHBOARD_HTML).not.toContain("fetch('/api/approvals')")
+  expect(DASHBOARD_HTML).not.toContain("pendingApprovalList")
+  expect(DASHBOARD_HTML).toContain("data-version")
+  expect(DASHBOARD_HTML).toContain("expectedVersion")
+  expect(DASHBOARD_HTML).toContain("'Idempotency-Key': key")
+  expect(DASHBOARD_HTML.split("crypto.randomUUID()").length - 1).toBe(1)
+  expect(DASHBOARD_HTML).toContain("decideApproval(retryButton, key, true)")
+  expect(DASHBOARD_HTML).toContain("response.status === 409")
+  expect(DASHBOARD_HTML).toContain("if (!response.ok) return reloadCanonicalApprovals();")
+  expect(DASHBOARD_HTML).not.toContain("if (!response.ok) return recoverAmbiguousApproval")
+})
+
+test("legacy approval rendering treats hostile canonical strings as text", () => {
+  const script = DASHBOARD_HTML.match(/<script>([\s\S]*)<\/script>/)?.[1] ?? ""
+  const start = script.indexOf("function renderApprovals(")
+  const end = script.indexOf("function findApprovalButton(", start)
+  expect(start).toBeGreaterThanOrEqual(0)
+  expect(end).toBeGreaterThan(start)
+
+  const window = new Window()
+  window.document.body.innerHTML = '<div id="approvals"></div>'
+  const renderApprovals = new Function(
+    "document",
+    `var $ = function(id){ return document.getElementById(id); };${script.slice(start, end)};return renderApprovals;`,
+  )(window.document) as (items: unknown[]) => void
+  const hostile = "<img src=x onerror=alert(1)>"
+  renderApprovals([{
+    id: "approval-1", version: "opaque-version", summary: hostile, kind: hostile,
+    target: hostile, requestedBy: { surface: "agent", id: hostile },
   }])
+
+  const approvals = window.document.getElementById("approvals")!
+  expect(approvals.textContent).toContain(hostile)
+  expect(approvals.querySelector("img")).toBeNull()
+  expect(approvals.querySelector("button")?.getAttribute("data-version")).toBe("opaque-version")
+})
+
+test("a stale pre-decision poll cannot reopen approvals after canonical recovery fails", async () => {
+  type Deferred<T> = {
+    promise: Promise<T>
+    resolve(value: T): void
+    reject(error: unknown): void
+  }
+  const deferred = <T>(): Deferred<T> => {
+    let resolve!: (value: T) => void
+    let reject!: (error: unknown) => void
+    const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no })
+    return { promise, resolve, reject }
+  }
+  const page = (version: string) => ({ items: [{
+    id: "approval-1", version, summary: "Deploy", kind: "outbound", target: "route-a",
+    state: "pending", requestedBy: { surface: "agent", id: "qa" },
+  }] })
+  const response = (body: unknown) => new Response(JSON.stringify(body), {
+    headers: { "content-type": "application/json" },
+  })
+  const approvalReads: Deferred<Response>[] = []
+  const decisions: Deferred<Response>[] = []
+  const fetchMock = ((input: RequestInfo | URL) => {
+    const url = String(input)
+    if (url === "api/status") return Promise.resolve(response({}))
+    const request = deferred<Response>()
+    if (url === "api/approvals") approvalReads.push(request)
+    else if (url.startsWith("api/approvals/")) decisions.push(request)
+    else throw new Error(`unexpected fetch: ${url}`)
+    return request.promise
+  }) as typeof fetch
+
+  const script = DASHBOARD_HTML.match(/<script>([\s\S]*)<\/script>/)?.[1] ?? ""
+  const start = script.indexOf("var approvalDecisionPending")
+  const end = script.indexOf("var currentChannel", start)
+  expect(start).toBeGreaterThanOrEqual(0)
+  expect(end).toBeGreaterThan(start)
+  const approvalScript = script.slice(start, end).replace("poll(); setInterval(poll, 3000);", "")
+  const window = new Window()
+  window.document.body.innerHTML = '<div id="approvals"></div>'
+  const harness = new Function(
+    "document", "fetch", "crypto", "setInterval",
+    `var $ = function(id){ return document.getElementById(id); };
+     function render(){}
+     ${approvalScript}
+     return {
+       poll: poll,
+       renderApprovals: renderApprovals,
+       decideApproval: decideApproval,
+       state: function(){ return { decisionPending: approvalDecisionPending, reloadRequired: approvalReloadRequired }; }
+     };`,
+  )(
+    window.document,
+    fetchMock,
+    { randomUUID: () => "unused-click-key" },
+    () => 0,
+  ) as {
+    poll(): void
+    renderApprovals(items: unknown[]): void
+    decideApproval(button: unknown, key: string, retried: boolean): Promise<void>
+    state(): { decisionPending: boolean; reloadRequired: boolean }
+  }
+  const flush = () => new Promise(resolve => setTimeout(resolve, 0))
+
+  harness.renderApprovals(page("2").items)
+  harness.poll()
+  const decision = harness.decideApproval(
+    window.document.querySelector('[data-appr="approval-1"][data-decision="grant"]')!,
+    "attempt-1",
+    false,
+  )
+  decisions[0]!.reject(new Error("network ambiguity"))
+  await flush()
+  expect(approvalReads).toHaveLength(2)
+  approvalReads[1]!.reject(new Error("canonical reload unavailable"))
+  await decision
+  expect(harness.state()).toEqual({ decisionPending: false, reloadRequired: true })
+  expect((window.document.querySelector("[data-appr]") as unknown as { disabled: boolean }).disabled).toBe(true)
+
+  approvalReads[0]!.resolve(response(page("1")))
+  await flush()
+  expect(harness.state()).toEqual({ decisionPending: false, reloadRequired: true })
+  expect(window.document.querySelector("[data-appr]")?.getAttribute("data-version")).toBe("2")
+  expect((window.document.querySelector("[data-appr]") as unknown as { disabled: boolean }).disabled).toBe(true)
+
+  harness.poll()
+  approvalReads[2]!.resolve(response(page("3")))
+  await flush()
+  expect(harness.state()).toEqual({ decisionPending: false, reloadRequired: false })
+  expect(window.document.querySelector("[data-appr]")?.getAttribute("data-version")).toBe("3")
+  expect((window.document.querySelector("[data-appr]") as unknown as { disabled: boolean }).disabled).toBe(false)
 })
 
 test("the dashboard HTML has an approvals panel and a channel chat pane", () => {
