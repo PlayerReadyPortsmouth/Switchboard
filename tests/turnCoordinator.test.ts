@@ -145,12 +145,32 @@ describe("TurnCoordinator", () => {
     const f = fixture()
     f.repo.createTransportLink({ id: "link", conversationId: f.conversation.id, adapter: "discord", externalLocationId: "room", label: null, syncMode: "two_way", enabled: true }, 1)
 
-    const result = await f.coordinator.acceptAgentReply({ agent: "architect", kind: "reply", chatId: f.conversation.id, text: "answer", correlationId: "callback-1" })
+    const result = await f.coordinator.acceptAgentReply(
+      { agent: "architect", kind: "reply", chatId: f.conversation.id, text: "answer", correlationId: "callback-1" },
+      { suppressSurfaceDelivery: false },
+    )
 
     expect(result?.message).toMatchObject({ origin: "agent", author: "architect", content: "answer", state: "completed" })
     expect(result?.deliveries).toHaveLength(1)
     expect(f.order).toContain("deliver:completed:0")
     expect(f.repo.listDueDeliveries(999)).toHaveLength(0)
+  })
+
+  test("suppression commits the canonical transcript without creating external deliveries", async () => {
+    const f = fixture()
+    f.repo.createTransportLink({ id: "link", conversationId: f.conversation.id, adapter: "discord", externalLocationId: "room", label: null, syncMode: "two_way", enabled: true }, 1)
+
+    const result = await f.coordinator.acceptAgentReply(
+      { agent: "architect", kind: "reply", chatId: f.conversation.id, text: "approval trigger", correlationId: "callback-suppressed" },
+      { suppressSurfaceDelivery: true },
+    )
+
+    expect(result?.message).toMatchObject({ origin: "agent", content: "approval trigger" })
+    expect(result?.inserted).toBe(true)
+    expect(result?.deliveries).toEqual([])
+    expect(f.repo.listMessages(f.conversation.id).map(message => message.content)).toEqual(["approval trigger"])
+    expect(f.repo.listDueDeliveries(999)).toEqual([])
+    expect(f.delivered).toEqual([])
   })
 
   test("canonical message identity takes precedence over a legacy correlation token", async () => {

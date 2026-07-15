@@ -13,6 +13,7 @@ export interface TurnEventPublisher { publish(event: ConversationEvent): void }
 export interface TurnSurfaceRouter { deliver(message: Message, links: TransportLink[], kind?: "transcript" | "notification", replyToExternalIds?: ReadonlyMap<string, string>): Promise<SurfaceDeliveryResult[]> }
 export type AgentTurnResult = { message: Message; deliveries: Delivery[]; inserted: boolean }
 export type AgentTurnAcceptance = AgentTurnResult | { closed: true; message?: never; deliveries?: never; inserted?: never }
+export interface AgentReplyAcceptanceOptions { suppressSurfaceDelivery?: boolean }
 
 export class TurnCoordinatorClosingError extends Error {
   constructor() { super("Conversation coordinator is shutting down"); this.name = "TurnCoordinatorClosingError" }
@@ -82,7 +83,10 @@ export class TurnCoordinator {
     return result
   }
 
-  async acceptAgentReply(reply: AgentReply): Promise<AgentTurnAcceptance | null> {
+  async acceptAgentReply(
+    reply: AgentReply,
+    options: AgentReplyAcceptanceOptions = {},
+  ): Promise<AgentTurnAcceptance | null> {
     if (this.closing) return { closed: true }
     if (reply.kind !== "reply") return null
     const text = reply.text?.trim()
@@ -91,7 +95,9 @@ export class TurnCoordinator {
     if (!callbackId) return null
     const conversation = this.repo.getConversation(reply.chatId)
     if (!conversation) return null
-    const links = this.repo.listTransportLinks(conversation.id).filter((link) => link.enabled && link.syncMode !== "inbound_only" && link.syncMode !== "notifications_only")
+    const links = options.suppressSurfaceDelivery
+      ? []
+      : this.repo.listTransportLinks(conversation.id).filter((link) => link.enabled && link.syncMode !== "inbound_only" && link.syncMode !== "notifications_only")
     const originatingTurn = reply.messageId ? this.pendingTurns.get(reply.messageId) : undefined
     if (originatingTurn && (originatingTurn.agent !== reply.agent || originatingTurn.message.conversationId !== conversation.id)) return null
     let result: AgentTurnResult

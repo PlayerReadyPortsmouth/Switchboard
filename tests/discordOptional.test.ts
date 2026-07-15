@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test"
+import { readFileSync } from "fs"
+import { join } from "path"
 import type { HubConfig } from "../hub/types"
 import { createDiscordRuntime, resolveDiscordStartup } from "../hub/config"
 
@@ -28,4 +30,20 @@ test("disabled Discord constructs and registers nothing", () => {
   const runtime = createDiscordRuntime({ enabled: false }, () => { calls.push("construct"); return { register: () => calls.push("register") } })
   expect(runtime).toBeUndefined()
   expect(calls).toEqual([])
+})
+
+test("approval notification composition is conditional and registered before adapter startup", () => {
+  const source = readFileSync(join(import.meta.dir, "..", "hub", "index.ts"), "utf8")
+  const database = source.indexOf("new SqliteApprovalHistoryRepository")
+  const firstTransport = source.indexOf("for (const [name, cfg] of Object.entries(agents))")
+  const adapterStart = source.indexOf("await surfaceRouter.startAll")
+  const lifecycle = source.indexOf("gateway.onConnectionState")
+
+  expect(source).toMatch(/discordGateway\s*\?\s*new DiscordApprovalNotificationPort/)
+  expect(database).toBeGreaterThan(source.indexOf("const audit = new AuditLog"))
+  expect(database).toBeLessThan(firstTransport)
+  expect(lifecycle).toBeGreaterThan(database)
+  expect(lifecycle).toBeLessThan(adapterStart)
+  expect(source).toContain("deactivateNotificationAdapter(\"discord\")")
+  expect(source).toContain("await approvalService.activateNotificationAdapter(\"discord\")")
 })

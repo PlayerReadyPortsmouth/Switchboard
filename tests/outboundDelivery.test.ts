@@ -86,3 +86,25 @@ test("a destination outside the host allowlist is blocked without any fetch", as
   expect(h.calls).toEqual([])
   expect(h.dead).toEqual([])
 })
+
+test("delivery stays pending until the injected fetch reports its final status", async () => {
+  let resolveFetch!: (value: { status: number }) => void
+  const delivery = new OutboundDelivery({
+    fetch: async () => await new Promise(resolve => { resolveFetch = resolve }),
+    appendLog: () => {},
+    appendDeadLetter: () => {},
+    sleep: async () => {},
+    now: () => 1,
+    secretFor: () => undefined,
+  })
+
+  const pending = delivery.deliver(route(), "body")
+  const state = await Promise.race([
+    pending.then(() => "fulfilled" as const),
+    Promise.resolve("pending" as const),
+  ])
+  expect(state).toBe("pending")
+
+  resolveFetch({ status: 202 })
+  await expect(pending).resolves.toEqual({ ok: true, attempts: 1, status: 202 })
+})

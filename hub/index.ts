@@ -58,6 +58,7 @@ import { ToolUsageRegistry } from "./toolUsageRegistry"
 import { renderToolBoard } from "./toolBoard"
 import { matchDirectCommand, runDirect, interpolateArgs, type DirectExecutor } from "./directCommands"
 import { OutboundDelivery } from "./outboundDelivery"
+import { captureOutboundEffect, executeOutboundApproval, type OutboundEffectSnapshot } from "./outboundApproval"
 import { matchOutbound, renderBody } from "./outbound"
 import { AuditLog } from "./auditLog"
 import { parseJsonlTail, shouldRotate, rotationsToPrune } from "./audit"
@@ -65,13 +66,20 @@ import { TurnTrace, parseTraceTail, renderTrace, type TraceFilter, type TraceRec
 import { sweepTrace } from "./traceSweep"
 import { runDoctor, renderDoctor, type DoctorFacts } from "./doctor"
 import { buildReplay, renderReplay, chunkLines } from "./replay"
-import { ApprovalRegistry, renderApprovalCard, parseApprovalCustomId, type ApprovalRequest, type ApprovalDecision, type ApprovalFire } from "./approval"
+import { approvalDecisionKey, parseApprovalCustomId } from "./approval"
+import { DiscordApprovalNotificationPort } from "./approvalDiscordNotifications"
+import { ApprovalEventStream } from "./approvalEvents"
+import { ApprovalPolicyRegistry, createOutboundApprovalPolicy } from "./approvalPolicy"
+import { SqliteApprovalHistoryRepository } from "./approvalRepository"
+import { ApprovalOperationsError, ApprovalOperationsService } from "./approvalService"
+import type { ApprovalOrigin, ApprovalPrincipal } from "./approvalTypes"
+import { HeldApprovalRegistry } from "./heldApprovalRegistry"
 import { startMetricsServer } from "./metricsServer"
 import { renderHealth, type MetricsInput } from "./metrics"
 import { startWebServer } from "./webServer"
 import { type WebInput } from "./web"
 import { ChannelStream, type ChannelEvent } from "./channelStream"
-import { pendingApprovalsToJson, buildWebInboundMessage, formatMirrorLine } from "./webActions"
+import { buildWebInboundMessage, formatMirrorLine } from "./webActions"
 import { buildAuditText, buildToolsText } from "./commandActions"
 import type { WebDeps, ChannelInfo } from "./webServer"
 import { ConsultRegistry, mayConsult, consultAnswerFromReply } from "./consult"
@@ -82,7 +90,7 @@ import { resolveOutboxFile } from "./outboxAttach"
 import { makeAttachHandler } from "./attachHandler"
 import { publishArtifact } from "./publishLink"
 import { selectExpired } from "./publishCleanup"
-import { randomBytes, randomUUID } from "crypto"
+import { createHash, randomBytes, randomUUID } from "crypto"
 import { Database } from "bun:sqlite"
 import { ConversationEventStream, ConversationService, createDiscordConversationMigrator, inboundLinkRoute, LegacyDiscordCompatibilityRouter, ProductionIngressGate, SqliteConversationRepository, TurnCoordinator } from "./conversations"
 import { DeliveryWorker, DiscordAdapter, SurfaceRouter } from "./surfaces"
@@ -185,9 +193,9 @@ let resolveLegacyDiscordChatId = (chatId: string): string | null => chatId
 const deployApprover = hub.deployApproverUserId ?? ""
 // Approval buttons are pressable only by configured approvers (default: the
 // deploy approver); everything else keeps the existing deploy/gated-action gate.
-const approvalApprovers = hub.approvals?.approvers ?? (deployApprover ? [deployApprover] : [])
+const discordApprovers = hub.approvals?.approvers ?? (deployApprover ? [deployApprover] : [])
 if (discordGateway) gateway.setNotifyButtonGate((customId, userId) => {
-  if (customId.startsWith("approval:")) return approvalApprovers.includes(userId)
+  if (customId.startsWith("approval:")) return discordApprovers.includes(userId)
   return isDeployAuthorized(customId, userId, deployApprover) &&
     (requiresApprover(customId, hub.gatedActions ?? []) ? !!deployApprover && userId === deployApprover : true)
 })
@@ -522,7 +530,9 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): ProcessAgen
     catch { return byTitle() }
   })
   // Agent-initiated outbound: fire a named (operator-configured) outbound route.
-  socket.onPostWebhook(({ target, body }) => { fireOutboundNamed(target, body, `agent:${name}`, name) })
+  socket.onPostWebhook(({ target, body }) => {
+    fireOutboundNamed(target, body, { surface: "agent", id: name }, name)
+  })
   // Agent-initiated consult: ask another agent and get its reply back. Gated by
   // consult.enabled + the target's access.consultableBy; recorded as a `consult`
   // event. The target runs on a virtual channel so its reply is intercepted in
@@ -742,6 +752,79 @@ const audit = new AuditLog({
 const auditOptedOut = (agent?: string): boolean =>
   !!agent && agents[agent]?.runtime.audit === false
 
+// Canonical conversations and approvals share one SQLite connection and one
+// migration owner. Reconciliation completes before any persistent transport,
+// webhook listener, cron tick, or other approval-capable producer can start.
+const conversationDb = new Database(
+  hub.conversationDbFile ?? join(hub.stateDir, "switchboard.sqlite"),
+  { create: true },
+)
+const conversationRepo = new SqliteConversationRepository(conversationDb)
+const approvalRepo = new SqliteApprovalHistoryRepository(conversationDb)
+const approvalPolicies = new ApprovalPolicyRegistry()
+approvalPolicies.register(createOutboundApprovalPolicy(randomBytes(32)))
+const approvalHeld = new HeldApprovalRegistry()
+const approvalEvents = new ApprovalEventStream()
+const discordApprovalNotifications = discordGateway ? new DiscordApprovalNotificationPort(
+  discordGateway,
+  { ...(hub.approvals?.channelId ? { channelId: hub.approvals.channelId } : {}) },
+) : undefined
+const approvalService = new ApprovalOperationsService({
+  repository: approvalRepo,
+  held: approvalHeld,
+  policies: approvalPolicies,
+  events: approvalEvents,
+  workspace: hub.workspace,
+  approvals: hub.approvals,
+  approversBySurface: { discord: discordApprovers },
+  audit: input => audit.record(input),
+  relatedAudit: correlationId => audit.recent({ corr: correlationId, limit: 100 }),
+  canViewConversation: (principal, conversationId) => (
+    principal.surface === "web"
+    && conversationRepo.getParticipant(conversationId, principal.id) !== null
+  ),
+  now: () => Date.now(),
+  id: () => randomUUID(),
+  ttlMs: hub.approvals?.ttlMs ?? 3_600_000,
+  ...(discordApprovalNotifications ? { notifications: [discordApprovalNotifications] } : {}),
+})
+
+function auditApprovalBoundaryFailure(
+  action: string,
+  target?: string,
+  correlationId?: string,
+): void {
+  audit.record({
+    kind: "approval",
+    actor: "hub",
+    action,
+    outcome: "error",
+    ...(target === undefined ? {} : { target }),
+    ...(correlationId === undefined ? {} : { corr: correlationId }),
+  })
+}
+
+function pendingApprovalCount(): number {
+  try { return approvalService.pendingCount() }
+  catch {
+    auditApprovalBoundaryFailure("approval_pending_count_failed")
+    return 0
+  }
+}
+
+await approvalService.reconcileStartup()
+if (discordGateway) {
+  gateway.onConnectionState(state => {
+    if (state === "disconnected") {
+      approvalService.deactivateNotificationAdapter("discord")
+      return
+    }
+    void approvalService.activateNotificationAdapter("discord").catch(() => {
+      auditApprovalBoundaryFailure("approval_notification_activation_failed", "discord")
+    })
+  })
+}
+
 // Full-fidelity per-turn trace (message bodies), separate from the metadata-only
 // AuditLog. Default off; when on, appends JSONL to <stateDir>/trace.jsonl. A no-op
 // (never throws, nothing written) when disabled. Records the last chat per agent so
@@ -782,17 +865,11 @@ if (hub.trace?.enabled) {
 // threaded by the approval id as `corr`.
 const approvalsEnabled = !!hub.approvals?.enabled
 if (approvalsEnabled) {
-  if (approvalApprovers.length === 0)
+  if (discordApprovers.length === 0)
     console.error("switchboard hub: approvals enabled but no approver configured — every requireApproval effect will expire unapproved")
   if (!hub.approvals?.channelId)
     console.error("switchboard hub: approvals enabled with no channelId — approvals for routes lacking an origin chat (post_webhook / events) cannot post a card and will expire")
 }
-let approvalCounter = 0
-const approvalRegistry = new ApprovalRegistry(
-  () => Date.now(),
-  () => `appr-${++approvalCounter}`,
-  hub.approvals?.ttlMs ?? 3_600_000,
-)
 let agentPreviewCounter = 0
 const agentConfigPreviews = new AgentConfigPreviewRegistry(
   () => Date.now(),
@@ -813,7 +890,6 @@ const hubConfigPreviews = new HubConfigPreviewRegistry(
   () => `hubprev-${++hubPreviewCounter}`,
   5 * 60_000,   // 5 minute TTL, matching agentConfigPreviews
 )
-const approvalCards = new Map<string, { chatId: string; messageId: string }>()
 const channelActivity = new Map<string, { agent: string; lastActive: number }>()
 const channelStream = new ChannelStream()
 // Inter-agent consult: ask_agent dispatches the question to the target on a
@@ -973,75 +1049,110 @@ async function runWorkflow(workflowId: string, input: string, chatId: string, ac
     missionCards.delete(runId)
   }
 }
-/** Park an effect for human approval: record the request, post the card, and
- *  remember it for editing on resolution. */
-async function requestApproval(req: ApprovalRequest, fire: ApprovalFire): Promise<void> {
-  const e = approvalRegistry.request(req, fire)
-  audit.record({
-    kind: "approval", actor: req.actor, action: "request", target: req.target,
-    chat: req.chat, outcome: "pending", corr: e.id, detail: { kind: req.kind },
-  })
-  const channel = hub.approvals?.channelId ?? req.chat
-  if (!channel) { process.stderr.write(`approval ${e.id}: no channel to post to\n`); return }
-  const messageId = await gateway.sendCard(channel, renderApprovalCard(e))
-  if (messageId) approvalCards.set(e.id, { chatId: channel, messageId })
+interface CapturedOutboundMatch { snapshot: OutboundEffectSnapshot }
+
+function approvalActor(principal: ApprovalPrincipal): string {
+  return `${principal.surface}:${principal.id}`
 }
-/** Resolve an approval from a button click: audit the decision, edit the card to
- *  its terminal state, and (on grant) fire the held effect exactly once. */
-async function resolveApproval(id: string, decision: ApprovalDecision, userId: string): Promise<void> {
-  const e = approvalRegistry.resolve(id, decision)
-  if (!e) return   // unknown or already resolved — single-shot
-  audit.record({
-    kind: "approval", actor: `user:${userId}`, action: decision === "grant" ? "grant" : "deny",
-    target: e.target, chat: e.chat, outcome: decision === "grant" ? "ok" : "deny", corr: e.id,
-  })
-  const loc = approvalCards.get(e.id); approvalCards.delete(e.id)
-  if (loc) await gateway.editCard(loc.chatId, loc.messageId, renderApprovalCard(e))
-  if (decision === "grant") {
-    try { await e.fire(e.id) } catch (err) { process.stderr.write(`approval ${e.id} fire failed: ${err}\n`) }
+
+function outboundAudit(agent?: string): (input: Parameters<typeof audit.record>[0]) => void {
+  return auditOptedOut(agent) ? () => {} : input => audit.record(input)
+}
+
+function captureOutboundText(text: string): CapturedOutboundMatch[] {
+  return matchOutbound(text, outboundRoutes).map(({ route, groups }) => ({
+    snapshot: captureOutboundEffect(route, renderBody(route.template, { groups })),
+  }))
+}
+
+function canonicalOutboundOrigin(conversationId: string): ApprovalOrigin {
+  const fallback = conversationRepo.listTransportLinks(conversationId)
+    .filter(link => link.adapter === "discord" && link.enabled)
+    .sort((left, right) => left.id.localeCompare(right.id))[0]
+  return {
+    conversationId,
+    ...(fallback === undefined
+      ? {}
+      : { surface: "discord", externalLocation: fallback.externalLocationId }),
   }
 }
-/** The actual deliver + audit, used directly or as the held effect after an
- *  approval grant. `corr`, when present, threads this row to the approval. */
-function doDeliver(route: OutboundRoute, body: string, actor: string, agent?: string, corr?: string): void {
-  void outboundDelivery.deliver(route, body)
-    .then((res) => {
-      if (!auditOptedOut(agent)) audit.record({
-        kind: "outbound", actor, action: "deliver", target: route.id, corr,
-        outcome: res.ok ? "ok" : "error", detail: { status: res.status, attempts: res.attempts },
-      })
-    })
-    .catch((e) => process.stderr.write(`outbound deliver failed: ${e}\n`))
+
+function legacyDiscordOrigin(externalLocation: string): ApprovalOrigin {
+  const link = conversationRepo.resolveTransportLink("discord", externalLocation)
+  return {
+    ...(link === null ? {} : { conversationId: link.conversationId }),
+    surface: "discord",
+    externalLocation,
+  }
 }
-/** Deliver an outbound route — but when it's flagged `requireApproval` and the
- *  approvals subsystem is enabled, park it for a human grant first (the delivery
- *  becomes the held effect). `actor` is who triggered it; `agent` honors
- *  per-agent audit opt-out; `chat` is the approval card's fallback channel. */
-function deliverAudited(route: OutboundRoute, body: string, actor: string, agent?: string, chat?: string): void {
-  if (approvalsEnabled && route.requireApproval) {
-    void requestApproval(
-      { kind: "outbound", target: route.id, actor, chat, summary: `POST → ${route.id}` },
-      (corr) => doDeliver(route, body, actor, agent, corr),
-    )
+
+function deliverCapturedOutbound(
+  snapshot: OutboundEffectSnapshot,
+  requestedBy: ApprovalPrincipal,
+  agent?: string,
+  origin?: ApprovalOrigin,
+): void {
+  const actor = approvalActor(requestedBy)
+  const auditOutbound = outboundAudit(agent)
+  if (approvalsEnabled && snapshot.route.requireApproval) {
+    void approvalService.request({
+      kind: "outbound",
+      target: snapshot.route.id,
+      requestedBy,
+      ...(origin === undefined ? {} : { origin }),
+      summary: `${snapshot.route.method ?? "POST"} → ${snapshot.route.id}`,
+      detail: snapshot,
+    }, correlationId => executeOutboundApproval({
+      route: snapshot.route,
+      body: snapshot.body,
+      actor,
+      correlationId,
+      deliver: (route, body) => outboundDelivery.deliver(route, body),
+      audit: auditOutbound,
+    })).catch(() => {
+      auditApprovalBoundaryFailure("approval_request_failed", snapshot.route.id)
+    })
     return
   }
-  doDeliver(route, body, actor, agent)
+
+  void executeOutboundApproval({
+    route: snapshot.route,
+    body: snapshot.body,
+    actor,
+    deliver: (route, body) => outboundDelivery.deliver(route, body),
+    audit: auditOutbound,
+  }).catch(() => {
+    auditApprovalBoundaryFailure("outbound_delivery_boundary_failed", snapshot.route.id)
+  })
 }
-/** Fire any text-triggered outbound routes for `text`. Returns true if a matched
- *  route asked to `consume` the text (suppress the Discord post). */
-function fireOutboundText(text: string, agent: string, chat: string): boolean {
-  let consume = false
-  for (const { route, groups } of matchOutbound(text, outboundRoutes)) {
-    deliverAudited(route, renderBody(route.template, { groups }), `agent:${agent}`, agent, chat)
-    if (route.consume) consume = true
+
+/** Fire any legacy Discord text-triggered routes. Canonical replies use the
+ * commit-first path in onAgentReply below. */
+function fireOutboundText(text: string, agent: string, externalLocation: string): boolean {
+  const matches = captureOutboundText(text)
+  const origin = legacyDiscordOrigin(externalLocation)
+  for (const { snapshot } of matches) {
+    deliverCapturedOutbound(snapshot, { surface: "agent", id: agent }, agent, origin)
   }
-  return consume
+  return matches.some(({ snapshot }) => snapshot.route.consume === true)
 }
-/** Deliver to a named route by id (the post_webhook tool path). Unknown ⇒ false. */
-function fireOutboundNamed(id: string, body?: string, actor = "hub", agent?: string): boolean {
-  const route = outboundRoutes.find((r) => r.id === id)
+
+/** Deliver to a named route by id (the post_webhook/tool and hub-event path).
+ * These producers have no trusted canonical turn, so they intentionally omit
+ * conversation provenance. */
+function fireOutboundNamed(
+  id: string,
+  body?: string,
+  requestedBy: ApprovalPrincipal = { surface: "hub", id: "hub" },
+  agent?: string,
+): boolean {
+  const route = outboundRoutes.find((candidate) => candidate.id === id)
   if (!route) { process.stderr.write(`post_webhook: unknown route "${id}"\n`); return false }
-  deliverAudited(route, renderBody(route.template, { body }), actor, agent)
+  deliverCapturedOutbound(
+    captureOutboundEffect(route, renderBody(route.template, { body })),
+    requestedBy,
+    agent,
+  )
   return true
 }
 /** Fire a hub lifecycle event: record it to the ledger, and if a route with
@@ -1098,10 +1209,30 @@ async function onAgentReply(reply: AgentReply, key: string): Promise<void | Send
     if (out !== undefined) missionRegistry.settle(reply.chatId, out)
     return
   }
-  // Canonical conversations own their transcript independently of any surface.
-  // Persist/stream text replies there and let the surface router fan out only to
-  // configured links; never fall through to the legacy Discord reply path.
-  if (reply.kind === "reply" && turnCoordinator && await turnCoordinator.acceptAgentReply(reply)) return
+  // Canonical replies derive identity only from the repository. Pure matching
+  // and immutable effect capture happen before the transcript commit, while
+  // registration happens only after an inserted canonical message is durable.
+  if (reply.kind === "reply" && turnCoordinator) {
+    const conversation = conversationRepo.getConversation(reply.chatId)
+    if (conversation) {
+      const matches = reply.text ? captureOutboundText(reply.text) : []
+      const accepted = await turnCoordinator.acceptAgentReply(reply, {
+        suppressSurfaceDelivery: matches.some(({ snapshot }) => snapshot.route.consume === true),
+      })
+      if (accepted && !("closed" in accepted) && accepted.inserted) {
+        const origin = canonicalOutboundOrigin(conversation.id)
+        for (const { snapshot } of matches) {
+          deliverCapturedOutbound(
+            snapshot,
+            { surface: "agent", id: reply.agent },
+            reply.agent,
+            origin,
+          )
+        }
+      }
+      return
+    }
+  }
   const legacyChatId = resolveLegacyDiscordChatId(reply.chatId)
   if (!legacyChatId) {
     audit.record({ kind: "event", actor: `agent:${reply.agent}`, action: "legacy_discord_rich_unroutable", chat: reply.chatId, outcome: "deny", detail: { kind: reply.kind } })
@@ -1677,10 +1808,34 @@ async function handleMemButton(action: string, arg: { corrId: string; idx?: numb
   }
 }
 
-// A card button was clicked → gated actions run hub-side; others relay to the agent.
+if (discordGateway) gateway.onApprovalButton(async (customId, userId, interactionId) => {
+  const parsed = parseApprovalCustomId(customId)
+  if (!parsed) return
+  const principal = { surface: "discord", id: userId }
+  try {
+    await approvalService.decide(principal, "adapter", {
+      approvalId: parsed.id,
+      decision: parsed.decision,
+      expectedVersion: parsed.version,
+      idempotencyKey: approvalDecisionKey(
+        interactionId,
+        parsed.id,
+        parsed.version,
+        parsed.decision,
+        principal,
+      ),
+    })
+  } catch (error) {
+    auditApprovalBoundaryFailure(
+      "approval_decision_failed",
+      error instanceof ApprovalOperationsError ? error.code : "approval_unavailable",
+      parsed.id,
+    )
+  }
+})
+
+// A non-approval card button was clicked → gated actions run hub-side; others relay to the agent.
 if (discordGateway) gateway.onNotifyButton((customId, userId) => {
-  const ap = parseApprovalCustomId(customId)
-  if (ap) { void resolveApproval(ap.id, ap.decision, userId); return }
   const action = matchGatedAction(customId, hub.gatedActions ?? [])
   if (action) { void cardLifecycle.runGated(action, customId); return }
   const mem = parseNotifyCustomId(customId)
@@ -2012,7 +2167,7 @@ function gatherDoctorFacts(): DoctorFacts {
   return {
     agents: doctorAgents,
     stateDirWritable,
-    pendingApprovals: approvalRegistry.pendingCount(),
+    pendingApprovals: pendingApprovalCount(),
     auditEnabled: hub.audit?.enabled === true,
     traceEnabled: hub.trace?.enabled === true,
     routerModel: hub.routerModel,
@@ -2207,8 +2362,6 @@ if (discordGateway) gateway.handleInbound((m) => {
   }
   void orchestrator.handleMessage(m)
 })
-const conversationDb = new Database(hub.conversationDbFile ?? join(hub.stateDir, "switchboard.sqlite"), { create: true })
-const conversationRepo = new SqliteConversationRepository(conversationDb)
 const legacyDiscordCompatibility = new LegacyDiscordCompatibilityRouter(conversationRepo, gateway)
 resolveLegacyDiscordChatId = chatId => legacyDiscordCompatibility.resolveChatId(chatId)
 const conversationEvents = new ConversationEventStream((id, after, limit) => conversationRepo.listMessages(id, after, limit))
@@ -2238,6 +2391,11 @@ if (discordEnabled) {
     ensureDiscordConversation?.(event, resolvePinnedAgent(event.externalLocationId, hub.channelAgents ?? []) ?? hub.defaultAgent)
     return turnCoordinator?.acceptSurfaceEvent(event).then(() => {}) ?? Promise.resolve()
   })
+  try {
+    await approvalService.activateNotificationAdapter("discord")
+  } catch {
+    auditApprovalBoundaryFailure("approval_notification_activation_failed", "discord")
+  }
   console.error("switchboard hub: gateway connected")
 }
 deliveryWorker.start()
@@ -2258,7 +2416,7 @@ function collectMetrics(): MetricsInput {
     now, startedAt,
     status: statusRegistry.snapshot(now),
     audit: audit.summary({}),
-    pendingApprovals: approvalRegistry.pendingCount(),
+    pendingApprovals: pendingApprovalCount(),
   }
 }
 const metricsServer = startMetricsServer(hub.metricsPort ?? 0, collectMetrics, hub.metricsHost)
@@ -2267,29 +2425,35 @@ if (metricsServer) console.error(`switchboard hub: metrics/health on ${hub.metri
 // Read-only web dashboard: the same data, plus a recent-activity feed, as a page
 // on webPort. Off unless webPort is set. Serves only aggregated, non-secret data.
 function collectWeb(): WebInput {
-  return { ...collectMetrics(), recent: audit.recent({ limit: 30 }), pendingApprovalList: approvalRegistry.list() }
+  return { ...collectMetrics(), recent: audit.recent({ limit: 30 }), pendingApprovalList: [] }
 }
 const webDeps: WebDeps = {
   collect: collectWeb,
   requireUser: (req) => req.headers.get(hub.webIdentityHeader ?? "X-Switchboard-User"),
 
   resolveApproval: async (id, decision, actor) => {
-    // Deliberately NOT calling the existing resolveApproval(id, decision, userId) —
-    // it hardcodes `actor: \`user:${userId}\`` for the audit row, which would
-    // double-prefix a web actor as "user:web:<email>". Inline the same steps
-    // (registry resolve → audit → card edit → fire) with a clean "web:<email>" actor.
-    const e = approvalRegistry.resolve(id, decision)
-    if (!e) return "not_found"
-    audit.record({
-      kind: "approval", actor: `web:${actor}`, action: decision === "grant" ? "grant" : "deny",
-      target: e.target, chat: e.chat, outcome: decision === "grant" ? "ok" : "deny", corr: e.id,
-    })
-    const loc = approvalCards.get(e.id); approvalCards.delete(e.id)
-    if (loc) await gateway.editCard(loc.chatId, loc.messageId, renderApprovalCard(e))
-    if (decision === "grant") {
-      try { await e.fire(e.id) } catch (err) { process.stderr.write(`approval ${e.id} fire failed: ${err}\n`) }
+    const principal: ApprovalPrincipal = { surface: "web", id: actor }
+    try {
+      const current = approvalService.get(principal, "legacy", id)
+      const idempotencyKey = `legacy-web:${createHash("sha256")
+        .update(JSON.stringify({ id, version: current.version, decision, actor }))
+        .digest("hex")}`
+      const result = await approvalService.decide(principal, "legacy", {
+        approvalId: id,
+        decision,
+        expectedVersion: current.version,
+        idempotencyKey,
+      })
+      return result.approval.state === "granted" ? "granted"
+        : result.approval.state === "denied" ? "denied"
+          : "not_found"
+    } catch (error) {
+      if (!(error instanceof ApprovalOperationsError)
+        || !["not_found", "forbidden", "already_resolved", "stale_version"].includes(error.code)) {
+        auditApprovalBoundaryFailure("approval_legacy_web_decision_failed", "legacy-web", id)
+      }
+      return "not_found"
     }
-    return decision === "grant" ? "granted" : "denied"
   },
 
   listChannels: (): ChannelInfo[] => {
@@ -2450,11 +2614,9 @@ process.once("SIGTERM", () => { void shutdownConversations() })
 // audit the lapse. The held effect never fires (fail-closed).
 if (approvalsEnabled) {
   setInterval(() => {
-    for (const e of approvalRegistry.sweepExpired()) {
-      audit.record({ kind: "approval", actor: "hub", action: "expire", target: e.target, chat: e.chat, outcome: "deny", corr: e.id })
-      const loc = approvalCards.get(e.id); approvalCards.delete(e.id)
-      if (loc) void gateway.editCard(loc.chatId, loc.messageId, renderApprovalCard(e))
-    }
+    void approvalService.expireDue().catch(() => {
+      auditApprovalBoundaryFailure("approval_expiry_sweep_failed")
+    })
   }, 60_000).unref()
 }
 
