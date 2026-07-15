@@ -2,9 +2,11 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, u
 import { ApiError, WorkspaceApi } from "./api"
 import { ConversationStream } from "./conversationStream"
 import { AgentStream } from "./agentStream"
+import { ApprovalStream } from "./approvalStream"
 import { DraftStore } from "./drafts"
 import { AgentsWorkspace } from "./components/AgentsWorkspace"
 import { ApprovalsWorkspace } from "./components/ApprovalsWorkspace"
+import { ApprovalContextBanner, type ApprovalContextNavigation } from "./components/ApprovalContextBanner"
 import { AppRail, workspaceDestinationFeatures } from "./components/AppRail"
 import { DestinationMobileNav } from "./components/DestinationMobileNav"
 import { ConversationList } from "./components/ConversationList"
@@ -15,7 +17,7 @@ import { ActivityDisclosure } from "./components/ActivityItem"
 import { MobileNav, type MobilePane } from "./components/MobileNav"
 import { useModalDialog } from "./components/useModalDialog"
 import { initialWorkspaceState, workspaceReducer } from "./state"
-import type { ConnectionState, Conversation, ConversationEvent, ConversationInput, ConversationUpdate, Message, PostMessageInput, Session, TransportLink } from "./types"
+import type { ApprovalPendingAggregate, ConnectionState, Conversation, ConversationEvent, ConversationInput, ConversationUpdate, Message, PostMessageInput, Session, TransportLink } from "./types"
 import type { PwaController, PwaState } from "./pwa"
 import { parseWorkspaceRoute, pathForAgent, pathForApproval, pathForConversation, type WorkspaceDestination, type WorkspaceRoute } from "./routes"
 
@@ -52,13 +54,39 @@ interface AppProps {
   pwa?: Pick<PwaController, "state" | "subscribe" | "install">
   streamFactory?: ((api: AppApi) => ConversationStream) | null
   agentStreamFactory?: (() => AgentStream) | null
+  approvalStreamFactory?: (() => ApprovalStream) | null
 }
 
 interface ConversationWorkspaceProps extends AppProps {
   session?: Session | null
   controllerState?: PwaState
+  approvalLiveState?: ApprovalLiveState
+  approvalFocusRequest?: ApprovalFocusRequest | null
   onSessionLoaded?(session: Session): void
   onNavigateDestination?(destination: WorkspaceDestination): void
+  onNavigateApproval?(target: ApprovalContextNavigation): void
+  onApprovalFocusRestored?(): void
+}
+
+interface ApprovalLiveState {
+  connection: ConnectionState
+  pendingCount: number
+  revision: number
+}
+
+interface ApprovalReturnState {
+  conversationId: string
+  focus: "approval-detail" | "approval-queue"
+}
+
+interface ApprovalFocusRequest extends ApprovalReturnState {
+  request: number
+}
+
+interface ApprovalContextState {
+  conversationId: string | null
+  status: "idle" | "loading" | "ready"
+  aggregate: ApprovalPendingAggregate | null
 }
 
 type LoadState = "loading" | "ready" | "forbidden" | "unavailable"
@@ -83,6 +111,16 @@ const conversationIdFromLocation = () => {
 const pathFor = pathForConversation
 const defaultPwaState: PwaState = { installAvailable: false, online: true, issue: null }
 const createDefaultAgentStream = () => new AgentStream()
+const createDefaultApprovalStream = () => new ApprovalStream()
+
+function approvalReturnFromHistory(value: unknown): ApprovalReturnState | null {
+  if (!value || typeof value !== "object" || !("approvalReturn" in value)) return null
+  const candidate = value.approvalReturn
+  if (!candidate || typeof candidate !== "object") return null
+  if (!("conversationId" in candidate) || typeof candidate.conversationId !== "string" || !candidate.conversationId) return null
+  if (!("focus" in candidate) || (candidate.focus !== "approval-detail" && candidate.focus !== "approval-queue")) return null
+  return { conversationId: candidate.conversationId, focus: candidate.focus }
+}
 
 export function createWorkspaceStream(api: AppApi): ConversationStream {
   if (!api.listMessages) throw new Error("Conversation message API is unavailable")
@@ -99,7 +137,7 @@ export function createWorkspaceStream(api: AppApi): ConversationStream {
   })
 }
 
-export function ConversationView({ api, conversation: suppliedConversation, messages, activity = [], drafts: suppliedDrafts, session: suppliedSession, links: suppliedLinks, inspectorOpen = true, composerRef, inspectorCloseRef, onOpenInspector, onCloseInspector = () => {}, onInspectorEscape, onArchive, onCanonicalMessage, onConversationUpdated }: {
+export function ConversationView({ api, conversation: suppliedConversation, messages, activity = [], drafts: suppliedDrafts, session: suppliedSession, links: suppliedLinks, approvalContext = null, approvalLinkRef, transcriptHeadingRef, inspectorOpen = true, composerRef, inspectorCloseRef, onOpenInspector, onCloseInspector = () => {}, onInspectorEscape, onArchive, onCanonicalMessage, onConversationUpdated, onNavigateApproval }: {
   api: ConversationViewApi
   conversation: Conversation
   messages?: Message[]
@@ -107,6 +145,9 @@ export function ConversationView({ api, conversation: suppliedConversation, mess
   drafts?: DraftStore
   session?: Session
   links?: TransportLink[]
+  approvalContext?: ApprovalPendingAggregate | null
+  approvalLinkRef?: Ref<HTMLAnchorElement>
+  transcriptHeadingRef?: Ref<HTMLHeadingElement>
   inspectorOpen?: boolean
   composerRef?: Ref<HTMLTextAreaElement>
   inspectorCloseRef?: Ref<HTMLButtonElement>
@@ -116,6 +157,7 @@ export function ConversationView({ api, conversation: suppliedConversation, mess
   onArchive?(): void
   onCanonicalMessage?(message: Message): void
   onConversationUpdated?(conversation: Conversation): void
+  onNavigateApproval?(target: ApprovalContextNavigation): void
 }) {
   const draftsRef = useRef<DraftStore | null>(null)
   if (draftsRef.current === null) draftsRef.current = suppliedDrafts ?? new DraftStore()
@@ -237,12 +279,13 @@ export function ConversationView({ api, conversation: suppliedConversation, mess
   return <>
     <section className="transcript-pane" aria-label="Transcript" data-region="transcript" data-message-count={renderedMessages.length}>
       <header className="pane-header transcript-header">
-        <div><p className="eyebrow">{conversation.primaryAgent}</p><h2>{conversation.title}</h2></div>
+        <div><p className="eyebrow">{conversation.primaryAgent}</p><h2 ref={transcriptHeadingRef} tabIndex={-1}>{conversation.title}</h2></div>
         <div className="header-actions">
           {onOpenInspector ? <button type="button" className="inspector-toggle" onClick={event => onOpenInspector(event.currentTarget)}>Conversation details</button> : null}
           {onArchive ? <button type="button" className="danger-action" onClick={onArchive}>Archive conversation</button> : null}
         </div>
       </header>
+      <ApprovalContextBanner aggregate={approvalContext} conversationId={conversation.id} linkRef={approvalLinkRef} onNavigate={onNavigateApproval ? target => onNavigateApproval(target) : undefined} />
       <div className="transcript-body"><Transcript messages={renderedMessages} onReply={setReplyTo} /><ActivityDisclosure events={activity} /></div>
       <Composer value={text} replyTo={replyTo} sending={sending} error={sendError} textareaRef={composerRef} onChange={changeText} onSubmit={submit} onRetry={retry} onDismissReply={() => setReplyTo(null)} />
     </section>
@@ -250,7 +293,7 @@ export function ConversationView({ api, conversation: suppliedConversation, mess
   </>
 }
 
-export function ConversationWorkspace({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, controllerState, streamFactory = createWorkspaceStream, session: suppliedSession, onSessionLoaded, onNavigateDestination }: ConversationWorkspaceProps) {
+export function ConversationWorkspace({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, controllerState, streamFactory = createWorkspaceStream, session: suppliedSession, approvalLiveState, approvalFocusRequest, onSessionLoaded, onNavigateDestination, onNavigateApproval, onApprovalFocusRestored }: ConversationWorkspaceProps) {
   const apiRef = useRef<AppApi | null>(null)
   const draftsRef = useRef<DraftStore | null>(null)
   if (apiRef.current === null) apiRef.current = suppliedApi ?? new WorkspaceApi()
@@ -264,16 +307,20 @@ export function ConversationWorkspace({ api: suppliedApi, drafts: suppliedDrafts
   const [mobilePane, setMobilePane] = useState<MobilePane>(conversationIdFromLocation() ? "transcript" : "conversations")
   const [inspectorOpen, setInspectorOpen] = useState(false)
   const [links, setLinks] = useState<TransportLink[]>([])
+  const [approvalContext, setApprovalContext] = useState<ApprovalContextState>({ conversationId: null, status: "idle", aggregate: null })
   const [actionError, setActionError] = useState("")
   const layout = useWorkspaceLayout()
   const conversationSearchRef = useRef<HTMLInputElement>(null)
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const inspectorCloseRef = useRef<HTMLButtonElement>(null)
+  const approvalLinkRef = useRef<HTMLAnchorElement>(null)
+  const transcriptHeadingRef = useRef<HTMLHeadingElement>(null)
   const drawerInvokerRef = useRef<HTMLElement | null>(null)
   const dialogInvokerRef = useRef<HTMLElement | null>(null)
   const [focusRequest, setFocusRequest] = useState<FocusRequest | null>(null)
   const pwaState = controllerState ?? pwa?.state() ?? defaultPwaState
   const loadEpochRef = useRef(0)
+  const approvalContextGenerationRef = useRef(0)
   const offlineFallbackRef = useRef<string | null>(null)
 
   useLayoutEffect(() => {
@@ -288,6 +335,11 @@ export function ConversationWorkspace({ api: suppliedApi, drafts: suppliedDrafts
     if (target?.isConnected) target.focus()
     setFocusRequest(null)
   }, [focusRequest])
+
+  useEffect(() => {
+    suppliedSessionRef.current = suppliedSession
+    if (suppliedSession) dispatch({ type: "session/loaded", session: suppliedSession })
+  }, [suppliedSession])
 
   const load = useCallback(async (background = false) => {
     const epoch = ++loadEpochRef.current
@@ -375,6 +427,39 @@ export function ConversationWorkspace({ api: suppliedApi, drafts: suppliedDrafts
   }, [api, state.selectedConversationId, streamFactory])
 
   const selected = useMemo(() => state.conversations.find(item => item.id === state.selectedConversationId) ?? null, [state.conversations, state.selectedConversationId])
+  const effectiveSession = suppliedSession ?? state.session
+  const approvalsVisible = Boolean(effectiveSession && workspaceDestinationFeatures(effectiveSession).approvals && api.listApprovals)
+  const approvalRevision = approvalLiveState?.revision ?? 0
+  const pendingApprovals = approvalLiveState?.pendingCount ?? effectiveSession?.approvalState.pendingCount ?? 0
+
+  useEffect(() => {
+    const generation = ++approvalContextGenerationRef.current
+    const conversationId = selected?.id ?? null
+    if (!conversationId || !approvalsVisible || !api.listApprovals) {
+      setApprovalContext({ conversationId, status: "ready", aggregate: null })
+      return
+    }
+    setApprovalContext({ conversationId, status: "loading", aggregate: null })
+    void api.listApprovals({ group: "pending", conversationId, limit: 1 }).then(response => {
+      if (generation !== approvalContextGenerationRef.current) return
+      const aggregate = response.querySummary && response.querySummary.count > 0 ? response.querySummary : null
+      setApprovalContext({ conversationId, status: "ready", aggregate })
+    }).catch(() => {
+      if (generation !== approvalContextGenerationRef.current) return
+      setApprovalContext({ conversationId, status: "ready", aggregate: null })
+    })
+    return () => { approvalContextGenerationRef.current++ }
+  }, [api, approvalRevision, approvalsVisible, selected?.id])
+
+  useLayoutEffect(() => {
+    if (!approvalFocusRequest || !selected || approvalFocusRequest.conversationId !== selected.id) return
+    if (approvalContext.conversationId !== selected.id || approvalContext.status !== "ready") return
+    const target = approvalLinkRef.current?.isConnected ? approvalLinkRef.current : transcriptHeadingRef.current
+    if (!target?.isConnected) return
+    target.focus()
+    onApprovalFocusRestored?.()
+  }, [approvalContext, approvalFocusRequest, onApprovalFocusRestored, selected])
+
   useEffect(() => {
     if (!selected || !api.listLinks) { setLinks([]); return }
     let active = true
@@ -470,7 +555,7 @@ export function ConversationWorkspace({ api: suppliedApi, drafts: suppliedDrafts
   if (loadState === "loading") return <main className="status-page"><div role="status"><span className="status-node" />Loading your workspace…</div></main>
   if (loadState === "forbidden") return <main className="status-page"><section role="alert"><h1>Workspace access denied</h1><p>Ask a Switchboard administrator to grant your identity access.</p></section></main>
   if (loadState === "unavailable") return <main className="status-page"><section role="alert"><h1>Switchboard is unavailable</h1><p>Check the service connection, then try again.</p><button type="button" onClick={() => void load()}>Try again</button></section></main>
-  if (!state.session) return null
+  if (!effectiveSession) return null
 
   return (
     <main className="workspace-shell" data-mobile-pane={mobilePane}>
@@ -478,8 +563,8 @@ export function ConversationWorkspace({ api: suppliedApi, drafts: suppliedDrafts
       <PwaIssueBanner issue={pwaState.issue} />
       <AppRail
         active="conversations"
-        features={workspaceDestinationFeatures(state.session)}
-        pendingApprovals={state.session.approvalState.pendingCount}
+        features={workspaceDestinationFeatures(effectiveSession)}
+        pendingApprovals={pendingApprovals}
         connection={displayedConnection}
         install={pwa ? { available: pwaState.installAvailable, run: () => pwa.install() } : install ? { available: true, run: async () => install.run() } : undefined}
         onNew={() => openDialog("new")}
@@ -503,8 +588,11 @@ export function ConversationWorkspace({ api: suppliedApi, drafts: suppliedDrafts
         messages={state.messages}
         activity={state.activity}
         drafts={drafts}
-        session={state.session}
+        session={effectiveSession}
         links={links}
+        approvalContext={approvalsVisible && approvalContext.conversationId === selected.id && approvalContext.status === "ready" ? approvalContext.aggregate : null}
+        approvalLinkRef={approvalLinkRef}
+        transcriptHeadingRef={transcriptHeadingRef}
         inspectorOpen={inspectorOpen || mobilePane === "inspector"}
         composerRef={composerRef}
         inspectorCloseRef={inspectorCloseRef}
@@ -514,24 +602,25 @@ export function ConversationWorkspace({ api: suppliedApi, drafts: suppliedDrafts
         onArchive={() => openDialog("archive")}
         onCanonicalMessage={message => dispatch({ type: "messages/received", messages: [message] })}
         onConversationUpdated={updated => dispatch({ type: "conversations/loaded", conversations: state.conversations.map(item => item.id === updated.id ? updated : item) })}
+        onNavigateApproval={onNavigateApproval}
       /> : <>
         <section className="transcript-pane" aria-label="Transcript" data-region="transcript" data-message-count="0"><div className="transcript-empty"><span className="signal-map" aria-hidden="true"><i /></span><h2>Select a conversation</h2><p>Choose a conversation from the list to open its workspace.</p></div></section>
-        <Inspector conversation={null} session={state.session} open={false} onClose={closeInspector} />
+        <Inspector conversation={null} session={effectiveSession} open={false} onClose={closeInspector} />
       </>}
       <MobileNav pane={mobilePane} hasConversation={Boolean(selected)} onChange={changeMobilePane} />
       <DestinationMobileNav
         active="conversations"
-        features={workspaceDestinationFeatures(state.session)}
-        pendingApprovals={state.session.approvalState.pendingCount}
+        features={workspaceDestinationFeatures(effectiveSession)}
+        pendingApprovals={pendingApprovals}
         onNavigate={destination => destination === "conversations" ? navigate(null) : onNavigateDestination?.(destination)}
       />
-      {dialog === "new" ? <NewConversationDialog session={state.session} error={actionError} onCancel={closeDialog} onCreate={createConversation} /> : null}
+      {dialog === "new" ? <NewConversationDialog session={effectiveSession} error={actionError} onCancel={closeDialog} onCreate={createConversation} /> : null}
       {dialog === "archive" && selected ? <ConfirmArchiveDialog title={selected.title} error={actionError} onCancel={closeDialog} onArchive={archiveConversation} /> : null}
     </main>
   )
 }
 
-export function App({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, streamFactory = createWorkspaceStream, agentStreamFactory = createDefaultAgentStream }: AppProps) {
+export function App({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, streamFactory = createWorkspaceStream, agentStreamFactory = createDefaultAgentStream, approvalStreamFactory = createDefaultApprovalStream }: AppProps) {
   const apiRef = useRef<AppApi | null>(null)
   const draftsRef = useRef<DraftStore | null>(null)
   if (apiRef.current === null) apiRef.current = suppliedApi ?? new WorkspaceApi()
@@ -555,37 +644,102 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, st
   const [session, setSession] = useState<Session | null>(null)
   const [sessionState, setSessionState] = useState<LoadState>("loading")
   const [pwaState, setPwaState] = useState<PwaState>(() => pwa?.state() ?? defaultPwaState)
+  const [approvalLiveState, setApprovalLiveState] = useState<ApprovalLiveState>({ connection: "connecting", pendingCount: 0, revision: 0 })
+  const [approvalAnnouncement, setApprovalAnnouncement] = useState("")
+  const [approvalFocusRequest, setApprovalFocusRequest] = useState<ApprovalFocusRequest | null>(null)
   const sessionGeneration = useRef(0)
+  const acceptedSession = useRef<Session | null>(null)
+  const approvalCountGeneration = useRef(0)
+  const previousPendingCount = useRef<number | null>(null)
+  const approvalFocusSequence = useRef(0)
+  const activeApprovalReturn = useRef<ApprovalReturnState | null>(null)
 
   useEffect(() => pwa?.subscribe(setPwaState), [pwa])
 
   useEffect(() => {
-    const onPopState = () => setRoute(parseWorkspaceRoute(location.pathname))
+    const onPopState = () => {
+      const nextRoute = parseWorkspaceRoute(location.pathname)
+      setRoute(nextRoute)
+      const approvalReturn = approvalReturnFromHistory(history.state)
+      if (nextRoute.destination === "conversations" && nextRoute.conversationId && approvalReturn?.conversationId === nextRoute.conversationId) {
+        activeApprovalReturn.current = null
+        setApprovalFocusRequest({ ...approvalReturn, request: ++approvalFocusSequence.current })
+      }
+    }
     window.addEventListener("popstate", onPopState)
     return () => window.removeEventListener("popstate", onPopState)
   }, [])
 
-  const rememberSession = useCallback((next: Session) => { setSession(next); setSessionState("ready") }, [])
-  const loadSession = useCallback(async () => {
+  const rememberSession = useCallback((next: Session, resetPendingCount = true) => {
+    const canonicalSessionChanged = acceptedSession.current !== next
+    acceptedSession.current = next
+    setSession(next)
+    setSessionState("ready")
+    if (canonicalSessionChanged && resetPendingCount) {
+      setApprovalLiveState(current => current.pendingCount === next.approvalState.pendingCount
+        ? current
+        : { ...current, pendingCount: next.approvalState.pendingCount })
+    }
+  }, [])
+  const loadSession = useCallback(async (background = false, expectedApprovalCountGeneration: number | null = null) => {
     const generation = ++sessionGeneration.current
-    setSessionState("loading")
+    if (!background) setSessionState("loading")
     try {
       const next = await api.session()
       if (generation !== sessionGeneration.current) return
-      setSession(next)
-      setSessionState("ready")
+      rememberSession(next, expectedApprovalCountGeneration === null || expectedApprovalCountGeneration === approvalCountGeneration.current)
     } catch (error) {
       if (generation !== sessionGeneration.current) return
+      if (background) return
       const forbidden = error instanceof ApiError && (error.status === 401 || error.status === 403 || error.code === "missing_identity")
       setSessionState(forbidden ? "forbidden" : "unavailable")
     }
-  }, [api])
+  }, [api, rememberSession])
 
   useEffect(() => {
     if ((route.destination !== "agents" && route.destination !== "approvals") || session) return
     void loadSession()
     return () => { sessionGeneration.current++ }
   }, [loadSession, route.destination, session])
+
+  const approvalsVisible = Boolean(session && workspaceDestinationFeatures(session).approvals)
+
+  useEffect(() => {
+    if (!approvalsVisible || !approvalStreamFactory) return
+    const stream = approvalStreamFactory()
+    void stream.start(0, {
+      onEvent: event => {
+        if (event.kind === "snapshot_required") return
+        approvalCountGeneration.current++
+        setApprovalLiveState(current => ({
+          ...current,
+          pendingCount: event.pendingCount,
+          revision: current.revision + 1,
+        }))
+      },
+      onInvalidate: () => {
+        setApprovalLiveState(current => ({ ...current, revision: current.revision + 1 }))
+        void loadSession(true, approvalCountGeneration.current)
+      },
+      onState: connection => setApprovalLiveState(current => ({ ...current, connection })),
+    })
+    return () => stream.stop()
+  }, [approvalStreamFactory, approvalsVisible, loadSession])
+
+  useEffect(() => {
+    if (!approvalsVisible) {
+      previousPendingCount.current = null
+      setApprovalAnnouncement("")
+      return
+    }
+    if (previousPendingCount.current === null) {
+      previousPendingCount.current = approvalLiveState.pendingCount
+      return
+    }
+    if (previousPendingCount.current === approvalLiveState.pendingCount) return
+    previousPendingCount.current = approvalLiveState.pendingCount
+    setApprovalAnnouncement(`${approvalLiveState.pendingCount} ${approvalLiveState.pendingCount === 1 ? "approval" : "approvals"} pending`)
+  }, [approvalLiveState.pendingCount, approvalsVisible])
 
   const navigate = useCallback((destination: WorkspaceDestination, resource: string | null = null) => {
     const approvalSearch = destination === "approvals" && location.pathname.startsWith("/approvals") ? location.search : ""
@@ -594,6 +748,29 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, st
     setRoute(parseWorkspaceRoute(new URL(path, location.origin).pathname))
   }, [])
 
+  const navigateApprovalContext = useCallback((target: ApprovalContextNavigation) => {
+    const approvalReturn: ApprovalReturnState = { conversationId: target.conversationId, focus: target.focus }
+    activeApprovalReturn.current = approvalReturn
+    const currentState = history.state && typeof history.state === "object" ? history.state : {}
+    history.replaceState({ ...currentState, approvalReturn }, "", `${location.pathname}${location.search}`)
+    const path = target.approvalId
+      ? pathForApproval(target.approvalId)
+      : pathForApproval(null, { group: "pending", conversationId: target.conversationId })
+    history.pushState({ approvalReturn }, "", path)
+    setApprovalFocusRequest(null)
+    setRoute(parseWorkspaceRoute(new URL(path, location.origin).pathname))
+  }, [])
+
+  useEffect(() => {
+    if (route.destination !== "approvals" || !activeApprovalReturn.current) return
+    const currentState = history.state && typeof history.state === "object" ? history.state : {}
+    history.replaceState({ ...currentState, approvalReturn: activeApprovalReturn.current }, "", `${location.pathname}${location.search}`)
+  }, [route])
+
+  const approvalAnnouncer = approvalsVisible
+    ? <span className="sr-only" aria-live="polite" aria-atomic="true" data-approval-announcer>{approvalAnnouncement}</span>
+    : null
+
   if (route.destination === "not_found") return <NotFound />
   if (route.destination === "agents") {
     if (sessionState === "forbidden") return <main className="status-page"><section role="alert"><h1>Workspace access denied</h1><p>Ask a Switchboard administrator to grant your identity access.</p></section></main>
@@ -601,13 +778,14 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, st
     if (sessionState === "loading" || !session) return <main className="status-page"><div role="status"><span className="status-node" />Loading your workspace…</div></main>
     if (!session.features.agents || session.permissions.agents === "hidden" || !agentsApi) return <NotFound />
     return <>
+      {approvalAnnouncer}
       <PwaIssueBanner issue={pwaState.issue} />
       <AgentsWorkspace
         api={agentsApi}
         session={session}
         routeAgent={route.agent}
         connection={pwa && !pwaState.online ? "offline" : navigator.onLine ? "live" : "offline"}
-        pendingApprovals={session.approvalState.pendingCount}
+        pendingApprovals={approvalLiveState.pendingCount}
         install={pwa ? { available: pwaState.installAvailable, run: () => pwa.install() } : install ? { available: true, run: async () => install.run() } : undefined}
         streamFactory={agentStreamFactory}
         onNavigate={navigate}
@@ -621,16 +799,17 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, st
     if (sessionState === "unavailable") return <main className="status-page"><section role="alert"><h1>Switchboard is unavailable</h1><p>Check the service connection, then try again.</p><button type="button" onClick={() => void loadSession()}>Try again</button></section></main>
     if (sessionState === "loading" || !session) return <main className="status-page"><div role="status"><span className="status-node" />Loading your workspace…</div></main>
     if (!session.features.approvals || session.permissions.approvals === "hidden" || !approvalsApi) return <NotFound />
-    const connection: ConnectionState = pwa && !pwaState.online ? "offline" : navigator.onLine ? "live" : "offline"
+    const connection: ConnectionState = pwa && !pwaState.online ? "offline" : approvalLiveState.connection
     return <>
+      {approvalAnnouncer}
       <PwaIssueBanner issue={pwaState.issue} />
       <ApprovalsWorkspace
         api={approvalsApi}
         session={session}
         routeApprovalId={route.approvalId}
         connection={connection}
-        revision={0}
-        pendingCount={session.approvalState.pendingCount}
+        revision={approvalLiveState.revision}
+        pendingCount={approvalLiveState.pendingCount}
         install={pwa ? { available: pwaState.installAvailable, run: () => pwa.install() } : install ? { available: true, run: async () => install.run() } : undefined}
         onNavigate={navigate}
         onNewConversation={() => navigate("conversations")}
@@ -638,7 +817,24 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, st
     </>
   }
 
-  return <ConversationWorkspace api={api} drafts={drafts} install={install} pwa={pwa} controllerState={pwaState} streamFactory={streamFactory} session={session} onSessionLoaded={rememberSession} onNavigateDestination={destination => navigate(destination)} />
+  return <>
+    {approvalAnnouncer}
+    <ConversationWorkspace
+      api={api}
+      drafts={drafts}
+      install={install}
+      pwa={pwa}
+      controllerState={pwaState}
+      streamFactory={streamFactory}
+      session={session}
+      approvalLiveState={approvalLiveState}
+      approvalFocusRequest={approvalFocusRequest}
+      onSessionLoaded={rememberSession}
+      onNavigateDestination={destination => navigate(destination)}
+      onNavigateApproval={navigateApprovalContext}
+      onApprovalFocusRestored={() => setApprovalFocusRequest(null)}
+    />
+  </>
 }
 
 function PwaIssueBanner({ issue }: { issue: PwaState["issue"] }) {

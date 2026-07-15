@@ -109,12 +109,23 @@ button { color: inherit; }
 .empty-state button { min-height: 44px; padding: 0 14px; border: 1px solid var(--accent); background: transparent; cursor: pointer; }
 .empty-state.compact { border: 0; }
 
-.transcript-pane { grid-area: transcript; min-width: 0; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; background: var(--ink-0); overflow: hidden; }
+.transcript-pane { grid-area: transcript; min-width: 0; display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; background: var(--ink-0); overflow: hidden; }
 .transcript-header { padding-inline: max(24px, calc((100% - 780px) / 2)); }
 .header-actions { display: flex; gap: 8px; }
 .header-actions button { min-height: 38px; padding: 0 11px; border: 1px solid var(--line); background: transparent; cursor: pointer; font-size: .76rem; }
 .inspector-toggle { display: none; }
 .danger-action { color: var(--danger); }
+.approval-context-banner { --approval-context-risk: var(--accent); width: min(100%, 780px); min-width: 0; min-height: 72px; margin: 0 auto; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 13px; padding: 10px 24px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--approval-context-risk) 6%, var(--ink-0)); }
+.approval-context-banner[data-risk="elevated"] { --approval-context-risk: var(--accent-warm); }
+.approval-context-banner[data-risk="destructive"] { --approval-context-risk: var(--danger); }
+.approval-context-icon { width: 22px; height: 22px; display: grid; place-items: center; border: 1px solid var(--approval-context-risk); color: var(--approval-context-risk); font-size: .7rem; }
+.approval-context-copy { min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 12px; align-items: baseline; }
+.approval-context-copy > strong { font-size: .82rem; }
+.approval-context-copy > span { display: flex; flex-wrap: wrap; gap: 5px 10px; color: var(--muted); font: 600 .62rem/1.3 ui-monospace, SFMono-Regular, Consolas, monospace; text-transform: uppercase; letter-spacing: .055em; }
+.approval-context-copy > span b { color: var(--approval-context-risk); font-weight: 700; }
+.approval-context-copy > small { grid-column: 1 / -1; color: var(--muted); font: .67rem/1.35 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.approval-context-copy time { color: var(--text); }
+.approval-context-banner > a { min-height: 40px; display: inline-flex; align-items: center; padding: 0 12px; border: 1px solid var(--approval-context-risk); color: var(--text); text-decoration: none; font-size: .72rem; white-space: nowrap; }
 .transcript-body { width: min(100%, 780px); margin: 0 auto; padding: 26px 24px 34px; color: var(--muted); overflow: auto; }
 .transcript-record { border-top: 1px solid var(--line); }
 .transcript-record-empty { padding: 26px 0; border-bottom: 1px solid var(--line); }
@@ -492,6 +503,8 @@ dialog input, dialog select { min-height: 44px; width: 100%; padding: 0 11px; bo
   .conversation-list .drawer-close:disabled { display: none; }
   .header-actions button, .drawer-close, .conversation-item { min-height: 44px; }
   .transcript-header { padding-inline: 16px; }
+  .approval-context-banner { grid-template-columns: auto minmax(0, 1fr); padding: 10px 16px 12px; }
+  .approval-context-banner > a { grid-column: 1 / -1; min-height: 44px; justify-content: center; }
   .transcript-header .header-actions { gap: 5px; }
   .transcript-header .header-actions button { width: 44px; overflow: hidden; color: transparent; padding: 0; position: relative; }
   .transcript-header .inspector-toggle::after { content: "i"; position: absolute; inset: 0; display: grid; place-items: center; color: var(--text); }

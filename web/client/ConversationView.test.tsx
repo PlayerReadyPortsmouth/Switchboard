@@ -3,8 +3,9 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { act, cleanup, fireEvent, render, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { ConversationView, type ConversationViewApi } from "./App"
+import { canonicalMessages } from "./components/Transcript"
 import { DraftStore } from "./drafts"
-import type { Conversation, ConversationEvent, Message, Session, TransportLink } from "./types"
+import type { ApprovalPendingAggregate, Conversation, ConversationEvent, Message, Session, TransportLink } from "./types"
 
 const screen = within(document.body)
 const conversation: Conversation = {
@@ -189,6 +190,38 @@ describe("canonical conversation view", () => {
     expect(rows).toHaveLength(2)
     expect(rows[0].textContent).toContain("First")
     expect(rows[1].textContent).toContain("Second")
+  })
+
+  test("places approval context above the body without mutating canonical transcript messages", () => {
+    const supplied = [
+      message({ id: "m2", sequence: 2, content: "Second" }),
+      message({ id: "m1", sequence: 1, content: "First" }),
+      message({ id: "m1", sequence: 1, content: "First" }),
+    ]
+    const originalOrder = supplied.map(item => item.id)
+    const canonicalBefore = canonicalMessages(supplied).map(item => item.id)
+    const approvalContext: ApprovalPendingAggregate = {
+      count: 2,
+      highestRisk: "elevated",
+      nearestExpiry: 1_700_000_300_000,
+      firstId: "approval-1",
+    }
+
+    render(<ConversationView api={api()} conversation={conversation} messages={supplied} approvalContext={approvalContext} />)
+
+    const transcript = screen.getByRole("region", { name: "Transcript" })
+    const header = transcript.querySelector(".transcript-header")!
+    const banner = transcript.querySelector(".approval-context-banner")
+    const body = transcript.querySelector(".transcript-body")!
+    expect(banner).not.toBeNull()
+    if (!banner) return
+    expect(Boolean(header.compareDocumentPosition(banner) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true)
+    expect(Boolean(banner.compareDocumentPosition(body) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true)
+    expect(transcript.getAttribute("data-message-count")).toBe("2")
+    const renderedOrder: string[] = screen.getAllByRole("article").map(row => row.textContent?.includes("First") ? "m1" : "m2")
+    expect(renderedOrder).toEqual(canonicalBefore)
+    expect(supplied.map(item => item.id)).toEqual(originalOrder)
+    expect(canonicalMessages(supplied).map(item => item.id)).toEqual(canonicalBefore)
   })
 
   test("does not reduce a late send response into a newly selected conversation", async () => {

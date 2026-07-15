@@ -2,12 +2,13 @@ import "./testSetup"
 import { afterEach, describe, expect, test } from "bun:test"
 import { act, cleanup, fireEvent, render, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
-import { StrictMode } from "react"
+import { StrictMode, useLayoutEffect, useState } from "react"
 import { ApiError } from "./api"
-import { App, createWorkspaceStream, type AppApi } from "./App"
+import { App, ConversationWorkspace, createWorkspaceStream, type AppApi } from "./App"
+import { ApprovalStream, type ApprovalStreamHandlers } from "./approvalStream"
 import type { ConversationStreamHandlers } from "./conversationStream"
 import { DraftStore } from "./drafts"
-import type { AgentDetail, AgentSummary, ApprovalDetail, ApprovalSummary, Conversation, ConversationInput, Message, Session } from "./types"
+import type { AgentDetail, AgentSummary, ApprovalDetail, ApprovalListPage, ApprovalListQuery, ApprovalOperationsEvent, ApprovalPendingAggregate, ApprovalSummary, Conversation, ConversationInput, Message, Session } from "./types"
 
 const screen = within(document.body)
 
@@ -45,12 +46,73 @@ const approvalDetail = (): ApprovalDetail => ({
   decisionAt: null, outcomeReason: null, audit: [], permissions: { canDecide: false },
 })
 
-function approvalApi(approvalSession: Session) {
+function visibleApprovalSession(overrides: Partial<Session> = {}): Session {
+  return {
+    ...session,
+    features: { ...session.features, approvals: true },
+    permissions: { ...session.permissions, approvals: "viewer" },
+    approvalState: { producing: true, canDecide: false, pendingCount: 1 },
+    ...overrides,
+  }
+}
+
+type ApprovalTestApi = ReturnType<typeof fakeApi> & {
+  listApprovals: NonNullable<AppApi["listApprovals"]>
+  getApproval: NonNullable<AppApi["getApproval"]>
+  decideApproval: NonNullable<AppApi["decideApproval"]>
+}
+
+function approvalApi(approvalSession: Session = visibleApprovalSession()): ApprovalTestApi {
   return Object.assign(fakeApi({ session: approvalSession }), {
-    listApprovals: async () => ({ items: [approvalSummary()], nextCursor: null, pendingCount: approvalSession.approvalState.pendingCount, querySummary: null }),
+    listApprovals: async (_query: ApprovalListQuery): Promise<ApprovalListPage> => ({ items: [approvalSummary()], nextCursor: null, pendingCount: approvalSession.approvalState.pendingCount, querySummary: null }),
     getApproval: async () => approvalDetail(),
     decideApproval: async () => ({ approval: approvalDetail() }),
   })
+}
+
+function countedApprovalStreams() {
+  let handlers: ApprovalStreamHandlers | null = null
+  let starts = 0
+  let stops = 0
+  const stream = {
+    async start(_afterSequence: number, next: ApprovalStreamHandlers) {
+      starts++
+      handlers = next
+      next.onState("live")
+    },
+    stop() {
+      stops++
+      handlers = null
+    },
+  }
+  return {
+    get starts() { return starts },
+    get stops() { return stops },
+    factory: () => stream as unknown as ApprovalStream,
+    event(event: ApprovalOperationsEvent) { handlers?.onEvent(event) },
+    invalidate() { handlers?.onInvalidate() },
+  }
+}
+
+type NavigationStep = "approval-detail" | "agents" | "conversation" | "approval-list"
+async function navigateThrough(...steps: NavigationStep[]) {
+  for (const step of steps) {
+    if (step === "approval-detail") {
+      await userEvent.click(await screen.findByRole("link", { name: /Approvals/ }))
+      await screen.findByRole("heading", { name: "Approvals" })
+      await userEvent.click(await screen.findByRole("button", { name: "Open approval Deploy release" }))
+      await screen.findByRole("heading", { name: "Deploy release" })
+    } else if (step === "agents") {
+      await userEvent.click(await screen.findByRole("link", { name: "Agents" }))
+      await screen.findByRole("heading", { name: "Agents" })
+    } else if (step === "conversation") {
+      await userEvent.click(await screen.findByRole("link", { name: "Conversations" }))
+      await screen.findByRole("heading", { name: "Switchboard" })
+    } else {
+      await userEvent.click(await screen.findByRole("link", { name: /Approvals/ }))
+      await screen.findByRole("heading", { name: "Approvals" })
+    }
+  }
 }
 
 function deferred<T>() {
@@ -58,6 +120,28 @@ function deferred<T>() {
   let reject!: (reason: unknown) => void
   const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no })
   return { promise, resolve, reject }
+}
+
+const approvalAggregate = (overrides: Partial<ApprovalPendingAggregate> = {}): ApprovalPendingAggregate => ({
+  count: 1,
+  highestRisk: "elevated",
+  nearestExpiry: 1_700_000_300_000,
+  firstId: "approval-1",
+  ...overrides,
+})
+
+const approvalPage = (querySummary: ApprovalPendingAggregate | null, items = [approvalSummary()]): ApprovalListPage => ({
+  items,
+  nextCursor: null,
+  pendingCount: 91,
+  querySummary,
+})
+
+async function browserBack() {
+  await act(async () => {
+    history.back()
+    await new Promise(resolve => setTimeout(resolve, 0))
+  })
 }
 
 function setViewport(width: number) {
@@ -184,6 +268,283 @@ describe("responsive workspace shell", () => {
       expect(await screen.findByRole("heading", { name: "Not found" })).toBeTruthy()
       direct.unmount()
     }
+  })
+
+  test("one approval stream survives internal destination navigation", async () => {
+    const streams = countedApprovalStreams()
+    render(<App api={approvalApi()} approvalStreamFactory={streams.factory} agentStreamFactory={null} />)
+    await screen.findByRole("link", { name: /Approvals/ })
+    await waitFor(() => expect(streams.starts).toBe(1))
+
+    await navigateThrough("approval-detail", "agents", "conversation", "approval-list")
+
+    expect(streams.starts).toBe(1)
+    expect(streams.stops).toBe(0)
+    cleanup()
+    expect(streams.stops).toBe(1)
+  })
+
+  test("approval changes update the global count, announce it, and invalidate the canonical queue", async () => {
+    const streams = countedApprovalStreams()
+    const api = approvalApi()
+    let listCalls = 0
+    api.listApprovals = async () => {
+      listCalls++
+      return { items: [approvalSummary()], nextCursor: null, pendingCount: 1, querySummary: null }
+    }
+    render(<App api={api} approvalStreamFactory={streams.factory} agentStreamFactory={null} />)
+    await userEvent.click(await screen.findByRole("link", { name: /Approvals/ }))
+    await screen.findByRole("heading", { name: "Approvals" })
+    await waitFor(() => expect(listCalls).toBeGreaterThan(0))
+    const before = listCalls
+
+    act(() => streams.event({
+      kind: "approval_changed",
+      approvalId: "approval-1",
+      pendingCount: 3,
+      sequence: 1,
+      ts: 1_700_000_000_000,
+    }))
+
+    expect(await screen.findByRole("link", { name: "Approvals, 3 pending" })).toBeTruthy()
+    await waitFor(() => expect(listCalls).toBeGreaterThan(before))
+    expect(document.querySelector("[data-approval-announcer]")?.textContent).toBe("3 approvals pending")
+
+    await userEvent.click(screen.getByRole("link", { name: "Agents" }))
+    expect(await screen.findByRole("link", { name: "Approvals, 3 pending" })).toBeTruthy()
+    await userEvent.click(screen.getByRole("link", { name: "Conversations" }))
+    await screen.findByRole("heading", { name: "Switchboard" })
+    expect(await screen.findByRole("link", { name: "Approvals, 3 pending" })).toBeTruthy()
+  })
+
+  test("snapshot invalidation reloads session, queue, and canonical detail", async () => {
+    history.replaceState(null, "", "/approvals/approval-1")
+    const streams = countedApprovalStreams()
+    const initial = visibleApprovalSession()
+    const refreshed = visibleApprovalSession({ approvalState: { producing: true, canDecide: false, pendingCount: 5 } })
+    const api = approvalApi(initial)
+    let sessionCalls = 0
+    let listCalls = 0
+    let detailCalls = 0
+    api.session = async () => ++sessionCalls === 1 ? initial : refreshed
+    api.listApprovals = async () => {
+      listCalls++
+      return { items: [approvalSummary()], nextCursor: null, pendingCount: 1, querySummary: null }
+    }
+    api.getApproval = async () => { detailCalls++; return approvalDetail() }
+    render(<App api={api} approvalStreamFactory={streams.factory} agentStreamFactory={null} />)
+    await screen.findByRole("heading", { name: "Deploy release" })
+    const beforeList = listCalls
+    const beforeDetail = detailCalls
+
+    act(() => streams.invalidate())
+
+    await waitFor(() => expect(sessionCalls).toBe(2))
+    await waitFor(() => expect(listCalls).toBeGreaterThan(beforeList))
+    await waitFor(() => expect(detailCalls).toBeGreaterThan(beforeDetail))
+    expect(await screen.findByRole("link", { name: "Approvals, 5 pending" })).toBeTruthy()
+  })
+
+  test("a newer approval event wins over a stale snapshot session while both revisions refresh conversation context", async () => {
+    const streams = countedApprovalStreams()
+    const initial = visibleApprovalSession()
+    const staleSnapshot = visibleApprovalSession({ approvalState: { producing: true, canDecide: false, pendingCount: 4 } })
+    const refresh = deferred<Session>()
+    const api = approvalApi(initial)
+    let sessionCalls = 0
+    const contextQueries: ApprovalListQuery[] = []
+    api.session = () => ++sessionCalls === 1 ? Promise.resolve(initial) : refresh.promise
+    api.listApprovals = async query => {
+      contextQueries.push(query)
+      return approvalPage(approvalAggregate({ count: contextQueries.length + 1 }))
+    }
+    render(<App api={api} approvalStreamFactory={streams.factory} agentStreamFactory={null} />)
+    await userEvent.click(await screen.findByRole("button", { name: /Design review/ }))
+    expect(await screen.findByText("2 approvals pending")).toBeTruthy()
+
+    act(() => streams.invalidate())
+    await waitFor(() => expect(sessionCalls).toBe(2))
+    act(() => streams.event({
+      kind: "approval_changed",
+      approvalId: "approval-2",
+      pendingCount: 7,
+      sequence: 2,
+      ts: 1_700_000_001_000,
+    }))
+    await waitFor(() => expect(contextQueries.length).toBeGreaterThanOrEqual(3))
+    await act(async () => refresh.resolve(staleSnapshot))
+
+    expect(await screen.findByRole("link", { name: "Approvals, 7 pending" })).toBeTruthy()
+    expect(contextQueries.every(query => JSON.stringify(query) === JSON.stringify({ group: "pending", conversationId: "design/review", limit: 1 }))).toBe(true)
+  })
+
+  test("a session refresh that hides approvals stops the application stream", async () => {
+    const streams = countedApprovalStreams()
+    const visible = visibleApprovalSession()
+    const hidden = {
+      ...visible,
+      features: { ...visible.features, approvals: false },
+      permissions: { ...visible.permissions, approvals: "hidden" as const },
+    }
+    const api = approvalApi(visible)
+    let calls = 0
+    api.session = async () => ++calls === 1 ? visible : hidden
+    render(<App api={api} approvalStreamFactory={streams.factory} agentStreamFactory={null} />)
+    await screen.findByRole("link", { name: /Approvals/ })
+    await waitFor(() => expect(streams.starts).toBe(1))
+
+    act(() => streams.invalidate())
+
+    await waitFor(() => expect(streams.stops).toBe(1))
+    expect(screen.queryByRole("link", { name: /Approvals/ })).toBeNull()
+  })
+
+  test("queries the selected conversation exactly and projects only querySummary", async () => {
+    const visible = visibleApprovalSession({ approvalState: { producing: true, canDecide: false, pendingCount: 91 } })
+    const api = approvalApi(visible)
+    const queries: ApprovalListQuery[] = []
+    api.listApprovals = async query => {
+      queries.push(query)
+      return approvalPage(approvalAggregate({
+        count: 137,
+        highestRisk: "destructive",
+        nearestExpiry: 1_700_000_060_000,
+        firstId: "server-first",
+      }), [approvalSummary()])
+    }
+    render(<App api={api} streamFactory={null} agentStreamFactory={null} approvalStreamFactory={null} />)
+
+    await userEvent.click(await screen.findByRole("button", { name: /Design review/ }))
+
+    expect(await screen.findByText("137 approvals pending")).toBeTruthy()
+    expect(screen.getByText("Destructive risk")).toBeTruthy()
+    expect(queries).toEqual([{ group: "pending", conversationId: "design/review", limit: 1 }])
+    expect(document.body.textContent).not.toContain("91 approvals pending")
+  })
+
+  test("a late prior-conversation aggregate cannot replace the selected conversation banner", async () => {
+    const first = deferred<ApprovalListPage>()
+    const second = deferred<ApprovalListPage>()
+    const api = approvalApi()
+    api.listConversations = async () => [conversation(), conversation({ id: "ops", title: "Operations" })]
+    api.listApprovals = query => query.conversationId === "design/review" ? first.promise : second.promise
+    render(<App api={api} streamFactory={null} agentStreamFactory={null} approvalStreamFactory={null} />)
+    await userEvent.click(await screen.findByRole("button", { name: /Design review/ }))
+    await userEvent.click(screen.getByRole("button", { name: /Operations/ }))
+
+    await act(async () => second.resolve(approvalPage(approvalAggregate({ count: 2, firstId: "ops-first" }))))
+    expect(await screen.findByText("2 approvals pending")).toBeTruthy()
+    await act(async () => first.resolve(approvalPage(approvalAggregate({ firstId: "stale-secret-id" }))))
+
+    expect(screen.getByText("2 approvals pending")).toBeTruthy()
+    expect(document.body.textContent).not.toContain("stale-secret-id")
+    expect((screen.getByRole("link", { name: "Review 2 pending approvals" }) as HTMLAnchorElement).href).toContain("conversationId=ops")
+  })
+
+  for (const [label, result] of [
+    ["forbidden", () => Promise.reject(new ApiError(403, "forbidden"))],
+    ["not found", () => Promise.reject(new ApiError(404, "not_found"))],
+    ["offline", () => Promise.reject(new ApiError(0, "request_failed"))],
+    ["zero aggregate", () => Promise.resolve(approvalPage(approvalAggregate({ count: 0, highestRisk: null, nearestExpiry: null, firstId: null })))],
+    ["missing aggregate", () => Promise.resolve(approvalPage(null))],
+  ] as const) {
+    test(`${label} conversation approval data renders no banner or leaked ID`, async () => {
+      const api = approvalApi()
+      let queries = 0
+      api.listApprovals = async () => { queries++; return result() }
+      render(<App api={api} streamFactory={null} agentStreamFactory={null} approvalStreamFactory={null} />)
+
+      await userEvent.click(await screen.findByRole("button", { name: /Design review/ }))
+      await waitFor(() => expect(queries).toBe(1))
+
+      expect(screen.queryByRole("complementary", { name: "Pending approval context" })).toBeNull()
+      expect(document.body.textContent).not.toContain("approval-1")
+    })
+  }
+
+  test("permission revocation removes approval context in the revocation commit", async () => {
+    const visible = visibleApprovalSession()
+    const hidden: Session = {
+      ...visible,
+      permissions: { ...visible.permissions, approvals: "hidden" },
+    }
+    const api = approvalApi(visible)
+    api.listApprovals = async () => approvalPage(approvalAggregate())
+    let revoke!: () => void
+    const revocationCommitBanners: boolean[] = []
+
+    function RevocationHarness() {
+      const [current, setCurrent] = useState(visible)
+      revoke = () => setCurrent(hidden)
+      useLayoutEffect(() => {
+        if (current.permissions.approvals === "hidden") {
+          revocationCommitBanners.push(document.querySelector(".approval-context-banner") !== null)
+        }
+      }, [current])
+      return <ConversationWorkspace api={api} session={current} streamFactory={null} />
+    }
+
+    render(<RevocationHarness />)
+    await userEvent.click(await screen.findByRole("button", { name: /Design review/ }))
+    expect(await screen.findByRole("complementary", { name: "Pending approval context" })).toBeTruthy()
+
+    act(() => revoke())
+
+    expect(revocationCommitBanners).toEqual([false])
+    expect(screen.queryByRole("complementary", { name: "Pending approval context" })).toBeNull()
+  })
+
+  test("browser Back restores a direct-banner conversation and focuses its link", async () => {
+    const api = approvalApi()
+    api.listApprovals = async query => query.limit === 1
+      ? approvalPage(approvalAggregate())
+      : approvalPage(null)
+    render(<App api={api} streamFactory={null} agentStreamFactory={null} approvalStreamFactory={null} />)
+    await userEvent.click(await screen.findByRole("button", { name: /Design review/ }))
+    await userEvent.click(await screen.findByRole("link", { name: "Review approval" }))
+
+    expect(location.pathname).toBe("/approvals/approval-1")
+    expect(history.state?.approvalReturn).toEqual({ conversationId: "design/review", focus: "approval-detail" })
+    await screen.findByRole("heading", { name: "Deploy release" })
+    await browserBack()
+
+    await waitFor(() => expect(location.pathname).toBe("/conversations/design%2Freview"))
+    const restored = await screen.findByRole("link", { name: "Review approval" })
+    await waitFor(() => expect(document.activeElement).toBe(restored))
+  })
+
+  test("browser Back restores focus to a multiple-request queue trigger", async () => {
+    const api = approvalApi()
+    api.listApprovals = async query => query.limit === 1
+      ? approvalPage(approvalAggregate({ count: 3 }))
+      : approvalPage(null)
+    render(<App api={api} streamFactory={null} agentStreamFactory={null} approvalStreamFactory={null} />)
+    await userEvent.click(await screen.findByRole("button", { name: /Design review/ }))
+    await userEvent.click(await screen.findByRole("link", { name: "Review 3 pending approvals" }))
+
+    expect(`${location.pathname}${location.search}`).toBe("/approvals?group=pending&conversationId=design%2Freview")
+    expect(history.state?.approvalReturn).toEqual({ conversationId: "design/review", focus: "approval-queue" })
+    await screen.findByRole("heading", { name: "Approvals" })
+    await browserBack()
+
+    const restored = await screen.findByRole("link", { name: "Review 3 pending approvals" })
+    await waitFor(() => expect(document.activeElement).toBe(restored))
+  })
+
+  test("browser Back focuses the transcript heading when the banner resolved away", async () => {
+    let context: ApprovalPendingAggregate | null = approvalAggregate()
+    const api = approvalApi()
+    api.listApprovals = async query => query.limit === 1 ? approvalPage(context) : approvalPage(null)
+    render(<App api={api} streamFactory={null} agentStreamFactory={null} approvalStreamFactory={null} />)
+    await userEvent.click(await screen.findByRole("button", { name: /Design review/ }))
+    await userEvent.click(await screen.findByRole("link", { name: "Review approval" }))
+    await screen.findByRole("heading", { name: "Deploy release" })
+    context = null
+    await browserBack()
+
+    const heading = await screen.findByRole("heading", { name: "Design review" })
+    await waitFor(() => expect(document.activeElement).toBe(heading))
+    expect(screen.queryByRole("complementary", { name: "Pending approval context" })).toBeNull()
   })
 
   test("uses live PWA install availability and issue feedback on the Agents route", async () => {
