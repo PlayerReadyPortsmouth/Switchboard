@@ -207,6 +207,7 @@ export function ApprovalsWorkspace({ api, session, routeApprovalId, connection, 
   const [decisionDialog, setDecisionDialog] = useState<DecisionDialogState | null>(null)
   const [decisionAttempt, setDecisionAttempt] = useState<DecisionAttempt | null>(null)
   const [decisionSubmitting, setDecisionSubmitting] = useState(false)
+  const [decisionRequestSubmitting, setDecisionRequestSubmitting] = useState(false)
   const [decisionReconciling, setDecisionReconciling] = useState(false)
   const [decisionError, setDecisionError] = useState("")
   const [decisionStatus, setDecisionStatus] = useState("")
@@ -226,6 +227,7 @@ export function ApprovalsWorkspace({ api, session, routeApprovalId, connection, 
   const attemptRef = useRef<DecisionAttempt | null>(null)
   const decisionPendingRef = useRef(false)
   const reconcilingRef = useRef(false)
+  const decisionOperation = useRef(0)
   const decisionInvokerRef = useRef<HTMLElement | null>(null)
   const revisionRef = useRef(revision)
   selectedRef.current = selected
@@ -309,6 +311,14 @@ export function ApprovalsWorkspace({ api, session, routeApprovalId, connection, 
     try {
       const response = await api.getApproval(approvalId)
       if (generation !== detailGeneration.current) return
+      if (reconcilingRef.current) {
+        decisionOperation.current++
+        reconcilingRef.current = false
+        decisionPendingRef.current = false
+        setDecisionReconciling(false)
+        setDecisionSubmitting(false)
+        setDecisionRequestSubmitting(false)
+      }
       setSelected(response)
       setCanonicalLoaded({ approvalId: response.id, version: response.version, revision: requestedRevision })
       setReconciliationFailed(false)
@@ -385,10 +395,12 @@ export function ApprovalsWorkspace({ api, session, routeApprovalId, connection, 
       && selected.id === decisionDialog.approvalId
       && selected.version === decisionDialog.expectedVersion
       && selected.state === "pending"
+      && session.approvalState.canDecide
+      && selected.permissions.canDecide
       && (canonicalReady || decisionSubmitting || decisionReconciling))
     if (dialogStillCanonical) return
     closeDecisionDialog()
-  }, [canonicalReady, closeDecisionDialog, decisionDialog, decisionReconciling, decisionSubmitting, selected])
+  }, [canonicalReady, closeDecisionDialog, decisionDialog, decisionReconciling, decisionSubmitting, selected, session.approvalState.canDecide])
 
   useLayoutEffect(() => {
     if (activeApproval || !restoreFocus.current) return
@@ -472,6 +484,7 @@ export function ApprovalsWorkspace({ api, session, routeApprovalId, connection, 
       && currentlyLoaded
       && !reconciliationFailed)
     if (!canonical || !allowed) return
+    const operation = ++decisionOperation.current
 
     const previous = attemptRef.current
     const reusable = Boolean(previous?.ambiguous
@@ -491,6 +504,7 @@ export function ApprovalsWorkspace({ api, session, routeApprovalId, connection, 
     setDecisionAttempt({ ...currentAttempt })
     decisionPendingRef.current = true
     setDecisionSubmitting(true)
+    setDecisionRequestSubmitting(true)
     setDecisionError("")
     setDecisionStatus(`Decision in progress: ${decision === "grant" ? "granting" : "denying"} approval.`)
 
@@ -501,20 +515,26 @@ export function ApprovalsWorkspace({ api, session, routeApprovalId, connection, 
         currentAttempt.expectedVersion,
         currentAttempt.idempotencyKey,
       )
+      if (operation === decisionOperation.current) setDecisionRequestSubmitting(false)
       if (attemptRef.current !== currentAttempt) return
       clearDecisionAttempt()
       setReconciliationFailed(false)
       acceptCanonicalApproval(result.approval, true)
       setDecisionStatus(approvalDecisionLiveStatus(result.approval) ?? "Canonical approval updated.")
       if (decisionDialog) closeDecisionDialog()
+      else if (result.approval.state !== "pending") restoreDecisionFocus()
     } catch (cause) {
+      if (operation === decisionOperation.current) setDecisionRequestSubmitting(false)
       if (attemptRef.current !== currentAttempt) return
       const conflict = cause instanceof ApiError && cause.status === 409
       const ambiguous = cause instanceof ApiError && cause.code === "request_failed"
       if (conflict) {
         clearDecisionAttempt()
         const hint = canonicalConflictHint(cause.payload, currentAttempt.approvalId)
-        if (hint) acceptCanonicalApproval(hint, false)
+        if (hint) {
+          acceptCanonicalApproval(hint, false)
+          if (!decisionDialog && hint.state !== "pending") restoreDecisionFocus()
+        }
       } else if (ambiguous) {
         currentAttempt.ambiguous = true
         attemptRef.current = currentAttempt
@@ -548,6 +568,7 @@ export function ApprovalsWorkspace({ api, session, routeApprovalId, connection, 
           setDecisionError("")
           setDecisionStatus(approvalDecisionLiveStatus(reloaded) ?? "Canonical approval changed. Review it before starting a new decision attempt.")
           if (decisionDialog) closeDecisionDialog()
+          else if (reloaded.state !== "pending") restoreDecisionFocus()
         }
       } catch {
         if (generation !== detailGeneration.current) return
@@ -558,12 +579,17 @@ export function ApprovalsWorkspace({ api, session, routeApprovalId, connection, 
         setDecisionStatus("Canonical reconciliation failed. Reload approval before retrying.")
         if (decisionDialog) closeDecisionDialog()
       } finally {
-        reconcilingRef.current = false
-        setDecisionReconciling(false)
+        if (operation === decisionOperation.current) {
+          reconcilingRef.current = false
+          setDecisionReconciling(false)
+        }
       }
     } finally {
-      decisionPendingRef.current = false
-      setDecisionSubmitting(false)
+      if (operation === decisionOperation.current) {
+        decisionPendingRef.current = false
+        setDecisionSubmitting(false)
+        setDecisionRequestSubmitting(false)
+      }
     }
   }
 
@@ -595,10 +621,10 @@ export function ApprovalsWorkspace({ api, session, routeApprovalId, connection, 
       ? "Core approval production is off; decisions are disabled."
       : connection !== "live"
         ? "Reconnect to decide this approval."
-        : decisionSubmitting
-          ? "Decision in progress. Approval controls are disabled."
-          : decisionReconciling || !canonicalReady
-            ? "Reloading canonical approval before decisions are enabled."
+        : decisionReconciling || !canonicalReady
+          ? "Reloading canonical approval before decisions are enabled."
+          : decisionSubmitting
+            ? "Decision in progress. Approval controls are disabled."
             : decisionAttempt?.ambiguous
               ? "Canonical approval is still pending. A matching retry will reuse the same attempt."
               : ""
@@ -607,6 +633,8 @@ export function ApprovalsWorkspace({ api, session, routeApprovalId, connection, 
     && selected.id === decisionDialog.approvalId
     && selected.version === decisionDialog.expectedVersion
     && selected.state === "pending"
+    && session.approvalState.canDecide
+    && selected.permissions.canDecide
     && (canonicalReady || decisionSubmitting || decisionReconciling)
     ? selected
     : null
@@ -618,6 +646,6 @@ export function ApprovalsWorkspace({ api, session, routeApprovalId, connection, 
     <ApprovalList items={items} selectedId={activeApproval} filters={filters} now={now} pendingCount={pendingCount} loading={loading} error={loadError} connection={connection} nextCursor={nextCursor} loadingMore={loadingMore} onFiltersChange={changeFilters} onSelect={selectApproval} onLoadMore={() => { if (nextCursor) void loadList(true, nextCursor) }} rowRef={registerRow} />
     <ApprovalDetail approval={selected} loading={detailLoading} error={selectedError} hidden={hiddenDetail} producing={session.approvalState.producing} connection={connection} closeRef={detailCloseRef} focusRef={detailFocusRef} decisionControls={showDecisionControls ? { disabled: decisionControlsDisabled, guidance: decisionGuidance, onDecision: requestDecision } : undefined} onBack={showList} onConversation={conversationId => onNavigate("conversations", conversationId)} />
     <DestinationMobileNav active="approvals" features={destinationFeatures} pendingApprovals={pendingCount} onNavigate={destination => onNavigate(destination)} />
-    {dialogApproval && decisionDialog ? <ApprovalDecisionDialog approval={dialogApproval} decision={decisionDialog.decision} submitting={decisionSubmitting || decisionReconciling} error={decisionError} onCancel={() => { setDecisionDialog(null); setDecisionError("") }} onConfirm={() => { void submitDecision(decisionDialog.decision) }} /> : null}
+    {dialogApproval && decisionDialog ? <ApprovalDecisionDialog approval={dialogApproval} decision={decisionDialog.decision} submitting={decisionRequestSubmitting} disabled={decisionControlsDisabled} guidance={decisionGuidance} error={decisionError} onCancel={closeDecisionDialog} onConfirm={() => { void submitDecision(decisionDialog.decision) }} /> : null}
   </main>
 }

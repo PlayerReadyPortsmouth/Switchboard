@@ -8,10 +8,12 @@ const decisionTitle: Record<ApprovalDecision, string> = {
   deny: "Deny approval",
 }
 
-export function ApprovalDecisionDialog({ approval, decision, submitting, error, onCancel, onConfirm }: {
+export function ApprovalDecisionDialog({ approval, decision, submitting, disabled, guidance, error, onCancel, onConfirm }: {
   approval: ApprovalDetail
   decision: ApprovalDecision
   submitting: boolean
+  disabled: boolean
+  guidance: string
   error: string
   onCancel(): void
   onConfirm(): void
@@ -32,7 +34,7 @@ export function ApprovalDecisionDialog({ approval, decision, submitting, error, 
 
   return <div className="dialog-backdrop">
     <dialog ref={dialogRef} aria-labelledby="approval-decision-title" className="approval-decision-dialog" tabIndex={-1}>
-      <form onSubmit={event => { event.preventDefault(); if (!submitting) onConfirm() }}>
+      <form onSubmit={event => { event.preventDefault(); if (!submitting && !disabled) onConfirm() }}>
         <header><p className="eyebrow">Protected approval decision</p><h2 id="approval-decision-title">{decisionTitle[decision]}</h2></header>
         <p>{decision === "grant" ? "Granting authorizes exactly the held effect shown here." : "Denying discards the held effect without running it."}</p>
         {destructiveGrant ? <p className="approval-irreversible"><strong>Destructive and potentially irreversible.</strong> Verify every target and fingerprint before granting.</p> : null}
@@ -43,8 +45,9 @@ export function ApprovalDecisionDialog({ approval, decision, submitting, error, 
         </dl>
         <section className="approval-decision-effect" aria-label="Exact held effect"><h3>Exact held effect</h3><SafeValueView value={approval.detail} /></section>
         {submitting ? <p role="status">Decision in progress. This dialog cannot be dismissed.</p> : null}
+        {disabled && guidance ? <p role="status">{guidance}</p> : null}
         {error ? <p role="alert" className="form-error">{error}</p> : null}
-        <div className="dialog-actions"><button type="button" disabled={submitting} onClick={cancel}>Cancel</button><button type="submit" className={decision === "grant" ? "danger-fill" : ""} disabled={submitting}>{confirmLabel}</button></div>
+        <div className="dialog-actions"><button type="button" disabled={submitting} onClick={cancel}>Cancel</button><button type="submit" className={decision === "grant" ? "danger-fill" : ""} disabled={submitting || disabled}>{confirmLabel}</button></div>
       </form>
     </dialog>
   </div>

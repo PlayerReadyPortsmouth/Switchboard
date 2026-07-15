@@ -93,6 +93,8 @@ function approvalApi(options: {
 
 function renderDialog(value: ApprovalDetail, decision: ApprovalDecision, options: {
   submitting?: boolean
+  disabled?: boolean
+  guidance?: string
   error?: string
   onCancel?: () => void
   onConfirm?: () => void
@@ -101,6 +103,8 @@ function renderDialog(value: ApprovalDetail, decision: ApprovalDecision, options
     approval: value,
     decision,
     submitting: options.submitting ?? false,
+    disabled: options.disabled ?? false,
+    guidance: options.guidance ?? "",
     error: options.error ?? "",
     onCancel: options.onCancel ?? (() => {}),
     onConfirm: options.onConfirm ?? (() => {}),
@@ -123,22 +127,36 @@ function renderWorkspace(options: {
 } = {}) {
   const fixture = options.api ? null : approvalApi({ initial: options.approval })
   const api = options.api ?? fixture!.api
-  const workspaceSession = options.session ?? session()
-  const connection = options.connection ?? "live"
-  const revision = options.revision ?? 0
-  const view = render(<ApprovalsWorkspace
+  let workspaceSession = options.session ?? session()
+  let connection = options.connection ?? "live"
+  let revision = options.revision ?? 0
+  const workspace = () => <ApprovalsWorkspace
     api={api}
     session={workspaceSession}
     routeApprovalId="approval-1"
     connection={connection}
     revision={revision}
-    pendingCount={1}
+    pendingCount={revision === 0 ? 1 : 0}
     onNavigate={() => {}}
     onNewConversation={() => {}}
-  />)
-  return { ...view, api: fixture?.calls ?? null, rerenderRevision(nextRevision: number) {
-    view.rerender(<ApprovalsWorkspace api={api} session={workspaceSession} routeApprovalId="approval-1" connection={connection} revision={nextRevision} pendingCount={0} onNavigate={() => {}} onNewConversation={() => {}} />)
-  } }
+  />
+  const view = render(workspace())
+  return {
+    ...view,
+    api: fixture?.calls ?? null,
+    rerenderRevision(nextRevision: number) {
+      revision = nextRevision
+      view.rerender(workspace())
+    },
+    rerenderConnection(nextConnection: ConnectionState) {
+      connection = nextConnection
+      view.rerender(workspace())
+    },
+    rerenderSession(nextSession: Session) {
+      workspaceSession = nextSession
+      view.rerender(workspace())
+    },
+  }
 }
 
 afterEach(cleanup)
@@ -165,7 +183,7 @@ describe("ApprovalDecisionDialog", () => {
     dialog.dispatchEvent(new Event("cancel", { bubbles: true, cancelable: true }))
     expect(onCancel).toHaveBeenCalledTimes(0)
     expect(dialog.open).toBe(true)
-    view.rerender(<ApprovalDecisionDialog approval={approval()} decision="grant" submitting={false} error="" onCancel={onCancel} onConfirm={() => {}} />)
+    view.rerender(<ApprovalDecisionDialog approval={approval()} decision="grant" submitting={false} disabled={false} guidance="" error="" onCancel={onCancel} onConfirm={() => {}} />)
     await userEvent.click(screen.getByRole("button", { name: "Cancel" }))
     await waitFor(() => expect(document.activeElement).toBe(trigger))
     trigger.remove()
@@ -184,6 +202,43 @@ describe("protected approval decisions", () => {
     renderWorkspace({ approval: approval({ risk: "elevated" }) })
     await userEvent.click(await screen.findByRole("button", { name: "Deny" }))
     expect(screen.getByRole("dialog")).toBeTruthy()
+  })
+
+  test("direct low-risk denial restores focus to responsive Back after terminal success", async () => {
+    const fixture = approvalApi({ initial: approval({ risk: "low" }) })
+    renderWorkspace({ api: fixture.api })
+    await userEvent.click(await screen.findByRole("button", { name: "Deny" }))
+
+    expect(await screen.findByText(/held effect was discarded without running/i)).toBeTruthy()
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Back to approvals" })))
+  })
+
+  test("direct low-risk denial restores focus to the detail region when Back is hidden", async () => {
+    const fixture = approvalApi({ initial: approval({ risk: "low" }) })
+    renderWorkspace({ api: fixture.api })
+    const back = await screen.findByRole("button", { name: "Back to approvals" }) as HTMLButtonElement
+    back.style.display = "none"
+    await userEvent.click(screen.getByRole("button", { name: "Deny" }))
+
+    expect(await screen.findByText(/held effect was discarded without running/i)).toBeTruthy()
+    await waitFor(() => expect(document.activeElement?.getAttribute("aria-label")).toBe("Approval detail"))
+  })
+
+  test("non-dialog conflict reconciliation restores focus after terminal canonical reload", async () => {
+    const pending = approval({ risk: "low" })
+    const terminal = approval({ risk: "low", version: "v2", state: "denied", terminalAt: NOW })
+    const fixture = approvalApi({
+      initial: pending,
+      get: async (_id, call) => call === 1 ? pending : terminal,
+      decide: async () => { throw new ApiError(409, "already_resolved", { canonical: terminal }) },
+    })
+    renderWorkspace({ api: fixture.api })
+    const back = await screen.findByRole("button", { name: "Back to approvals" }) as HTMLButtonElement
+    back.style.display = "none"
+    await userEvent.click(await screen.findByRole("button", { name: "Deny" }))
+
+    expect(await screen.findByText(/held effect was discarded without running/i)).toBeTruthy()
+    await waitFor(() => expect(document.activeElement?.getAttribute("aria-label")).toBe("Approval detail"))
   })
 
   test("viewers and approver-excluded operators see no decision controls", async () => {
@@ -225,6 +280,55 @@ describe("protected approval decisions", () => {
     expect(await screen.findByText("Core approval production is off; decisions are disabled.")).toBeTruthy()
     expect((screen.getByRole("button", { name: "Grant" }) as HTMLButtonElement).disabled).toBe(true)
     expect((screen.getByRole("button", { name: "Deny" }) as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  test("an open confirmation blocks confirm but permits cancel when the connection drops", async () => {
+    const view = renderWorkspace()
+    await userEvent.click(await screen.findByRole("button", { name: "Grant" }))
+
+    view.rerenderConnection("offline")
+
+    const dialog = screen.getByRole("dialog")
+    expect(dialog.textContent).toContain("Reconnect to decide this approval.")
+    expect((screen.getByRole("button", { name: "Grant approval" }) as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByRole("button", { name: "Cancel" }) as HTMLButtonElement).disabled).toBe(false)
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }))
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+  })
+
+  test("an open confirmation blocks confirm but permits cancel when production stops", async () => {
+    const view = renderWorkspace()
+    await userEvent.click(await screen.findByRole("button", { name: "Grant" }))
+
+    view.rerenderSession(session("operator", { producing: false, canDecide: true }))
+
+    const dialog = screen.getByRole("dialog")
+    expect(dialog.textContent).toContain("Core approval production is off; decisions are disabled.")
+    expect((screen.getByRole("button", { name: "Grant approval" }) as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByRole("button", { name: "Cancel" }) as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  test("session decision permission revocation closes an open confirmation and removes controls", async () => {
+    const view = renderWorkspace()
+    await userEvent.click(await screen.findByRole("button", { name: "Grant" }))
+
+    view.rerenderSession(session("viewer"))
+
+    await waitFor(() => expect(Boolean(screen.queryByRole("dialog"))).toBe(false))
+    expect(Boolean(screen.queryByRole("button", { name: /^(Grant|Deny)$/ }))).toBe(false)
+  })
+
+  test("detail decision permission revocation closes an open confirmation and removes controls", async () => {
+    let current = approval()
+    const fixture = approvalApi({ get: async () => current })
+    const view = renderWorkspace({ api: fixture.api, revision: 0 })
+    await userEvent.click(await screen.findByRole("button", { name: "Grant" }))
+
+    current = approval({ permissions: { canDecide: false } })
+    view.rerenderRevision(1)
+
+    await waitFor(() => expect(Boolean(screen.queryByRole("dialog"))).toBe(false))
+    expect(Boolean(screen.queryByRole("button", { name: /^(Grant|Deny)$/ }))).toBe(false)
   })
 
   test("double submission uses one request and one UUID for the attempt", async () => {
@@ -308,7 +412,7 @@ describe("protected approval decisions", () => {
     }
   })
 
-  test("a newer revision superseding ambiguous reconciliation does not leave controls locked", async () => {
+  test("a newer revision supersedes an unresolved ambiguous reconciliation and unlocks controls", async () => {
     const staleReload = deferred<ApprovalDetail>()
     const fixture = approvalApi({
       get: async (_id, call) => call === 1 ? approval() : call === 2 ? staleReload.promise : approval({ version: "v2" }),
@@ -321,14 +425,35 @@ describe("protected approval decisions", () => {
 
     view.rerenderRevision(1)
     await waitFor(() => expect(fixture.calls.get).toHaveLength(3))
-    await act(async () => {
-      staleReload.resolve(approval())
-      await staleReload.promise
-    })
 
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
-    expect((screen.getByRole("button", { name: "Grant" }) as HTMLButtonElement).disabled).toBe(false)
+    await waitFor(() => expect((screen.getByRole("button", { name: "Grant" }) as HTMLButtonElement).disabled).toBe(false))
     expect((screen.getByRole("button", { name: "Deny" }) as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  test("a canonical revision cannot unlock a decision request that is still in flight", async () => {
+    const pendingDecision = deferred<ApprovalDecisionResult>()
+    const fixture = approvalApi({
+      get: async () => approval(),
+      decide: async () => pendingDecision.promise,
+    })
+    const view = renderWorkspace({ api: fixture.api, revision: 0 })
+    await userEvent.click(await screen.findByRole("button", { name: "Grant" }))
+    await userEvent.click(screen.getByRole("button", { name: "Grant approval" }))
+    await waitFor(() => expect(fixture.calls.decisions).toHaveLength(1))
+
+    view.rerenderRevision(1)
+    await waitFor(() => expect(fixture.calls.get).toHaveLength(2))
+
+    const confirm = screen.getByRole("button", { name: "Granting…" }) as HTMLButtonElement
+    expect(confirm.disabled).toBe(true)
+    confirm.click()
+    expect(fixture.calls.decisions).toHaveLength(1)
+
+    await act(async () => {
+      pendingDecision.resolve({ approval: approval({ state: "granted", execution: "succeeded", version: "v2", terminalAt: NOW }) })
+      await pendingDecision.promise
+    })
   })
 
   test("a newer same-version revision proves an ambiguous attempt is safe to retry", async () => {
