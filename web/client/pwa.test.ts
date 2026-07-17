@@ -61,6 +61,19 @@ describe("registerPwa", () => {
     secure.dispose()
   })
 
+  test("registers the service worker under a configured base path with a matching scope", async () => {
+    const registrations: Array<{ url: string; scope: string | undefined }> = []
+    Object.defineProperty(navigator, "serviceWorker", { configurable: true, value: {
+      register: async (url: string, options?: { scope?: string }) => { registrations.push({ url, scope: options?.scope }) },
+    } })
+    Object.defineProperty(globalThis, "isSecureContext", { configurable: true, value: true })
+
+    const controller = registerPwa("/switchboard/")
+    await Promise.resolve()
+    expect(registrations).toEqual([{ url: "/switchboard/sw.js", scope: "/switchboard/" }])
+    controller.dispose()
+  })
+
   test("captures one install prompt and clears availability after prompting", async () => {
     const controller = registerPwa()
     const states: Array<{ installAvailable: boolean; online: boolean }> = []

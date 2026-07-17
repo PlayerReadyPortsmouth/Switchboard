@@ -89,6 +89,30 @@ test("typed agent methods encode names and use documented request shapes", async
   expect(calls[5].headers.get("idempotency-key")).toBe("retry-key")
 })
 
+test("applies a non-root base path to every request", async () => {
+  const calls: Request[] = []
+  const api = new WorkspaceApi(async input => {
+    calls.push(input as Request)
+    return Response.json(message, { status: 201 })
+  }, "http://localhost", "/switchboard/")
+
+  await api.session()
+  await api.postMessage("c/1", { content: "hi", clientKey: "draft-1" })
+
+  expect(new URL(calls[0].url).pathname).toBe("/switchboard/api/session")
+  expect(new URL(calls[1].url).pathname).toBe("/switchboard/api/conversations/c%2F1/messages")
+})
+
+test("the default base path leaves request URLs unprefixed", async () => {
+  const calls: Request[] = []
+  const api = new WorkspaceApi(async input => {
+    calls.push(input as Request)
+    return Response.json(message)
+  })
+  await api.session()
+  expect(new URL(calls[0].url).pathname).toBe("/api/session")
+})
+
 test("non-JSON error responses become safe ApiErrors", async () => {
   const api = new WorkspaceApi(async () => new Response("<html>proxy failure</html>", { status: 502, headers: { "content-type": "text/html" } }))
   try {

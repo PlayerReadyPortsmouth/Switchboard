@@ -10,6 +10,11 @@ function build() {
   expect(result.exitCode, result.stderr.toString()).toBe(0)
 }
 
+function buildWithBase(base: string) {
+  const result = Bun.spawnSync({ cmd: [process.execPath, "run", "scripts/build-web.ts"], env: { ...process.env, SWITCHBOARD_WEB_BASE: base }, stdout: "pipe", stderr: "pipe" })
+  expect(result.exitCode, result.stderr.toString()).toBe(0)
+}
+
 async function outputDigest() {
   const paths = [...new Bun.Glob("**/*").scanSync(outdir)].sort()
   const hash = createHash("sha256")
@@ -145,5 +150,49 @@ describe("PWA build", () => {
     expect(harness.networkRequests).toEqual([])
     expect(harness.cachedRequests).toEqual([])
     expect(source).not.toContain("cache.put(")
+  })
+
+  test("prefixes assets, manifest, service worker, and meta under a configured base", async () => {
+    buildWithBase("/switchboard/")
+
+    const html = await Bun.file(`${outdir}/index.html`).text()
+    expect(html).toContain('<meta name="switchboard-base" content="/switchboard/" />')
+    expect(html).toContain('href="/switchboard/manifest.webmanifest"')
+    expect(html).toContain('href="/switchboard/icons/icon-192.png"')
+    expect(html).toMatch(/src="\/switchboard\/chunk-[^"]+\.js"/)
+
+    const manifest = await Bun.file(`${outdir}/manifest.webmanifest`).json()
+    expect(manifest).toMatchObject({ id: "/switchboard/", start_url: "/switchboard/", scope: "/switchboard/" })
+    expect(manifest.icons).toEqual([
+      { src: "/switchboard/icons/icon-192.png", sizes: "192x192", type: "image/png" },
+      { src: "/switchboard/icons/icon-512.png", sizes: "512x512", type: "image/png" },
+      { src: "/switchboard/icons/maskable-512.png", sizes: "512x512", type: "image/png", purpose: "maskable" },
+    ])
+
+    const sw = await Bun.file(`${outdir}/sw.js`).text()
+    expect(sw).toContain('const BASE = "/switchboard/";')
+    const assets = JSON.parse(sw.match(/const SHELL_ASSETS = (\[[^;]+\])/s)?.[1] ?? "null") as string[]
+    expect(assets).toEqual(expect.arrayContaining([
+      "/switchboard/", "/switchboard/index.html", "/switchboard/manifest.webmanifest", "/switchboard/icons/icon-192.png",
+    ]))
+    expect(assets.every(path => path.startsWith("/switchboard/"))).toBe(true)
+  })
+
+  test("bypasses the based API prefix and falls back to the based shell", async () => {
+    buildWithBase("/switchboard/")
+    const harness = serviceWorkerHarness(await Bun.file(`${outdir}/sw.js`).text())
+    const dispatch = (request: Request) => {
+      let response: Promise<Response> | undefined
+      harness.listeners.get("fetch")!({ request, respondWith: (value: Promise<Response>) => { response = value } })
+      return response
+    }
+    expect(dispatch(new Request("https://switchboard.test/switchboard/api/conversations"))).toBeUndefined()
+
+    harness.setCached("/switchboard/index.html", new Response("based shell"))
+    let response!: Promise<Response>
+    const request = { url: "https://switchboard.test/switchboard/conversations/deep", method: "GET", mode: "navigate", headers: new Headers() } as Request
+    harness.listeners.get("fetch")!({ request, respondWith: (value: Promise<Response>) => { response = value } })
+    expect(await (await response).text()).toBe("based shell")
+    expect(harness.networkRequests).toEqual([])
   })
 })

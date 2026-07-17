@@ -20,3 +20,28 @@ test("builds encoded workspace paths", () => {
   expect(pathForAgent(null)).toBe("/agents")
   expect(pathForAgent("design/review")).toBe("/agents/design%2Freview")
 })
+
+test("parses workspace routes under a non-root base", () => {
+  const base = "/switchboard/"
+  expect(parseWorkspaceRoute("/switchboard/", base)).toEqual({ destination: "conversations", conversationId: null })
+  expect(parseWorkspaceRoute("/switchboard", base)).toEqual({ destination: "conversations", conversationId: null })
+  expect(parseWorkspaceRoute("/switchboard/agents", base)).toEqual({ destination: "agents", agent: null })
+  expect(parseWorkspaceRoute("/switchboard/conversations/design%2Freview", base)).toEqual({ destination: "conversations", conversationId: "design/review" })
+  expect(parseWorkspaceRoute("/switchboard/agents/design%2Freview", base)).toEqual({ destination: "agents", agent: "design/review" })
+})
+
+test("rejects routes outside the configured base", () => {
+  const base = "/switchboard/"
+  expect(parseWorkspaceRoute("/", base)).toEqual({ destination: "not_found" })
+  expect(parseWorkspaceRoute("/agents", base)).toEqual({ destination: "not_found" })
+  expect(parseWorkspaceRoute("/other/agents", base)).toEqual({ destination: "not_found" })
+  expect(parseWorkspaceRoute("/switchboardish/agents", base)).toEqual({ destination: "not_found" })
+})
+
+test("builds encoded workspace paths under a non-root base", () => {
+  const base = "/switchboard/"
+  expect(pathForConversation(null, base)).toBe("/switchboard/")
+  expect(pathForConversation("design/review", base)).toBe("/switchboard/conversations/design%2Freview")
+  expect(pathForAgent(null, base)).toBe("/switchboard/agents")
+  expect(pathForAgent("design/review", base)).toBe("/switchboard/agents/design%2Freview")
+})
