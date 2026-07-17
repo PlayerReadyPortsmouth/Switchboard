@@ -30,6 +30,7 @@ export class WorkspaceApi {
   constructor(
     private readonly fetcher: Fetcher = input => fetch(input),
     private readonly baseUrl = globalThis.location?.origin ?? "http://localhost",
+    private readonly basePath = "/",
   ) {}
 
   session(): Promise<Session> {
@@ -110,7 +111,9 @@ export class WorkspaceApi {
     const headers = new Headers(options.headers)
     const body = options.json === undefined ? undefined : JSON.stringify(options.json)
     if (body !== undefined) headers.set("content-type", "application/json")
-    const response = await this.fetcher(new Request(new URL(path, this.baseUrl), { method: options.method, headers, body }))
+    // basePath has a trailing slash and path a leading slash; drop one to avoid "//". "/" → "".
+    const prefixed = `${this.basePath.replace(/\/$/, "")}${path}`
+    const response = await this.fetcher(new Request(new URL(prefixed, this.baseUrl), { method: options.method, headers, body }))
     const contentType = response.headers.get("content-type") ?? ""
     const value = contentType.includes("application/json") ? await response.json().catch(() => null) : null
     if (!response.ok) {

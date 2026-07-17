@@ -16,6 +16,7 @@ import { initialWorkspaceState, workspaceReducer } from "./state"
 import type { ConnectionState, Conversation, ConversationEvent, ConversationInput, ConversationUpdate, Message, PostMessageInput, Session, TransportLink } from "./types"
 import type { PwaController, PwaState } from "./pwa"
 import { parseWorkspaceRoute, pathForAgent, pathForConversation, type WorkspaceRoute } from "./routes"
+import { webBase } from "./base"
 
 export interface AppApi {
   session(): Promise<Session>
@@ -70,12 +71,11 @@ const connectionLabels: Record<ConnectionState, string> = {
 }
 
 const conversationIdFromLocation = () => {
-  const match = location.pathname.match(/^\/conversations\/([^/]+)$/)
-  if (!match) return null
-  try { return decodeURIComponent(match[1]) } catch { return null }
+  const route = parseWorkspaceRoute(location.pathname, webBase)
+  return route.destination === "conversations" ? route.conversationId : null
 }
 
-const pathFor = pathForConversation
+const pathFor = (conversationId: string | null) => pathForConversation(conversationId, webBase)
 const defaultPwaState: PwaState = { installAvailable: false, online: true, issue: null }
 const createDefaultAgentStream = () => new AgentStream()
 
@@ -247,7 +247,7 @@ export function ConversationView({ api, conversation: suppliedConversation, mess
 export function ConversationWorkspace({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, controllerState, streamFactory = createWorkspaceStream, session: suppliedSession, onSessionLoaded, onNavigateDestination }: ConversationWorkspaceProps) {
   const apiRef = useRef<AppApi | null>(null)
   const draftsRef = useRef<DraftStore | null>(null)
-  if (apiRef.current === null) apiRef.current = suppliedApi ?? new WorkspaceApi()
+  if (apiRef.current === null) apiRef.current = suppliedApi ?? new WorkspaceApi(undefined, undefined, webBase)
   if (draftsRef.current === null) draftsRef.current = suppliedDrafts ?? new DraftStore()
   const api = suppliedApi ?? apiRef.current
   const drafts = suppliedDrafts ?? draftsRef.current
@@ -515,7 +515,7 @@ export function ConversationWorkspace({ api: suppliedApi, drafts: suppliedDrafts
 export function App({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, streamFactory = createWorkspaceStream, agentStreamFactory = createDefaultAgentStream }: AppProps) {
   const apiRef = useRef<AppApi | null>(null)
   const draftsRef = useRef<DraftStore | null>(null)
-  if (apiRef.current === null) apiRef.current = suppliedApi ?? new WorkspaceApi()
+  if (apiRef.current === null) apiRef.current = suppliedApi ?? new WorkspaceApi(undefined, undefined, webBase)
   if (draftsRef.current === null) draftsRef.current = suppliedDrafts ?? new DraftStore()
   const api = suppliedApi ?? apiRef.current
   const drafts = suppliedDrafts ?? draftsRef.current
@@ -527,7 +527,7 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, st
     previewAgentAction: (name: string, action: Parameters<WorkspaceApi["previewAgentAction"]>[1]) => api.previewAgentAction ? api.previewAgentAction(name, action) : Promise.reject(new ApiError(503, "operation_unavailable")),
     confirmAgentAction: (name: string, previewId: string, idempotencyKey: string) => api.confirmAgentAction ? api.confirmAgentAction(name, previewId, idempotencyKey) : Promise.reject(new ApiError(503, "operation_unavailable")),
   } : null, [api])
-  const [route, setRoute] = useState<WorkspaceRoute>(() => parseWorkspaceRoute(location.pathname))
+  const [route, setRoute] = useState<WorkspaceRoute>(() => parseWorkspaceRoute(location.pathname, webBase))
   const [session, setSession] = useState<Session | null>(null)
   const [sessionState, setSessionState] = useState<LoadState>("loading")
   const [pwaState, setPwaState] = useState<PwaState>(() => pwa?.state() ?? defaultPwaState)
@@ -536,7 +536,7 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, st
   useEffect(() => pwa?.subscribe(setPwaState), [pwa])
 
   useEffect(() => {
-    const onPopState = () => setRoute(parseWorkspaceRoute(location.pathname))
+    const onPopState = () => setRoute(parseWorkspaceRoute(location.pathname, webBase))
     window.addEventListener("popstate", onPopState)
     return () => window.removeEventListener("popstate", onPopState)
   }, [])
@@ -564,9 +564,9 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, st
   }, [loadSession, route.destination, session])
 
   const navigate = useCallback((destination: "conversations" | "agents", agent: string | null = null) => {
-    const path = destination === "agents" ? pathForAgent(agent) : pathForConversation(null)
+    const path = destination === "agents" ? pathForAgent(agent, webBase) : pathForConversation(null, webBase)
     history.pushState(null, "", path)
-    setRoute(parseWorkspaceRoute(path))
+    setRoute(parseWorkspaceRoute(path, webBase))
   }, [])
 
   if (route.destination === "not_found") return <NotFound />
@@ -602,7 +602,7 @@ function PwaIssueBanner({ issue }: { issue: PwaState["issue"] }) {
 }
 
 function NotFound() {
-  return <main className="status-page"><section><h1>Not found</h1><p>This Switchboard destination does not exist or is not enabled.</p><a href="/">Return to conversations</a></section></main>
+  return <main className="status-page"><section><h1>Not found</h1><p>This Switchboard destination does not exist or is not enabled.</p><a href={webBase}>Return to conversations</a></section></main>
 }
 
 function NewConversationDialog({ session, error, onCancel, onCreate }: { session: Session; error: string; onCancel(): void; onCreate(input: ConversationInput): Promise<void> }) {

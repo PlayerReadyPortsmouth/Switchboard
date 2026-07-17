@@ -25,7 +25,7 @@ export function isPwaRegistrationAllowed(url: URL, secure: boolean) {
   return secure || url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]"
 }
 
-export function registerPwa(): PwaController {
+export function registerPwa(base = "/"): PwaController {
   let promptEvent: BeforeInstallPromptEvent | null = null
   let current: PwaState = { installAvailable: false, online: navigator.onLine, issue: null }
   let disposed = false
@@ -53,7 +53,7 @@ export function registerPwa(): PwaController {
   window.addEventListener("offline", offline)
 
   if ("serviceWorker" in navigator && isPwaRegistrationAllowed(new URL(location.href), globalThis.isSecureContext === true)) {
-    void navigator.serviceWorker.register("/sw.js").catch(() => publish({
+    void navigator.serviceWorker.register(`${base}sw.js`, { scope: base }).catch(() => publish({
       issue: { source: "service-worker", message: "Switchboard could not enable offline support. Reload the page to try again." },
     }))
   }

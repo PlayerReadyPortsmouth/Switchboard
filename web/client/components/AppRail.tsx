@@ -1,6 +1,8 @@
 import type { ConnectionState } from "../types"
 import { ConnectionBanner } from "./ConnectionBanner"
 import { InstallButton } from "./InstallButton"
+import { webBase } from "../base"
+import { pathForAgent, pathForConversation } from "../routes"
 
 interface AppRailProps {
   active: "conversations" | "agents"
@@ -13,8 +15,8 @@ interface AppRailProps {
 
 export function AppRail({ active, features, connection, install, onNew, onNavigate }: AppRailProps) {
   const destinations = [
-    { id: "conversations" as const, label: "Conversations", glyph: "≡", href: "/", available: true },
-    { id: "agents" as const, label: "Agents", glyph: "⌁", href: "/agents", available: features.agents },
+    { id: "conversations" as const, label: "Conversations", glyph: "≡", href: pathForConversation(null, webBase), available: true },
+    { id: "agents" as const, label: "Agents", glyph: "⌁", href: pathForAgent(null, webBase), available: features.agents },
   ]
   return (
     <nav className="app-rail" aria-label="Application navigation" data-region="application-navigation">
@@ -35,7 +37,7 @@ export function AppRail({ active, features, connection, install, onNew, onNaviga
             <span className="rail-label">{destination.label}</span>
           </a>
         ))}
-        <a className="rail-link" href="/legacy"><span className="rail-glyph" aria-hidden="true">↗</span><span className="rail-label">Legacy console</span></a>
+        <a className="rail-link" href={`${webBase}legacy`}><span className="rail-glyph" aria-hidden="true">↗</span><span className="rail-label">Legacy console</span></a>
       </div>
       <div className="rail-footer">
         {install ? <InstallButton available={install.available} onInstall={install.run} /> : null}
