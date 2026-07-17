@@ -22,6 +22,28 @@ test("reconnect fetches the durable gap before opening SSE", async () => {
   expect(order).toEqual(["gap:3", "sse"])
 })
 
+test("prefixes the conversation stream URL with a non-root base path", async () => {
+  const urls: string[] = []
+  const stream = new ConversationStream({
+    fetchGap: async () => [],
+    open: (url, _handlers) => (urls.push(url), { close() {} }),
+    online: () => true,
+  }, "/switchboard/")
+  await stream.start("c/1", 3, handlers)
+  expect(urls).toEqual(["/switchboard/api/conversations/c%2F1/events?after=3"])
+})
+
+test("leaves the conversation stream URL unprefixed for the default base path", async () => {
+  const urls: string[] = []
+  const stream = new ConversationStream({
+    fetchGap: async () => [],
+    open: (url, _handlers) => (urls.push(url), { close() {} }),
+    online: () => true,
+  }, "/")
+  await stream.start("c/1", 3, handlers)
+  expect(urls).toEqual(["/api/conversations/c%2F1/events?after=3"])
+})
+
 test("message events advance reconnect cursor while activity does not", async () => {
   const urls: string[] = []
   const gaps: number[] = []

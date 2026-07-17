@@ -21,6 +21,30 @@ test("opens the operations stream from the supplied cursor", async () => {
   expect(urls).toEqual(["/api/operations/agents/events?after=7"])
 })
 
+test("prefixes the operations stream URL with a non-root base path", async () => {
+  const urls: string[] = []
+  const stream = new AgentStream({
+    open: (url, _handlers) => (urls.push(url), { close() {} }),
+    online: () => true,
+  }, "/switchboard/")
+
+  await stream.start(7, handlers)
+
+  expect(urls).toEqual(["/switchboard/api/operations/agents/events?after=7"])
+})
+
+test("leaves the operations stream URL unprefixed for the default base path", async () => {
+  const urls: string[] = []
+  const stream = new AgentStream({
+    open: (url, _handlers) => (urls.push(url), { close() {} }),
+    online: () => true,
+  }, "/")
+
+  await stream.start(7, handlers)
+
+  expect(urls).toEqual(["/api/operations/agents/events?after=7"])
+})
+
 test("keeps one monotonic cursor across reconnects", async () => {
   const urls: string[] = []
   const opened: EventSourceHandlers[] = []
