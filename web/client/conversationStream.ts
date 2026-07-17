@@ -45,7 +45,7 @@ export class ConversationStream {
   private readonly clearTimer: (timer: Timer) => void
   private readonly subscribeOnline: (callback: OnlineCallback) => () => void
 
-  constructor(private readonly dependencies: ConversationStreamDependencies) {
+  constructor(private readonly dependencies: ConversationStreamDependencies, private readonly basePath = "/") {
     this.setTimer = dependencies.setTimer ?? ((callback, delay) => setTimeout(callback, delay))
     this.clearTimer = dependencies.clearTimer ?? (timer => clearTimeout(timer as ReturnType<typeof setTimeout>))
     this.subscribeOnline = dependencies.subscribeOnline ?? (callback => {
@@ -90,7 +90,7 @@ export class ConversationStream {
         if (!this.isCurrent(generation)) return
         this.cursor = Math.max(this.cursor, ...gap.map(message => message.sequence))
       }
-      const url = `/api/conversations/${encodeURIComponent(this.conversationId)}/events?after=${this.cursor}`
+      const url = `${this.basePath.replace(/\/$/, "")}/api/conversations/${encodeURIComponent(this.conversationId)}/events?after=${this.cursor}`
       const sourceAttempt = ++this.sourceAttempt
       const source = this.dependencies.open(url, {
         open: () => {

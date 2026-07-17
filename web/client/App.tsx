@@ -77,7 +77,7 @@ const conversationIdFromLocation = () => {
 
 const pathFor = (conversationId: string | null) => pathForConversation(conversationId, webBase)
 const defaultPwaState: PwaState = { installAvailable: false, online: true, issue: null }
-const createDefaultAgentStream = () => new AgentStream()
+const createDefaultAgentStream = () => new AgentStream(undefined, webBase)
 
 export function createWorkspaceStream(api: AppApi): ConversationStream {
   if (!api.listMessages) throw new Error("Conversation message API is unavailable")
@@ -91,7 +91,7 @@ export function createWorkspaceStream(api: AppApi): ConversationStream {
       source.addEventListener("error", handlers.error)
       return source
     },
-  })
+  }, webBase)
 }
 
 export function ConversationView({ api, conversation: suppliedConversation, messages, activity = [], drafts: suppliedDrafts, session: suppliedSession, links: suppliedLinks, inspectorOpen = true, composerRef, inspectorCloseRef, onOpenInspector, onCloseInspector = () => {}, onInspectorEscape, onArchive, onCanonicalMessage, onConversationUpdated }: {

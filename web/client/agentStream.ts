@@ -45,7 +45,7 @@ export class AgentStream {
   constructor(private readonly dependencies: AgentStreamDependencies = {
     open: openEventSource,
     online: () => navigator.onLine,
-  }) {
+  }, private readonly basePath = "/") {
     this.setTimer = dependencies.setTimer ?? ((callback, delay) => setTimeout(callback, delay))
     this.clearTimer = dependencies.clearTimer ?? (timer => clearTimeout(timer as ReturnType<typeof setTimeout>))
     this.subscribeOnline = dependencies.subscribeOnline ?? (callback => {
@@ -80,7 +80,7 @@ export class AgentStream {
     if (!this.isCurrent(generation)) return
     try {
       const sourceAttempt = ++this.sourceAttempt
-      const source = this.dependencies.open(`/api/operations/agents/events?after=${this.cursor}`, {
+      const source = this.dependencies.open(`${this.basePath.replace(/\/$/, "")}/api/operations/agents/events?after=${this.cursor}`, {
         open: () => {
           if (!this.isCurrent(generation) || sourceAttempt !== this.sourceAttempt) return
           this.retries = 0
