@@ -11,11 +11,11 @@ import { ConversationList } from "./components/ConversationList"
 import { Inspector } from "./components/Inspector"
 import { Transcript, canonicalMessages } from "./components/Transcript"
 import { Composer } from "./components/Composer"
-import { ActivityDisclosure } from "./components/ActivityItem"
+import { TurnSteps } from "./components/TurnSteps"
 import { MobileNav, type MobilePane } from "./components/MobileNav"
 import { useModalDialog } from "./components/useModalDialog"
 import { initialWorkspaceState, workspaceReducer } from "./state"
-import type { ConnectionState, Conversation, ConversationEvent, ConversationInput, ConversationUpdate, DocumentAttachment, Message, PostMessageInput, Session, TransportLink } from "./types"
+import type { ConnectionState, Conversation, ConversationEvent, ConversationInput, ConversationUpdate, DocumentAttachment, Message, PostMessageInput, Session, ToolStep, TransportLink } from "./types"
 import type { PwaController, PwaState } from "./pwa"
 import { parseWorkspaceRoute, pathForAgent, pathForConversation, pathForDocument, type WorkspaceRoute } from "./routes"
 import { webBase } from "./base"
@@ -100,12 +100,13 @@ export function createWorkspaceStream(api: AppApi): ConversationStream {
   }, webBase)
 }
 
-export function ConversationView({ api, conversation: suppliedConversation, messages, activity = [], attachments = [], drafts: suppliedDrafts, session: suppliedSession, links: suppliedLinks, inspectorOpen = true, composerRef, inspectorCloseRef, onOpenInspector, onCloseInspector = () => {}, onInspectorEscape, onArchive, onCanonicalMessage, onConversationUpdated }: {
+export function ConversationView({ api, conversation: suppliedConversation, messages, activity = [], attachments = [], toolSteps = [], drafts: suppliedDrafts, session: suppliedSession, links: suppliedLinks, inspectorOpen = true, composerRef, inspectorCloseRef, onOpenInspector, onCloseInspector = () => {}, onInspectorEscape, onArchive, onCanonicalMessage, onConversationUpdated }: {
   api: ConversationViewApi
   conversation: Conversation
   messages?: Message[]
   activity?: ConversationEvent[]
   attachments?: DocumentAttachment[]
+  toolSteps?: ToolStep[]
   drafts?: DraftStore
   session?: Session
   links?: TransportLink[]
@@ -139,7 +140,7 @@ export function ConversationView({ api, conversation: suppliedConversation, mess
   const session = suppliedSession ?? {
     identity: suppliedConversation.createdBy,
     agents: [{ name: conversation.primaryAgent, alive: true, busy: false }],
-    features: { agents: false, documents: false },
+    features: { agents: false, documents: false, turnSteps: false },
     permissions: { agents: "hidden" as const },
   }
   const links = suppliedLinks ?? loadedLinks
@@ -247,7 +248,7 @@ export function ConversationView({ api, conversation: suppliedConversation, mess
       <div className="transcript-body">
         <Transcript messages={renderedMessages} onReply={setReplyTo} />
         {attachments.length > 0 ? <ul className="transcript-attachments" aria-label="Shared documents">{attachments.map(attachment => <li key={attachment.token}><DocumentCard token={attachment.token} title={attachment.title} contentType={attachment.contentType} mode={attachment.mode} visibility={attachment.visibility === "org" ? "org" : "private"} viewerIsOwner={false} /></li>)}</ul> : null}
-        <ActivityDisclosure events={activity} />
+        <TurnSteps steps={session.features.turnSteps ? toolSteps : []} events={activity} />
       </div>
       <Composer value={text} replyTo={replyTo} sending={sending} error={sendError} textareaRef={composerRef} onChange={changeText} onSubmit={submit} onRetry={retry} onDismissReply={() => setReplyTo(null)} />
     </section>
@@ -321,7 +322,7 @@ export function ConversationWorkspace({ api: suppliedApi, drafts: suppliedDrafts
         const now = Date.now()
         dispatch({
           type: "session/loaded",
-          session: { identity: "", agents: [], features: { agents: false, documents: false }, permissions: { agents: "hidden" } },
+          session: { identity: "", agents: [], features: { agents: false, documents: false, turnSteps: false }, permissions: { agents: "hidden" } },
         })
         if (!current()) return
         dispatch({ type: "conversations/loaded", conversations: [{
@@ -501,6 +502,7 @@ export function ConversationWorkspace({ api: suppliedApi, drafts: suppliedDrafts
         messages={state.messages}
         activity={state.activity}
         attachments={state.attachments}
+        toolSteps={state.toolSteps}
         drafts={drafts}
         session={state.session}
         links={links}

@@ -7,6 +7,7 @@ import {
   parseStreamEvent, userMessageFrame, interactionFrame,
   buildClaudeArgv, buildShimMcpConfig,
 } from "./streamJsonFraming"
+import type { ToolUseBlock } from "./streamJsonFraming"
 
 export interface AgentProcessHandle {
   writeStdin(s: string): void
@@ -97,7 +98,7 @@ export class StreamJsonTransport implements AgentTransport {
   private cb: (r: AgentReply) => void | Promise<void | SendOutcome> = () => {}
   private outcomeCb: (outcome: AgentTurnOutcome) => void | Promise<void> = () => {}
   private readonly terminalTurns = new Set<string>()
-  private toolUseCb: (tools: { id: string; name: string }[]) => void = () => {}
+  private toolUseCb: (tools: ToolUseBlock[]) => void = () => {}
   private toolResultCb: (results: { id: string; isError: boolean }[]) => void = () => {}
   private gate: TurnGate
 

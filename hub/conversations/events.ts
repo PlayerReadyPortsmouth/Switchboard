@@ -9,8 +9,19 @@ export interface AttachmentInfo {
   visibility: string
 }
 
+/** One tool call in an agent's turn, surfaced live in the web transcript's execution
+ *  spine. A step is published twice: once as `running` when the tool fires, then once
+ *  more with its terminal status — subscribers pair the two by `id`. */
+export interface ToolStepInfo {
+  id: string        // the tool_use id — pairs a result back to its use
+  name: string      // e.g. "Read", "Bash"
+  summary?: string  // one-line argument summary, already truncated server-side
+  status: "running" | "ok" | "error"
+  durationMs?: number
+}
+
 export interface ConversationEvent {
-  kind: "message_committed" | "turn_state" | "activity" | "attachment"
+  kind: "message_committed" | "turn_state" | "activity" | "attachment" | "tool_step"
   conversationId: string
   sequence: number
   ts: number
@@ -18,6 +29,7 @@ export interface ConversationEvent {
   state?: MessageState
   detail?: Record<string, unknown>
   attachment?: AttachmentInfo
+  tool?: ToolStepInfo
 }
 
 /** Build an `attachment` event. These are live-only (not replayed from message history), so the
@@ -25,6 +37,42 @@ export interface ConversationEvent {
  *  ordering and never advance a subscriber's message high-water mark. */
 export function buildAttachmentEvent(conversationId: string, info: AttachmentInfo, now: number): ConversationEvent {
   return { kind: "attachment", conversationId, sequence: now, ts: now, attachment: info }
+}
+
+/** Build a `tool_step` event. Live-only exactly like `attachment` (see above): the
+ *  monotonic clock doubles as the sequence, and `shouldDeliver` never gates on it, so
+ *  a tool step must not advance a subscriber's message replay high-water mark. */
+export function buildToolStepEvent(conversationId: string, step: ToolStepInfo, now: number): ConversationEvent {
+  return { kind: "tool_step", conversationId, sequence: now, ts: now, tool: step }
+}
+
+/** Longest argument summary we ship to a client — one spine line, ellipsised in CSS
+ *  anyway, so this only bounds the `title` tooltip and the payload size. */
+const SUMMARY_LIMIT = 160
+
+/** Fields worth showing per tool, most-specific first — the CLI shows the same thing
+ *  (the path for Read, the command for Bash, the pattern for Grep). Unknown tools fall
+ *  back to their first string-ish argument, which is right far more often than not. */
+const SUMMARY_FIELDS = [
+  // `pattern` outranks `path`: for Grep/Glob the pattern is the subject and the path
+  // is the scope, and the scope is appended to it below rather than replacing it.
+  "command", "file_path", "notebook_path", "pattern", "query", "url", "path", "prompt", "description",
+]
+
+/** One-line argument summary for a tool call, truncated server-side. Returns
+ *  undefined when there is nothing worth showing (no input, or no legible field). */
+export function summariseToolInput(input: Record<string, unknown> | undefined): string | undefined {
+  if (!input) return undefined
+  const pick = SUMMARY_FIELDS.find((field) => typeof input[field] === "string" && (input[field] as string).trim())
+    ?? Object.keys(input).find((field) => typeof input[field] === "string" && (input[field] as string).trim())
+  if (!pick) return undefined
+  // Collapse newlines/runs of whitespace so a heredoc or multi-line command still
+  // renders as a single spine line.
+  const text = (input[pick] as string).replace(/\s+/g, " ").trim()
+  if (!text) return undefined
+  const extra = pick === "pattern" && typeof input.path === "string" && input.path.trim() ? `  ${input.path.trim()}` : ""
+  const line = text + extra
+  return line.length > SUMMARY_LIMIT ? `${line.slice(0, SUMMARY_LIMIT - 1)}…` : line
 }
 
 type Callback = (event: ConversationEvent) => void

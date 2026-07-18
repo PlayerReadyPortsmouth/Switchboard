@@ -6,6 +6,7 @@ import type { AgentTransport } from "./index"
 import type { AgentProcessHandle, ProcessSpawner, ShimSocketLike } from "./streamJson"
 import { normalizeCard } from "./streamJson"
 import { buildCodexAppServerArgv, codexUsage, parseCodexMessage, rpcNotification, rpcRequest, type CodexMessage } from "./codexAppServerFraming"
+import type { ToolUseBlock } from "./streamJsonFraming"
 
 export interface CodexAppServerOpts {
   spawner: ProcessSpawner
@@ -56,7 +57,7 @@ export class CodexAppServerTransport implements AgentTransport {
   private interactionSeq = 0
   private cb: (r: AgentReply) => void | Promise<void | SendOutcome> = () => {}
   private outcomeCb: (outcome: AgentTurnOutcome) => void | Promise<void> = () => {}
-  private toolUseCb: (tools: { id: string; name: string }[]) => void = () => {}
+  private toolUseCb: (tools: ToolUseBlock[]) => void = () => {}
   private toolResultCb: (results: { id: string; isError: boolean }[]) => void = () => {}
   private activeTools = new Map<string, string>()
   private readonly terminalTurns = new Set<string>()
@@ -229,12 +230,22 @@ export class CodexAppServerTransport implements AgentTransport {
     }
   }
 
-  private toolIdentity(item: Record<string, any>): { id: string; name: string } | undefined {
+  private toolIdentity(item: Record<string, any>): ToolUseBlock | undefined {
     if (typeof item.id !== "string") return undefined
+    // `input` is best-effort argument context for the web turn spine; absent
+    // fields simply yield a step with no summary line.
     if (item.type === "mcpToolCall" && typeof item.tool === "string") {
-      return { id: item.id, name: typeof item.server === "string" ? `${item.server}/${item.tool}` : item.tool }
+      const name = typeof item.server === "string" ? `${item.server}/${item.tool}` : item.tool
+      const args = item.arguments && typeof item.arguments === "object" && !Array.isArray(item.arguments)
+        ? item.arguments as Record<string, unknown>
+        : undefined
+      return args ? { id: item.id, name, input: args } : { id: item.id, name }
     }
-    if (item.type === "commandExecution") return { id: item.id, name: "commandExecution" }
+    if (item.type === "commandExecution") {
+      return typeof item.command === "string"
+        ? { id: item.id, name: "commandExecution", input: { command: item.command } }
+        : { id: item.id, name: "commandExecution" }
+    }
     return undefined
   }
 

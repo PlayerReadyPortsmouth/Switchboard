@@ -16,8 +16,11 @@ export function ActivityItem({ event }: { event: ConversationEvent }) {
   )
 }
 
-export function ActivityDisclosure({ events }: { events: ConversationEvent[] }) {
-  const states = events.filter(event => event.kind === "turn_state" && event.state && labels[event.state]).filter((event, index, all) => index === 0 || event.state !== all[index - 1]?.state || event.sequence !== all[index - 1]?.sequence)
-  if (!states.length) return null
-  return <details className="activity-disclosure"><summary><span className="activity-trace" aria-hidden="true" />Live activity</summary><ol>{states.map((event, index) => <ActivityItem key={`${event.sequence}:${event.state}:${index}`} event={event} />)}</ol></details>
+/** The turn_state events worth showing, with consecutive repeats of the same state
+ *  within one turn collapsed — a streaming turn emits one `streaming` event per chunk
+ *  and each would otherwise be announced to screen readers separately. */
+export function turnStateEvents(events: ConversationEvent[]): ConversationEvent[] {
+  return events
+    .filter(event => event.kind === "turn_state" && event.state && labels[event.state])
+    .filter((event, index, all) => index === 0 || event.state !== all[index - 1]?.state || event.sequence !== all[index - 1]?.sequence)
 }

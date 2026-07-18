@@ -10,7 +10,7 @@ afterEach(() => { cleanup(); history.replaceState(null, "", "/documents") })
 
 const session: Session = {
   identity: "ada@example.com",
-  features: { agents: true, documents: true },
+  features: { agents: true, documents: true, turnSteps: false },
   permissions: { agents: "viewer" },
   agents: [],
 }

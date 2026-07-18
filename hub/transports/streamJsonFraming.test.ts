@@ -52,7 +52,8 @@ test("parseStreamEvent extracts tool_use blocks from an assistant frame", () => 
   expect(parseStreamEvent(line)).toEqual({
     kind: "assistant",
     usage: { inputTokens: 5, cacheReadTokens: 50, cacheCreationTokens: 0, outputTokens: 2 },
-    tools: [{ id: "t1", name: "Bash" }, { id: "t2", name: "Read" }],
+    // `input` rides along so callers can render a one-line argument summary.
+    tools: [{ id: "t1", name: "Bash", input: { command: "ls" } }, { id: "t2", name: "Read", input: { path: "x" } }],
   })
 })
 

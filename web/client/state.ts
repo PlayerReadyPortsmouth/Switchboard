@@ -1,4 +1,4 @@
-import type { ConnectionState, Conversation, ConversationEvent, DocumentAttachment, Message, Session } from "./types"
+import type { ConnectionState, Conversation, ConversationEvent, DocumentAttachment, Message, Session, ToolStep } from "./types"
 
 export interface WorkspaceState {
   session: Session | null
@@ -7,6 +7,7 @@ export interface WorkspaceState {
   messages: Message[]
   activity: ConversationEvent[]
   attachments: DocumentAttachment[]
+  toolSteps: ToolStep[]
   connection: ConnectionState
 }
 
@@ -25,6 +26,7 @@ export const initialWorkspaceState: WorkspaceState = {
   messages: [],
   activity: [],
   attachments: [],
+  toolSteps: [],
   connection: "connecting",
 }
 
@@ -35,7 +37,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
     case "conversation/selected":
       return action.conversationId === state.selectedConversationId
         ? state
-        : { ...state, selectedConversationId: action.conversationId, messages: [], activity: [], attachments: [] }
+        : { ...state, selectedConversationId: action.conversationId, messages: [], activity: [], attachments: [], toolSteps: [] }
     case "messages/received": {
       const messages = new Map(state.messages.map(message => [message.id, message]))
       for (const message of action.messages) messages.set(message.id, message)
@@ -48,6 +50,18 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       if (event.kind === "attachment" && event.attachment) {
         if (state.attachments.some(existing => existing.token === event.attachment!.token)) return state
         return { ...state, attachments: [...state.attachments, event.attachment] }
+      }
+      // Tool steps land in their own id-keyed slice: a step first arrives `running`
+      // and is later re-published with its terminal status, so the result UPDATES the
+      // existing row in place (keeping its position in the spine) rather than
+      // appending a duplicate.
+      if (event.kind === "tool_step" && event.tool) {
+        const step = event.tool
+        const index = state.toolSteps.findIndex(existing => existing.id === step.id)
+        if (index === -1) return { ...state, toolSteps: [...state.toolSteps, step] }
+        const toolSteps = [...state.toolSteps]
+        toolSteps[index] = step
+        return { ...state, toolSteps }
       }
       return { ...state, activity: [...state.activity, event] }
     }

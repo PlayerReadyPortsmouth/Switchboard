@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite"
 import { createBuiltWorkspaceAssets } from "../../hub/webAssets"
 import { handleWebRequest, type WebDeps } from "../../hub/webServer"
-import { ConversationEventStream, ConversationService, SqliteConversationRepository } from "../../hub/conversations"
+import { ConversationEventStream, ConversationService, SqliteConversationRepository, buildToolStepEvent, type ToolStepInfo } from "../../hub/conversations"
 import type { WebInput } from "../../hub/web"
 import { AgentOperationsService } from "../../hub/operations/agentService"
 import { AgentEventStream } from "../../hub/operations/agentEvents"
@@ -136,6 +136,9 @@ const deps: WebDeps = {
     service.get(identity, conversationId)
     return events.subscribe(conversationId, after, callback)
   },
+  // The execution spine is on in the fixture so the e2e specs can drive it; the
+  // real hub keeps it behind `toolObservability.webTurnSteps` (default off).
+  turnStepsEnabled: () => true,
 }
 
 const activeSseDrops = new Map<string, Set<() => void>>()
@@ -249,6 +252,17 @@ async function fixtureRoute(request: Request): Promise<Response | null> {
     agentEvents.publish({ kind: "agent_changed", agent: body.agent, ts: now() })
     agentEvents.publish({ kind: "agents_snapshot", ts: now() })
     return Response.json({ resetCount: actionCounts.reset, restartCount: actionCounts.restart, auditRows: auditRows.length })
+  }
+  // Publish a real tool_step through the real event stream, so the e2e spec exercises
+  // the actual SSE → reducer → spine path rather than a stubbed one.
+  if (request.method === "POST" && url.pathname === "/__e2e/tool-step") {
+    const body = await request.json().catch(() => null) as { conversationId?: string; tool?: ToolStepInfo } | null
+    if (!body?.conversationId || !body.tool?.id || !body.tool.name || !body.tool.status) {
+      return Response.json({ error: "missing_fields" }, { status: 400 })
+    }
+    service.get(IDENTITY, body.conversationId)
+    events.publish(buildToolStepEvent(body.conversationId, body.tool, now()))
+    return Response.json({ published: body.tool.id }, { status: 201 })
   }
   return new Response("not found", { status: 404 })
 }

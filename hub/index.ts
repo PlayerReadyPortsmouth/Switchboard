@@ -85,7 +85,7 @@ import { DocumentsDb, publishDocument, uploadDocument, setVisibility, deleteDocu
 import { runDocumentsMigrations } from "./documentsMigrations"
 import { randomBytes, randomUUID } from "crypto"
 import { Database } from "bun:sqlite"
-import { ConversationEventStream, ConversationService, createDiscordConversationMigrator, inboundLinkRoute, LegacyDiscordCompatibilityRouter, ProductionIngressGate, SqliteConversationRepository, TurnCoordinator, buildAttachmentEvent } from "./conversations"
+import { ConversationEventStream, ConversationService, createDiscordConversationMigrator, inboundLinkRoute, LegacyDiscordCompatibilityRouter, ProductionIngressGate, SqliteConversationRepository, TurnCoordinator, buildAttachmentEvent, buildToolStepEvent, summariseToolInput } from "./conversations"
 import { DeliveryWorker, DiscordAdapter, SurfaceRouter } from "./surfaces"
 import { createAsyncShutdown } from "./shutdown"
 import { MemoryBrowse } from "./memoryBrowse"
@@ -669,11 +669,40 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): ProcessAgen
     trace.record({ agent: name, chat, kind: "tool_use", tools })
     if (chat) channelStream.publish(chat, { kind: "tool_use", ts: Date.now(), agent: name, tools })
     if (toolObs) toolUsage.recordToolUse(name, tools)
+    // Web execution spine: only for chats that resolve to a canonical conversation.
+    // A Discord-only chat has no conversation row, so nothing is tracked or published
+    // and behaviour is byte-identical to before.
+    if (!turnStepsOn || !chat) return
+    const conversation = conversationRepo.getConversation(chat)
+    if (!conversation) return
+    const now = Date.now()
+    for (const tool of tools) {
+      const summary = summariseToolInput(tool.input)
+      pendingToolSteps.set(tool.id, { agent: name, conversationId: conversation.id, name: tool.name, summary, startedAt: now })
+      conversationEvents.publish(buildToolStepEvent(conversation.id, {
+        id: tool.id, name: tool.name, status: "running", ...(summary ? { summary } : {}),
+      }, now))
+    }
   })
   t.onToolResult((results) => {
     const chat = lastChatByAgent.get(name) ?? ""
     trace.record({ agent: name, chat, kind: "tool_result", results })
     if (chat) channelStream.publish(chat, { kind: "tool_result", ts: Date.now(), agent: name, results })
+    if (turnStepsOn) {
+      const now = Date.now()
+      for (const result of results) {
+        // Unpaired results (spine switched on mid-turn, or a non-canonical chat)
+        // are simply ignored — a step we never announced has nothing to update.
+        const pending = pendingToolSteps.get(result.id)
+        if (!pending) continue
+        pendingToolSteps.delete(result.id)
+        conversationEvents.publish(buildToolStepEvent(pending.conversationId, {
+          id: result.id, name: pending.name, status: result.isError ? "error" : "ok",
+          durationMs: Math.max(0, now - pending.startedAt),
+          ...(pending.summary ? { summary: pending.summary } : {}),
+        }, now))
+      }
+    }
     // Auto-escalation signal: tally this turn's tool errors (per transport key so a
     // consult/escalation clone can't pollute the real agent's count).
     if (escalationOn && escCfg?.auto) turnErrors.set(key, (turnErrors.get(key) ?? 0) + countErrors(results))
@@ -1072,6 +1101,13 @@ function cardTraceText(card: CardSpec): string {
 async function onAgentReply(reply: AgentReply, key: string): Promise<void | SendOutcome> {
   if (!conversationIngress.tryRun(() => true).accepted) return { ok: false, error: "Hub is shutting down" }
   if (toolObs) toolUsage.endTurn(reply.agent)
+  // A tool whose result never arrived (agent restarted, transport died) would pin its
+  // entry forever — the turn ending is the honest end of the wait, so drop this
+  // agent's stragglers. Their spine rows stay on `running`; we can't measure what
+  // never finished, and inventing a status would be a lie.
+  if (turnStepsOn) {
+    for (const [id, pending] of pendingToolSteps) if (pending.agent === reply.agent) pendingToolSteps.delete(id)
+  }
   // Inter-agent consult: a reply on a virtual consult channel is the answer to a
   // pending ask_agent — settle it (return the answer to the caller) and never post
   // it to Discord or run the normal reply pipeline. Settle on the first text OR
@@ -1250,6 +1286,14 @@ async function runSpawnTrigger(trig: SpawnTrigger, groups: string[], chatId: str
 const dispatchTransports: AgentTransport[] = []
 const pools = new Map<string, ReplicaPool>()
 const toolObs = hub.toolObservability?.enabled === true
+// Web-transcript execution spine. Sub-gate of tool observability (the capture it
+// renders), exactly as `shareLinks.documentsUI` sub-gates the Documents workspace.
+const turnStepsOn = toolObs && hub.toolObservability?.webTurnSteps === true
+// In-flight tool calls awaiting their result, so a `tool_result` can be paired back
+// to its `tool_use` for the terminal status + a measured (never invented) duration.
+// Keyed by tool_use id; entries are dropped as they pair, and the map is only ever
+// populated when the spine is on.
+const pendingToolSteps = new Map<string, { agent: string; conversationId: string; name: string; summary?: string; startedAt: number }>()
 const toolUsage = new ToolUsageRegistry()
 const shareLinksOn = hub.shareLinks?.enabled === true
 const shareArtifactsDir = hub.shareLinks?.artifactsDir ?? join(hub.stateDir, "share-artifacts")
@@ -2476,6 +2520,9 @@ const webDeps: WebDeps = {
   } : {}),
   // Phase 2 web-UI gate: the Documents section only appears when the flag is set.
   documentsUiEnabled: () => shareLinksOn && hub.shareLinks?.documentsUI === true,
+  // Phase 1 web-UI gate: the transcript's tool execution spine only receives (and
+  // only renders) tool steps when tool observability + this sub-key are both on.
+  turnStepsEnabled: () => turnStepsOn,
 }
 const webServer = startWebServer(hub.webPort ?? 0, webDeps, hub.webHost)
 if (webServer) console.error(`switchboard hub: web dashboard on ${hub.webHost ?? "127.0.0.1"}:${hub.webPort}`)

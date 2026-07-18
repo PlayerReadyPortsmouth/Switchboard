@@ -297,3 +297,40 @@ test("SSE drop recovers the committed gap once and in canonical order", async ({
   expect(after.at(-1)).toBe(gap)
   expect(after.filter(item => item === gap)).toHaveLength(1)
 })
+
+test("the execution spine shows live tool steps and updates a running step in place", async ({ page }, testInfo) => {
+  const title = `Tool spine ${testInfo.project.name}`
+  await page.goto("/")
+  await createConversation(page, title)
+  const conversationId = decodeURIComponent(new URL(page.url()).pathname.split("/").at(-1) ?? "")
+
+  const publish = (tool: Record<string, unknown>) => page.evaluate(async ({ conversationId, tool }) => {
+    const response = await fetch("/__e2e/tool-step", {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ conversationId, tool }),
+    })
+    return response.status
+  }, { conversationId, tool })
+
+  expect(await publish({ id: "t1", name: "Read", summary: "apps/api/src/routes/share.ts", status: "running" })).toBe(201)
+  const spine = page.getByRole("list", { name: "Turn activity" })
+  const firstStep = spine.locator(".turn-step").first()
+  await expect(firstStep).toHaveAttribute("data-status", "running")
+  await expect(firstStep).toContainText("Read")
+  await expect(firstStep).toContainText("apps/api/src/routes/share.ts")
+
+  // A second tool starts while the first is still shown.
+  expect(await publish({ id: "t2", name: "Bash", summary: "git log --oneline -12", status: "running" })).toBe(201)
+  await expect(spine.locator(".turn-step")).toHaveCount(2)
+
+  // The first tool's result must UPDATE its existing row, not append a third.
+  expect(await publish({ id: "t1", name: "Read", summary: "apps/api/src/routes/share.ts", status: "ok", durationMs: 412 })).toBe(201)
+  await expect(spine.locator(".turn-step")).toHaveCount(2)
+  await expect(firstStep).toHaveAttribute("data-status", "ok")
+  await expect(firstStep).toContainText("412ms")
+
+  // An error step keeps its own colour channel and stays legible.
+  expect(await publish({ id: "t2", name: "Bash", summary: "git log --oneline -12", status: "error", durationMs: 1200 })).toBe(201)
+  await expect(spine.locator("[data-tool='Bash']")).toHaveAttribute("data-status", "error")
+  await expect(spine.locator("[data-tool='Bash']")).toContainText("1.2s")
+  await expect(spine.locator(".turn-step")).toHaveCount(2)
+})
