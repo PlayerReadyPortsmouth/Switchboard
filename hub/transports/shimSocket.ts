@@ -31,7 +31,7 @@ export class ShimSocketServer {
   private notifyPeerCb: (n: { target: string; text: string }) => void = () => {}
   private askPeerCb: (q: { target: string; message: string }) => Promise<string> = async () => ""
   private attachCb: (a: { chatId: string; path: string; caption?: string; filename?: string }) => OutcomeReturn = () => {}
-  private publishCb: (a: { path: string; mode?: string; title?: string; scope?: string; ttlDays?: number }) => Promise<{ url?: string; error?: string }> = async () => ({})
+  private publishCb: (a: { path: string; mode?: string; title?: string; scope?: string; ttlDays?: number; visibility?: "private" | "org" }) => Promise<{ url?: string; error?: string }> = async () => ({})
 
   constructor(private socketPath: string) {}
 
@@ -123,7 +123,7 @@ export class ShimSocketServer {
         })
         break
       case "publish":
-        void this.publishCb({ path: m.path, mode: m.mode, title: m.title, scope: m.scope, ttlDays: m.ttlDays }).then((res) => {
+        void this.publishCb({ path: m.path, mode: m.mode, title: m.title, scope: m.scope, ttlDays: m.ttlDays, visibility: m.visibility }).then((res) => {
           try { socket.write(encode({ t: "publish_result", id: m.id, url: res.url, error: res.error })) } catch {}
         })
         break

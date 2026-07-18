@@ -393,3 +393,118 @@ test("GET /api/channel/:id/stream → SSE headers, subscribes and unsubscribes o
   await reader.cancel()
   expect(unsubscribed).toBe(true)
 })
+
+// ── Documents routes ──────────────────────────────────────────────────────────
+
+const AUTH = { "x-switchboard-user": "ada@ready.co" }
+const documentDeps = (overrides: Partial<WebDeps> = {}) => fakeDeps({
+  listDocuments: () => [],
+  uploadDocument: async () => ({ ok: true, url: "https://h/share/tok", token: "tok", sbmd: {} as any, sizeBytes: 3 }),
+  setDocumentVisibility: async () => ({ ok: true }),
+  deleteDocument: async () => ({ ok: true }),
+  ...overrides,
+})
+const patch = (path: string, body: unknown, headers: Record<string, string> = {}) =>
+  new Request(`http://hub${path}`, { method: "PATCH", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) })
+const uploadReq = (fields: { file?: File; title?: string; visibility?: string }, headers: Record<string, string> = AUTH) => {
+  const form = new FormData()
+  if (fields.file) form.set("file", fields.file)
+  if (fields.title !== undefined) form.set("title", fields.title)
+  if (fields.visibility !== undefined) form.set("visibility", fields.visibility)
+  return new Request("http://hub/api/documents", { method: "POST", headers, body: form })
+}
+
+test("documents routes 400 without the identity header", async () => {
+  expect((await handleWebRequest(get("/api/documents"), documentDeps())).status).toBe(400)
+})
+
+test("documents routes 503 when the documents service is unavailable", async () => {
+  const res = await handleWebRequest(get("/api/documents", AUTH), fakeDeps())
+  expect(res.status).toBe(503)
+  expect((await res.json()).error).toBe("documents_unavailable")
+})
+
+test("GET /api/documents defaults scope to mine and passes it through", async () => {
+  const seen: string[] = []
+  const deps = documentDeps({ listDocuments: (identity, scope) => { seen.push(`${identity}:${scope}`); return [] } })
+  expect((await handleWebRequest(get("/api/documents", AUTH), deps)).status).toBe(200)
+  await handleWebRequest(get("/api/documents?scope=org", AUTH), deps)
+  expect(seen).toEqual(["ada@ready.co:mine", "ada@ready.co:org"])
+})
+
+test("GET /api/documents rejects an invalid scope", async () => {
+  const res = await handleWebRequest(get("/api/documents?scope=all", AUTH), documentDeps())
+  expect(res.status).toBe(400)
+  expect((await res.json()).error).toBe("invalid_scope")
+})
+
+test("POST /api/documents uploads a multipart file and returns 201 with token+url", async () => {
+  let captured: any
+  const deps = documentDeps({ uploadDocument: async (identity, input) => { captured = { identity, ...input }; return { ok: true, url: "https://h/share/tok9", token: "tok9", sbmd: {} as any, sizeBytes: input.bytes.byteLength } } })
+  const file = new File([new Uint8Array([1, 2, 3])], "report.pdf", { type: "application/pdf" })
+  const res = await handleWebRequest(uploadReq({ file, title: "Report", visibility: "org" }), deps)
+  expect(res.status).toBe(201)
+  expect(await res.json()).toEqual({ token: "tok9", url: "https://h/share/tok9" })
+  expect(captured.identity).toBe("ada@ready.co")
+  expect(captured.filename).toBe("report.pdf")
+  expect(captured.title).toBe("Report")
+  expect(captured.visibility).toBe("org")
+  expect(captured.bytes.byteLength).toBe(3)
+})
+
+test("POST /api/documents 400 with no file part", async () => {
+  const res = await handleWebRequest(uploadReq({ title: "x" }), documentDeps())
+  expect(res.status).toBe(400)
+  expect((await res.json()).error).toBe("missing_file")
+})
+
+test("POST /api/documents rejects an invalid visibility field", async () => {
+  const file = new File([new Uint8Array([1])], "a.txt")
+  const res = await handleWebRequest(uploadReq({ file, visibility: "public" }), documentDeps())
+  expect(res.status).toBe(400)
+  expect((await res.json()).error).toBe("invalid_visibility")
+})
+
+test("POST /api/documents maps an oversize upload to 413", async () => {
+  const deps = documentDeps({ uploadDocument: async () => ({ ok: false, reason: "oversize" }) })
+  const file = new File([new Uint8Array([1])], "big.bin")
+  const res = await handleWebRequest(uploadReq({ file }), deps)
+  expect(res.status).toBe(413)
+})
+
+test("PATCH /api/documents/:token updates visibility for the owner", async () => {
+  let seen: any
+  const deps = documentDeps({ setDocumentVisibility: async (identity, token, visibility) => { seen = { identity, token, visibility }; return { ok: true } } })
+  const res = await handleWebRequest(patch("/api/documents/tok1", { visibility: "org" }, AUTH), deps)
+  expect(res.status).toBe(200)
+  expect(seen).toEqual({ identity: "ada@ready.co", token: "tok1", visibility: "org" })
+})
+
+test("PATCH /api/documents/:token rejects a bad visibility body", async () => {
+  const res = await handleWebRequest(patch("/api/documents/tok1", { visibility: "nope" }, AUTH), documentDeps())
+  expect(res.status).toBe(400)
+})
+
+test("PATCH /api/documents/:token maps not_owner→403 and not_found→404", async () => {
+  const forbid = documentDeps({ setDocumentVisibility: async () => ({ ok: false, reason: "not_owner" }) })
+  expect((await handleWebRequest(patch("/api/documents/t", { visibility: "org" }, AUTH), forbid)).status).toBe(403)
+  const missing = documentDeps({ setDocumentVisibility: async () => ({ ok: false, reason: "not_found" }) })
+  expect((await handleWebRequest(patch("/api/documents/t", { visibility: "org" }, AUTH), missing)).status).toBe(404)
+})
+
+test("DELETE /api/documents/:token deletes for the owner", async () => {
+  let seen: any
+  const deps = documentDeps({ deleteDocument: async (identity, token) => { seen = { identity, token }; return { ok: true } } })
+  const res = await handleWebRequest(del("/api/documents/tok1", AUTH), deps)
+  expect(res.status).toBe(200)
+  expect(seen).toEqual({ identity: "ada@ready.co", token: "tok1" })
+})
+
+test("DELETE /api/documents/:token maps not_owner→403", async () => {
+  const deps = documentDeps({ deleteDocument: async () => ({ ok: false, reason: "not_owner" }) })
+  expect((await handleWebRequest(del("/api/documents/tok1", AUTH), deps)).status).toBe(403)
+})
+
+test("an unsupported method on /api/documents falls through to 405", async () => {
+  expect((await handleWebRequest(patch("/api/documents", {}, AUTH), documentDeps())).status).toBe(405)
+})

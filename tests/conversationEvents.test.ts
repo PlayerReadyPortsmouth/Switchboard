@@ -1,6 +1,10 @@
 import { expect, test } from "bun:test"
-import { ConversationEventStream } from "../hub/conversations/events"
+import { ConversationEventStream, buildAttachmentEvent, type AttachmentInfo } from "../hub/conversations/events"
 import type { Message } from "../hub/conversations/types"
+
+const attachment = (over: Partial<AttachmentInfo> = {}): AttachmentInfo => ({
+  token: "tok1", title: "Report", contentType: "application/pdf", mode: "view", visibility: "org", ...over,
+})
 
 const message = (sequence: number): Message => ({
   id: `m${sequence}`,
@@ -121,4 +125,32 @@ test("activity published reentrantly during replay follows the replayed messages
   const seen: string[] = []
   stream.subscribe("c1", 0, event => seen.push(`${event.kind}:${event.sequence}`))
   expect(seen).toEqual(["message_committed:2", "turn_state:1"])
+})
+
+test("buildAttachmentEvent stamps the clock as both sequence and ts and carries the attachment", () => {
+  const event = buildAttachmentEvent("c1", attachment({ token: "t9" }), 12345)
+  expect(event).toEqual({
+    kind: "attachment", conversationId: "c1", sequence: 12345, ts: 12345,
+    attachment: attachment({ token: "t9" }),
+  })
+})
+
+test("an attachment event is delivered live and never advances the message high-water mark", () => {
+  const history = [message(1)]
+  const stream = new ConversationEventStream((_conversationId, after) => history.filter(item => item.sequence > after))
+  const seen: string[] = []
+  stream.subscribe("c1", 1, event => seen.push(event.kind === "attachment" ? `attachment:${event.attachment!.token}` : event.kind))
+
+  stream.publish(buildAttachmentEvent("c1", attachment({ token: "abc" }), Date.now()))
+  stream.publish({ kind: "message_committed", conversationId: "c1", sequence: 2, ts: 20, message: message(2) })
+
+  expect(seen).toEqual(["attachment:abc", "message_committed"])
+})
+
+test("an attachment event is not replayed to a later subscriber (live-only)", () => {
+  const stream = new ConversationEventStream(() => [])
+  stream.publish(buildAttachmentEvent("c1", attachment(), Date.now()))
+  const seen: string[] = []
+  stream.subscribe("c1", 0, event => seen.push(event.kind))
+  expect(seen).toEqual([])
 })

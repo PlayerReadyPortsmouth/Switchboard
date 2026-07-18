@@ -80,11 +80,12 @@ import { MissionRegistry, findWorkflow, renderStepPrompt, renderMissionCard, typ
 import type { AgentConfig, AgentReply, InboundMessage, SpawnTrigger, SpawnCardUpdate, CardSpec, DirectCommand, OutboundRoute, HubConfig, AgentRegistry, SendOutcome } from "./types"
 import { resolveOutboxFile } from "./outboxAttach"
 import { makeAttachHandler } from "./attachHandler"
-import { publishArtifact } from "./publishLink"
-import { selectExpired } from "./publishCleanup"
+import { selectExpired, reconcileDocuments } from "./publishCleanup"
+import { DocumentsDb, publishDocument, uploadDocument, setVisibility, deleteDocument, listDocuments, type DocumentsIO, type DocumentsOpts } from "./documents"
+import { runDocumentsMigrations } from "./documentsMigrations"
 import { randomBytes, randomUUID } from "crypto"
 import { Database } from "bun:sqlite"
-import { ConversationEventStream, ConversationService, createDiscordConversationMigrator, inboundLinkRoute, LegacyDiscordCompatibilityRouter, ProductionIngressGate, SqliteConversationRepository, TurnCoordinator } from "./conversations"
+import { ConversationEventStream, ConversationService, createDiscordConversationMigrator, inboundLinkRoute, LegacyDiscordCompatibilityRouter, ProductionIngressGate, SqliteConversationRepository, TurnCoordinator, buildAttachmentEvent } from "./conversations"
 import { DeliveryWorker, DiscordAdapter, SurfaceRouter } from "./surfaces"
 import { createAsyncShutdown } from "./shutdown"
 import { MemoryBrowse } from "./memoryBrowse"
@@ -606,19 +607,26 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): ProcessAgen
     const admitted = conversationIngress.tryRun(() => attachHandler(frame))
     return admitted.accepted ? admitted.value : { ok: false, error: "Hub is shutting down" }
   })
-  if (shareLinksOn) {
+  if (shareLinksOn && documentsDb) {
     socket.onPublish(async (a) => {
-      const io = {
-        mkdir: (d: string) => mkdirSync(d, { recursive: true }),
-        writeFile: (p: string, data: Buffer | string) => writeFileSync(p, data),
-        rename: (f: string, t: string) => renameSync(f, t),
-      }
-      const r = publishArtifact(a, {
-        artifactsDir: shareArtifactsDir, raHost: hub.shareLinks?.raHost ?? "readyapp.player-ready.co.uk",
-        agent: name, outboxBase: shareOutboxBase, maxBytes: hub.shareLinks?.maxBytes ?? 26_214_400,
-        defaultTtlDays: hub.shareLinks?.defaultTtlDays ?? 30, now: new Date(), randomToken: () => base62(randomBytes(16)),
-      }, io)
+      // The publishing agent's current chatId decides ownership: a known web-conversation
+      // UUID makes the doc owned by that conversation's creator (email) and visible in their
+      // library; anything else (a Discord channel) publishes ownerless → reconciles to the
+      // org-visible "discord" bucket. Conversation lookup is by-id and unscoped here.
+      const chat = lastChatByAgent.get(name) ?? ""
+      const conversation = chat ? conversationRepo.getConversation(chat) : null
+      const r = await publishDocument({
+        ...a,
+        ...(conversation ? { ownerId: conversation.createdBy, ownerName: conversation.createdBy, conversationId: conversation.id } : {}),
+      }, makeDocumentsOpts(name))
       if (!auditOptedOut(name)) audit.record({ kind: "event", actor: `agent:${name}`, action: "publish_link", outcome: r.ok ? "ok" : "deny", detail: r.ok ? { token: r.token } : { reason: r.reason } })
+      // Surface the new document inline in the web transcript it was published into.
+      if (r.ok && conversation) {
+        conversationEvents.publish(buildAttachmentEvent(conversation.id, {
+          token: r.token, title: r.sbmd.title, contentType: r.sbmd.contentType,
+          mode: r.sbmd.mode, visibility: r.sbmd.visibility ?? "org",
+        }, Date.now()))
+      }
       return r.ok ? { url: r.url } : { error: r.reason }
     })
   }
@@ -1248,6 +1256,27 @@ const shareArtifactsDir = hub.shareLinks?.artifactsDir ?? join(hub.stateDir, "sh
 const shareOutboxBase = hub.outboundAttachments?.outboxDir ?? join(hub.stateDir, "outbox")
 const base62 = (b: Buffer) => { const A = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"; let n = 0n; for (const x of b) n = n * 256n + BigInt(x); let s = ""; while (n > 0n) { s = A[Number(n % 62n)] + s; n /= 62n } return s.padStart(22, "0") }
 
+// Documents library (permanent, ownable, visibility-scoped artifacts). The on-disk `.sbmd`
+// set under shareArtifactsDir stays authoritative; this SQLite table is a queryable MIRROR,
+// reconciled from disk by the share-artifact sweep. Only live when share links are enabled.
+const documentsDb = shareLinksOn
+  ? (() => { const db = new Database(join(hub.stateDir, "documents.sqlite"), { create: true }); runDocumentsMigrations(db); return new DocumentsDb(db) })()
+  : null
+const documentsIo: DocumentsIO = {
+  mkdir: (d) => mkdirSync(d, { recursive: true }),
+  writeFile: (p, data) => writeFileSync(p, data),
+  rename: (f, t) => renameSync(f, t),
+  readFile: (p) => readFileSync(p, "utf8"),
+  rm: (dir) => rmSync(dir, { recursive: true, force: true }),
+}
+// A fresh opts per call so `now` stamps each publish/upload at its own wall-clock time.
+const makeDocumentsOpts = (agent: string): DocumentsOpts => ({
+  db: documentsDb!, io: documentsIo,
+  artifactsDir: shareArtifactsDir, raHost: hub.shareLinks?.raHost ?? "readyapp.player-ready.co.uk",
+  agent, outboxBase: shareOutboxBase, maxBytes: hub.shareLinks?.maxBytes ?? 26_214_400,
+  defaultTtlDays: hub.shareLinks?.defaultTtlDays ?? 30, now: new Date(), randomToken: () => base62(randomBytes(16)),
+})
+
 // F3 effort escalation: re-run a chat's last turn on a short-lived, higher-effort
 // ephemeral clone. Manual via `!hard`, auto when a turn's tool results carried error
 // signals (bounded by `autoRateCap`). Off unless `hub.escalation.enabled`.
@@ -1628,6 +1657,21 @@ if (shareLinksOn) {
     }
     for (const token of selectExpired(entries, now, 3_600_000)) {
       try { rmSync(join(shareArtifactsDir, token), { recursive: true, force: true }) } catch {}
+    }
+    // Reconcile the documents mirror against disk (authoritative) after reaping: re-read the
+    // surviving dirs so orphaned rows are dropped and drifted/new rows are rebuilt from `.sbmd`.
+    if (documentsDb) {
+      let surviving: string[] = []
+      try { surviving = readdirSync(shareArtifactsDir) } catch {}
+      const diskEntries = surviving.filter((n) => !n.endsWith(".tmp")).flatMap((token) => {
+        try {
+          const sbmd = JSON.parse(readFileSync(join(shareArtifactsDir, token, "meta.sbmd"), "utf8"))
+          let sizeBytes = 0
+          try { sizeBytes = statSync(join(shareArtifactsDir, token, sbmd.filename)).size } catch {}
+          return [{ token, sbmd, sizeBytes }]
+        } catch { return [] }
+      })
+      try { reconcileDocuments(diskEntries, documentsDb) } catch {}
     }
   }
   setInterval(sweep, hub.shareLinks?.cleanupIntervalMs ?? 86_400_000).unref()
@@ -2420,6 +2464,16 @@ const webDeps: WebDeps = {
     conversationService.get(identity, conversationId)
     return conversationEvents.subscribe(conversationId, afterSequence, cb)
   },
+  // Documents workspace — only wired when share links (hence the mirror DB) are enabled.
+  // The `x-switchboard-user` email is both the requester id and the human upload's owner name.
+  ...(documentsDb ? {
+    listDocuments: (identity: string, scope: "mine" | "org") => listDocuments({ requesterId: identity, scope }, makeDocumentsOpts("upload")),
+    uploadDocument: (identity: string, input: { filename: string; bytes: Buffer; title?: string; visibility?: "private" | "org" }) =>
+      uploadDocument({ ...input, ownerId: identity, ownerName: identity }, makeDocumentsOpts("upload")),
+    setDocumentVisibility: (identity: string, token: string, visibility: "private" | "org") =>
+      setVisibility(token, visibility, identity, makeDocumentsOpts("upload")),
+    deleteDocument: (identity: string, token: string) => deleteDocument(token, identity, makeDocumentsOpts("upload")),
+  } : {}),
 }
 const webServer = startWebServer(hub.webPort ?? 0, webDeps, hub.webHost)
 if (webServer) console.error(`switchboard hub: web dashboard on ${hub.webHost ?? "127.0.0.1"}:${hub.webPort}`)

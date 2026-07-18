@@ -4,7 +4,13 @@ import { join, extname, normalize, sep } from "path"
 
 export interface Sbmd {
   v: number; mode: "download" | "page" | "view"; contentType: string; filename: string;
-  title: string; scope: string; createdAt: string; expiresAt: string; producer: string
+  title: string; scope: string; createdAt: string;
+  /** Empty string = never expires (a permanent document). */
+  expiresAt: string; producer: string;
+  /** Owning identity (the x-switchboard-user value, i.e. an email). Present on permanent documents. */
+  ownerId?: string; ownerName?: string;
+  /** "private" = owner-only; "org" = any staff/scoped viewer. Absent = legacy scope-only behaviour. */
+  visibility?: "private" | "org"
 }
 
 const MIME: Record<string, { type: string; mode: "download" | "page" | "view" }> = {
@@ -23,7 +29,12 @@ export function inferModeAndType(filename: string): { mode: "download" | "page" 
   return m ? { mode: m.mode, contentType: m.type } : { mode: "download", contentType: "application/octet-stream" }
 }
 
-export interface PublishArgs { path: string; mode?: string; title?: string; scope?: string; ttlDays?: number }
+export interface PublishArgs {
+  path: string; mode?: string; title?: string; scope?: string; ttlDays?: number;
+  /** When true the artifact never expires (a Documents-library entry). Overrides ttlDays. */
+  permanent?: boolean;
+  ownerId?: string; ownerName?: string; visibility?: "private" | "org"
+}
 export interface PublishOpts {
   artifactsDir: string; raHost: string; agent: string; outboxBase: string;
   maxBytes: number; defaultTtlDays: number; now: Date; randomToken: () => string
@@ -33,7 +44,9 @@ export interface PublishIO {
   writeFile: (p: string, data: Buffer | string) => void
   rename: (from: string, to: string) => void
 }
-export type PublishResult = { ok: true; url: string; token: string } | { ok: false; reason: string }
+export type PublishResult =
+  | { ok: true; url: string; token: string; sbmd: Sbmd; sizeBytes: number }
+  | { ok: false; reason: string }
 
 const MODES = new Set(["download", "page", "view"])
 const DAY_MS = 86_400_000
@@ -61,8 +74,12 @@ export function publishArtifact(args: PublishArgs, opts: PublishOpts, io: Publis
     v: 1, mode, contentType: inferred.contentType, filename: r.filename,
     title: args.title || r.filename, scope: args.scope || "staff",
     createdAt: opts.now.toISOString(),
-    expiresAt: new Date(opts.now.getTime() + ttlDays * DAY_MS).toISOString(),
+    // permanent documents carry an empty expiresAt (never-expires); ephemeral links get a real one.
+    expiresAt: args.permanent ? "" : new Date(opts.now.getTime() + ttlDays * DAY_MS).toISOString(),
     producer: `agent:${opts.agent}`,
+    ...(args.ownerId ? { ownerId: args.ownerId } : {}),
+    ...(args.ownerName ? { ownerName: args.ownerName } : {}),
+    ...(args.visibility ? { visibility: args.visibility } : {}),
   }
   const tmp = join(opts.artifactsDir, `${token}.tmp`)
   const finalDir = join(opts.artifactsDir, token)
@@ -72,5 +89,5 @@ export function publishArtifact(args: PublishArgs, opts: PublishOpts, io: Publis
     io.writeFile(join(tmp, "meta.sbmd"), JSON.stringify(sbmd))
     io.rename(tmp, finalDir)
   } catch { return { ok: false, reason: "write_failed" } }
-  return { ok: true, url: `https://${opts.raHost}/share/${token}`, token }
+  return { ok: true, url: `https://${opts.raHost}/share/${token}`, token, sbmd, sizeBytes: r.size }
 }

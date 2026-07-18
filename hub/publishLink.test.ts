@@ -38,7 +38,7 @@ test("publishArtifact: writes file + .sbmd to a tmp dir, renames atomically, ret
   const base = outbox("ada", "report.pdf")
   const { io, calls } = spyIo()
   const r = publishArtifact({ path: "report.pdf" }, opts({ outboxBase: base }), io)
-  expect(r).toEqual({ ok: true, url: "https://ra.example/share/TOKEN123456789012345", token: "TOKEN123456789012345" })
+  expect(r).toMatchObject({ ok: true, url: "https://ra.example/share/TOKEN123456789012345", token: "TOKEN123456789012345", sizeBytes: expect.any(Number) })
   // atomic: mkdir <token>.tmp, write both files into it, then rename .tmp → <token>
   expect(calls.mkdir).toEqual([join("/art", "TOKEN123456789012345.tmp")])
   expect(calls.writeFile.map((w) => w.p)).toEqual([join("/art", "TOKEN123456789012345.tmp", "report.pdf"), join("/art", "TOKEN123456789012345.tmp", "meta.sbmd")])
@@ -46,6 +46,23 @@ test("publishArtifact: writes file + .sbmd to a tmp dir, renames atomically, ret
   // .sbmd content
   const sbmd = JSON.parse(calls.writeFile[1].data)
   expect(sbmd).toMatchObject({ v: 1, mode: "view", contentType: "application/pdf", filename: "report.pdf", title: "report.pdf", scope: "staff", producer: "agent:ada", createdAt: "2026-06-28T00:00:00.000Z", expiresAt: "2026-07-28T00:00:00.000Z" })
+})
+
+test("publishArtifact: permanent doc → empty expiresAt + owner/visibility fields in sbmd", () => {
+  const base = outbox("ada", "report.pdf")
+  const { io, calls } = spyIo()
+  const r = publishArtifact(
+    { path: "report.pdf", permanent: true, ownerId: "ada@ready.co", ownerName: "Ada", visibility: "private" },
+    opts({ outboxBase: base }), io)
+  expect(r.ok).toBe(true)
+  if (r.ok) {
+    expect(r.sbmd.expiresAt).toBe("")
+    expect(r.sbmd.ownerId).toBe("ada@ready.co")
+    expect(r.sbmd.visibility).toBe("private")
+    expect(r.sizeBytes).toBeGreaterThan(0)
+  }
+  const sbmd = JSON.parse(calls.writeFile[1].data)
+  expect(sbmd).toMatchObject({ expiresAt: "", ownerId: "ada@ready.co", ownerName: "Ada", visibility: "private" })
 })
 
 test("publishArtifact: explicit mode/title/scope/ttl override the defaults", () => {
