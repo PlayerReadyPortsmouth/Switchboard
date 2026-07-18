@@ -81,7 +81,7 @@ import type { AgentConfig, AgentReply, InboundMessage, SpawnTrigger, SpawnCardUp
 import { resolveOutboxFile } from "./outboxAttach"
 import { makeAttachHandler } from "./attachHandler"
 import { selectExpired, reconcileDocuments } from "./publishCleanup"
-import { DocumentsDb, publishDocument, uploadDocument, setVisibility, deleteDocument, listDocuments, type DocumentsIO, type DocumentsOpts } from "./documents"
+import { DocumentsDb, publishDocument, uploadDocument, setVisibility, deleteDocument, listDocuments, readDocumentContent, type DocumentsIO, type DocumentsOpts } from "./documents"
 import { runDocumentsMigrations } from "./documentsMigrations"
 import { createHash, randomBytes, randomUUID } from "crypto"
 import { Database } from "bun:sqlite"
@@ -2551,6 +2551,10 @@ const webDeps: WebDeps = {
     setDocumentVisibility: (identity: string, token: string, visibility: "private" | "org") =>
       setVisibility(token, visibility, identity, makeDocumentsOpts("upload")),
     deleteDocument: (identity: string, token: string) => deleteDocument(token, identity, makeDocumentsOpts("upload")),
+    // Byte feed for the in-app document viewer; same visibility contract as the listing.
+    readDocumentContent: (identity: string, token: string) => readDocumentContent(token, identity, {
+      db: documentsDb, artifactsDir: shareArtifactsDir, io: { readBytes: (p) => readFileSync(p) },
+    }),
   } : {}),
   // Phase 2 web-UI gate: the Documents section only appears when the flag is set.
   documentsUiEnabled: () => shareLinksOn && hub.shareLinks?.documentsUI === true,

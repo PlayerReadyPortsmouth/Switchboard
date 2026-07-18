@@ -39,6 +39,8 @@ export interface AppApi {
   uploadDocument?: WorkspaceApi["uploadDocument"]
   setDocumentVisibility?: WorkspaceApi["setDocumentVisibility"]
   deleteDocument?: WorkspaceApi["deleteDocument"]
+  documentContentUrl?: WorkspaceApi["documentContentUrl"]
+  fetchDocumentText?: WorkspaceApi["fetchDocumentText"]
 }
 
 export interface ConversationViewApi {
@@ -546,6 +548,14 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, st
     uploadDocument: (file, options) => api.uploadDocument!(file, options),
     setDocumentVisibility: (token, visibility) => api.setDocumentVisibility!(token, visibility),
     deleteDocument: token => api.deleteDocument!(token),
+    // The content feed is served by the same hub route family; fall back to the canonical path
+    // so a partial api (tests, older shims) still renders rows and download links.
+    documentContentUrl: token => api.documentContentUrl
+      ? api.documentContentUrl(token)
+      : `${webBase}api/documents/${encodeURIComponent(token)}/content`,
+    fetchDocumentText: token => api.fetchDocumentText
+      ? api.fetchDocumentText(token)
+      : Promise.reject(new ApiError(503, "operation_unavailable")),
   } : null, [api])
   const [route, setRoute] = useState<WorkspaceRoute>(() => parseWorkspaceRoute(location.pathname, webBase))
   const [session, setSession] = useState<Session | null>(null)
@@ -584,7 +594,7 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, st
   }, [loadSession, route.destination, session])
 
   const navigate = useCallback((destination: "conversations" | "agents" | "documents", agent: string | null = null) => {
-    const path = destination === "agents" ? pathForAgent(agent, webBase) : destination === "documents" ? pathForDocument(null, webBase) : pathForConversation(null, webBase)
+    const path = destination === "agents" ? pathForAgent(agent, webBase) : destination === "documents" ? pathForDocument(agent, webBase) : pathForConversation(null, webBase)
     history.pushState(null, "", path)
     setRoute(parseWorkspaceRoute(path, webBase))
   }, [])
@@ -616,7 +626,15 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, st
     if (!session.features.documents || !documentsApi) return <NotFound />
     return <>
       <PwaIssueBanner issue={pwaState.issue} />
-      <DocumentsWorkspace api={documentsApi} session={session} />
+      <DocumentsWorkspace
+        api={documentsApi}
+        session={session}
+        routeToken={route.token}
+        connection={pwa && !pwaState.online ? "offline" : navigator.onLine ? "live" : "offline"}
+        install={pwa ? { available: pwaState.installAvailable, run: () => pwa.install() } : install ? { available: true, run: async () => install.run() } : undefined}
+        onNavigate={navigate}
+        onNewConversation={() => navigate("conversations")}
+      />
     </>
   }
 

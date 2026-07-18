@@ -181,3 +181,28 @@ export function listDocuments(
 ): DocumentRow[] {
   return opts.db.list(filter.requesterId, filter.scope)
 }
+
+/** IO for the read path. Deliberately separate from `DocumentsIO` (whose `readFile` is utf8-only)
+ *  because documents are arbitrary bytes — images and PDFs must not go through a string. */
+export interface DocumentReadIO { readBytes: (p: string) => Buffer }
+export interface DocumentReadOpts { db: DocumentsDb; artifactsDir: string; io: DocumentReadIO }
+export type DocumentContentResult =
+  | { ok: true; row: DocumentRow; bytes: Buffer }
+  | { ok: false; reason: "not_found" | "forbidden" | "read_failed" }
+
+/** Read a document's bytes for the in-app viewer, under the same visibility contract the
+ *  listing enforces: an "org" row is readable by any authenticated staff identity, a "private"
+ *  row only by its owner. Visibility is checked before disk is touched, so a private token
+ *  never produces a different failure shape depending on whether the artifact still exists. */
+export function readDocumentContent(
+  token: string, requesterId: string, opts: DocumentReadOpts,
+): DocumentContentResult {
+  const row = opts.db.get(token)
+  if (!row) return { ok: false, reason: "not_found" }
+  if (row.visibility !== "org" && row.ownerId !== requesterId) return { ok: false, reason: "forbidden" }
+  try {
+    return { ok: true, row, bytes: opts.io.readBytes(join(opts.artifactsDir, token, row.filename)) }
+  } catch {
+    return { ok: false, reason: "read_failed" }
+  }
+}

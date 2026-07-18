@@ -5,6 +5,7 @@ import type { WebDeps } from "../hub/webServer"
 import type { AgentConfig } from "../hub/types"
 import type { WorkspaceAssetHandler } from "../hub/webAssets"
 import { AgentOperationsError } from "../hub/operations/agentService"
+import type { DocumentRow } from "../hub/documents"
 
 const baseInput = (): WebInput => ({
   now: 1000, startedAt: 0,
@@ -519,4 +520,90 @@ test("DELETE /api/documents/:token maps not_owner→403", async () => {
 
 test("an unsupported method on /api/documents falls through to 405", async () => {
   expect((await handleWebRequest(patch("/api/documents", {}, AUTH), documentDeps())).status).toBe(405)
+})
+
+// ── Document content feed (the in-page viewer's bytes) ────────────────────────
+
+const contentRow = (overrides: Partial<DocumentRow> = {}): DocumentRow => ({
+  token: "tok1", filename: "notes.md", title: "Notes", contentType: "text/markdown", mode: "view",
+  ownerId: "ada@ready.co", ownerName: "Ada", visibility: "private",
+  createdAt: "2026-07-18T00:00:00Z", expiresAt: null, conversationId: null, sizeBytes: 7, ...overrides,
+})
+
+test("GET /api/documents/:token/content requires the identity header", async () => {
+  const res = await handleWebRequest(get("/api/documents/tok1/content"), documentDeps({
+    readDocumentContent: () => ({ ok: true, row: contentRow(), bytes: Buffer.from("# hello") }),
+  }))
+  expect(res.status).toBe(400)
+  expect((await res.json()).error).toBe("missing_identity")
+})
+
+test("GET /api/documents/:token/content 503s when the read dep is absent", async () => {
+  const res = await handleWebRequest(get("/api/documents/tok1/content", AUTH), documentDeps())
+  expect(res.status).toBe(503)
+  expect((await res.json()).error).toBe("documents_unavailable")
+})
+
+test("GET /api/documents/:token/content serves markdown inline, sniff-proofed", async () => {
+  let seen: unknown
+  const res = await handleWebRequest(get("/api/documents/tok1/content", AUTH), documentDeps({
+    readDocumentContent: (identity, token) => { seen = { identity, token }; return { ok: true, row: contentRow(), bytes: Buffer.from("# hello") } },
+  }))
+  expect(res.status).toBe(200)
+  expect(seen).toEqual({ identity: "ada@ready.co", token: "tok1" })
+  expect(res.headers.get("content-type")).toBe("text/markdown; charset=utf-8")
+  expect(res.headers.get("x-content-type-options")).toBe("nosniff")
+  expect(res.headers.get("content-disposition")).toBe('inline; filename="notes.md"')
+  expect(await res.text()).toBe("# hello")
+})
+
+test("GET /api/documents/:token/content forces HTML to an octet-stream attachment", async () => {
+  // Executable types must never come back under their own content-type: this endpoint serves
+  // onto the workspace origin, where the /share sandbox does not apply.
+  const res = await handleWebRequest(get("/api/documents/tok1/content", AUTH), documentDeps({
+    readDocumentContent: () => ({ ok: true, row: contentRow({ filename: "page.html", contentType: "text/html" }), bytes: Buffer.from("<script>1</script>") }),
+  }))
+  expect(res.headers.get("content-type")).toBe("application/octet-stream")
+  expect(res.headers.get("content-disposition")).toBe('attachment; filename="page.html"')
+})
+
+test("GET /api/documents/:token/content serves images under their own type", async () => {
+  const res = await handleWebRequest(get("/api/documents/tok1/content", AUTH), documentDeps({
+    readDocumentContent: () => ({ ok: true, row: contentRow({ filename: "a.png", contentType: "image/png" }), bytes: Buffer.from([1, 2, 3]) }),
+  }))
+  expect(res.headers.get("content-type")).toBe("image/png")
+  expect(res.headers.get("content-length")).toBe("3")
+})
+
+test("GET /api/documents/:token/content sanitises the filename in the header", async () => {
+  const res = await handleWebRequest(get("/api/documents/tok1/content", AUTH), documentDeps({
+    readDocumentContent: () => ({ ok: true, row: contentRow({ filename: 'ev"il\r\nX-Injected: 1.md' }), bytes: Buffer.from("x") }),
+  }))
+  const disposition = res.headers.get("content-disposition") ?? ""
+  expect(disposition.includes('"')).toBe(true)
+  expect(disposition).toBe('inline; filename="ev_il_X-Injected_ 1.md"')
+  expect(res.headers.get("x-injected")).toBeNull()
+})
+
+test("GET /api/documents/:token/content maps forbidden→403 and not_found/read_failed→404", async () => {
+  const forbidden = documentDeps({ readDocumentContent: () => ({ ok: false, reason: "forbidden" }) })
+  expect((await handleWebRequest(get("/api/documents/t/content", AUTH), forbidden)).status).toBe(403)
+  const missing = documentDeps({ readDocumentContent: () => ({ ok: false, reason: "not_found" }) })
+  expect((await handleWebRequest(get("/api/documents/t/content", AUTH), missing)).status).toBe(404)
+  const unreadable = documentDeps({ readDocumentContent: () => ({ ok: false, reason: "read_failed" }) })
+  expect((await handleWebRequest(get("/api/documents/t/content", AUTH), unreadable)).status).toBe(404)
+})
+
+test("the content route decodes its token and rejects a malformed one", async () => {
+  let seen = ""
+  const deps = documentDeps({ readDocumentContent: (_identity, token) => { seen = token; return { ok: false, reason: "not_found" } } })
+  await handleWebRequest(get("/api/documents/a%2Fb/content", AUTH), deps)
+  expect(seen).toBe("a/b")
+  const bad = await handleWebRequest(get("/api/documents/%E0%A4%A/content", AUTH), deps)
+  expect(bad.status).toBe(400)
+  expect((await bad.json()).error).toBe("malformed_token")
+})
+
+test("a non-GET method on the content route falls through to 405", async () => {
+  expect((await handleWebRequest(del("/api/documents/tok1/content", AUTH), documentDeps())).status).toBe(405)
 })

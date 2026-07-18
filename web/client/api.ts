@@ -129,6 +129,24 @@ export class WorkspaceApi {
     return this.request(`/api/documents/${encodeURIComponent(token)}`, { method: "DELETE" })
   }
 
+  /** Absolute URL of a document's bytes — used directly as an `<img>`/`<object>` source and as
+   *  the download href, so the browser fetches it with the session's cookies rather than us
+   *  buffering binaries through JS. */
+  documentContentUrl(token: string): string {
+    return this.endpoint(`/api/documents/${encodeURIComponent(token)}/content`).toString()
+  }
+
+  /** Text-shaped documents (markdown, plain text, CSV) are pulled into JS so the viewer can
+   *  render them itself. `send` is JSON-only, hence the separate path. */
+  async fetchDocumentText(token: string): Promise<string> {
+    const response = await this.fetcher(new Request(this.documentContentUrl(token)))
+    if (!response.ok) {
+      const body = await response.json().catch(() => null) as { error?: string } | null
+      throw new ApiError(response.status, typeof body?.error === "string" ? body.error : "request_failed")
+    }
+    return await response.text()
+  }
+
   // basePath has a trailing slash and path a leading slash; drop one to avoid "//". "/" → "".
   private endpoint(path: string): URL {
     return new URL(`${this.basePath.replace(/\/$/, "")}${path}`, this.baseUrl)
