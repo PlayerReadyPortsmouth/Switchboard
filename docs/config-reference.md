@@ -61,7 +61,7 @@ Source of truth: this file is a snapshot of the code as of 2026-07-02. Re-derive
 | `workflow` | object | — | `{ enabled, stepTimeoutMs }` |
 | `workflows[]` | array | `[]` | `{ id, description, steps:[{id,agent,prompt}] }` — declarative pipelines run via `!run`. |
 | `timezone` | string | `"Europe/London"` | Default IANA tz for `schedules[].cron`. |
-| `shareLinks` | object | **absent = off** | See §5 — not present in the shipped example, must be hand-added. |
+| `shareLinks` | object | **absent = off** | See §5 — present in the tracked `config/hub.config.json`. |
 
 ### Canonical conversations
 
@@ -177,11 +177,12 @@ Written to `<artifactsDir>/<token>/meta.sbmd`, sibling to `<artifactsDir>/<token
 
 ### 7.3 Config keys — `hub.shareLinks`
 
-Not present in the shipped `config/hub.config.json` — must be hand-added:
+Present in the tracked `config/hub.config.json`; the remaining keys below are optional overrides:
 
 ```jsonc
 "shareLinks": {
   "enabled": true,
+  "documentsUI": true,
   "artifactsDir": "/srv/share-artifacts",
   "raHost": "readyapp.player-ready.co.uk",
   "defaultTtlDays": 30,
@@ -198,6 +199,7 @@ Not present in the shipped `config/hub.config.json` — must be hand-added:
 | `defaultTtlDays` | `30` | Default lifetime if the agent doesn't pass `ttl_days`. |
 | `maxBytes` | `26214400` (25 MB) | Size cap. |
 | `cleanupIntervalMs` | `86400000` (daily) | Sweep interval. |
+| `documentsUI` | `false` | Gates the web-client Documents section (`documentsUiEnabled`, `hub/index.ts:2478`). Requires `enabled: true`. Plain boolean — all-staff or nobody, no per-user canary. |
 
 ### 7.4 Tool wiring
 
