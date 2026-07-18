@@ -74,4 +74,70 @@ This phase mirrors ordinary text and reply relationships. Rich Discord cards, at
 
 Malformed normalized envelopes are rejected before persistence or dispatch and reported through the hub audit/error boundary. Adapter shutdown currently waits for adapter `stop()` and an active delivery worker tick; an adapter send that never settles can therefore delay shutdown. The current adapter APIs have no cancellation signal, so bounded cancellation remains a documented limitation rather than falsely closing the database beneath active delivery work.
 
+## Two-way Discord↔web mirror (, default off)
+
+A channel migrated from Discord gets only a  owner plus one
+ member per speaker. Because  filters by participant,
+such a conversation never appears in any web workspace, so the migrated transcript is
+reachable from Discord only. Separately, / replies are rich Discord objects with
+no canonical representation: they bypass the coordinator entirely and take the legacy path, so
+agent progress never reaches the web surface, and on a canonical conversation with no Discord
+link they are dropped outright.
+
+ closes both gaps. It is absent/disabled by default, in which case
+behaviour is byte-identical to the above.
+
+-  — **web** identities (the trusted identity-header value, normally an email;
+  matching is case-sensitive) joined as  to each Discord-migrated conversation. The
+  channel migrator runs on *every* inbound Discord message, not only on creation, so enabling
+  the flag backfills channels migrated earlier on their next message; no manual DB edit is
+  needed. The  role wildcard is never stored as an identity. This is a distinct list
+  because  is a role-check list that accepts  and so cannot yield
+  concrete identities, and  is a Discord snowflake, not a web identity.
+-  (default true when enabled) — additionally persists each /
+  reply's title/body to the canonical transcript as an agent message with **no** transport
+  links, so it streams to web subscribers while the legacy card path continues to own Discord
+  delivery. Because the mirrored copy carries no links it cannot double-post. The canonical
+  client key includes a hash of the card's rendered text, so each successive revision of an
+  updated card mirrors as its own web message while an identical re-send still dedupes.
+
+The mirrored web copy is text only: buttons, modals, and card edit-in-place remain
+Discord-only, since the canonical message model has no interactive-component representation.
+Note  is unique, so a Discord channel belongs to exactly one
+canonical conversation — sharing a channel means sharing that conversation, not linking a
+second one to it.
+
+## Two-way Discord↔web mirror (`conversationMirror`, default off)
+
+A channel migrated from Discord gets only a `system:discord-migration` owner plus one
+`discord:<authorId>` member per speaker. Because `listConversations` filters by participant,
+such a conversation never appears in any web workspace, so the migrated transcript is
+reachable from Discord only. Separately, `card`/`update` replies are rich Discord objects with
+no canonical representation: they bypass the coordinator entirely and take the legacy path, so
+agent progress never reaches the web surface, and on a canonical conversation with no Discord
+link they are dropped outright.
+
+`conversationMirror` closes both gaps. It is absent/disabled by default, in which case
+behaviour is byte-identical to the above.
+
+- `participants` — **web** identities (the trusted identity-header value, normally an email;
+  matching is case-sensitive) joined as `member` to each Discord-migrated conversation. The
+  channel migrator runs on *every* inbound Discord message, not only on creation, so enabling
+  the flag backfills channels migrated earlier on their next message; no manual DB edit is
+  needed. The `"*"` role wildcard is never stored as an identity. This is a distinct list
+  because `workspace.operators` is a role-check list that accepts `"*"` and so cannot yield
+  concrete identities, and `deployApproverUserId` is a Discord snowflake, not a web identity.
+- `mirrorCardsToWeb` (default true when enabled) — additionally persists each `card`/`update`
+  reply's title/body to the canonical transcript as an agent message with **no** transport
+  links, so it streams to web subscribers while the legacy card path continues to own Discord
+  delivery. Because the mirrored copy carries no links it cannot double-post. The canonical
+  client key includes a hash of the card's rendered text, so each successive revision of an
+  updated card mirrors as its own web message while an identical re-send still dedupes.
+
+The mirrored web copy is text only: buttons, modals, and card edit-in-place remain
+Discord-only, since the canonical message model has no interactive-component representation.
+Note `(adapter, external_location_id)` is unique, so a Discord channel belongs to exactly one
+canonical conversation — sharing a channel means sharing that conversation, not linking a
+second one to it.
+
 See the [approved standalone web-client and transport architecture](../superpowers/specs/2026-07-12-standalone-web-client-and-transport-architecture-design.md) for the broader design and deferred work.

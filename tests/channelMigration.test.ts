@@ -78,3 +78,40 @@ test("existing links resume a partial cache import without duplicate messages or
   expect(db.query<{ n: number }, []>("SELECT count(*) AS n FROM participants WHERE identity LIKE 'discord:%'").get()?.n).toBe(3)
   expect(audits).toEqual([{ channelId: "resume", imported: 1, skipped: 0 }])
 })
+
+test("mirror participants default off: no web identity joins a migrated conversation", () => {
+  const repo = new SqliteConversationRepository(new Database(":memory:"))
+  let n = 0
+  const ensure = createDiscordConversationMigrator({ repo, now: () => 100, id: () => `id-${++n}` })
+  const event = { adapter: "discord", eventId: "m1", externalLocationId: "c1", externalMessageId: "m1", authorId: "u", authorName: "U", content: "hi", createdAt: 40 }
+  const conversation = ensure(event, "a")
+  expect(repo.listConversations("ops@example.com")).toEqual([])
+  expect(repo.getParticipant(conversation.id, "ops@example.com")).toBeNull()
+})
+
+test("mirror participants join as members so the conversation lists for that web identity", () => {
+  const repo = new SqliteConversationRepository(new Database(":memory:"))
+  let n = 0
+  const ensure = createDiscordConversationMigrator({ repo, now: () => 100, id: () => `id-${++n}`,
+    mirrorParticipants: () => ["ops@example.com", "  ", "*", "second@example.com"] })
+  const event = { adapter: "discord", eventId: "m1", externalLocationId: "c1", externalMessageId: "m1", authorId: "u", authorName: "U", content: "hi", createdAt: 40 }
+  const conversation = ensure(event, "a")
+  expect(repo.getParticipant(conversation.id, "ops@example.com")).toMatchObject({ kind: "user", role: "member" })
+  expect(repo.getParticipant(conversation.id, "second@example.com")?.role).toBe("member")
+  // Blank and the "*" role wildcard are never stored as identities.
+  expect(repo.getParticipant(conversation.id, "*")).toBeNull()
+  expect(repo.listConversations("ops@example.com").map(c => c.id)).toEqual([conversation.id])
+})
+
+test("enabling the mirror backfills a conversation migrated before it was switched on", () => {
+  const repo = new SqliteConversationRepository(new Database(":memory:"))
+  let n = 0
+  const deps = { repo, now: () => 100, id: () => `id-${++n}` }
+  const event = { adapter: "discord", eventId: "m1", externalLocationId: "c1", externalMessageId: "m1", authorId: "u", authorName: "U", content: "hi", createdAt: 40 }
+  const before = createDiscordConversationMigrator(deps)(event, "a")
+  expect(repo.listConversations("ops@example.com")).toEqual([])
+  // Same channel, next inbound message, mirror now enabled — no manual DB edit.
+  const after = createDiscordConversationMigrator({ ...deps, mirrorParticipants: () => ["ops@example.com"] })(event, "a")
+  expect(after.id).toBe(before.id)
+  expect(repo.listConversations("ops@example.com").map(c => c.id)).toEqual([before.id])
+})

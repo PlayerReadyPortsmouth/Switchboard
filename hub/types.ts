@@ -343,6 +343,7 @@ export interface HubConfig {
   shareLinks?: ShareLinksConfig  // publish_link: agents publish staff-only Entra-gated artifact URLs (default off)
   toolObservability?: ToolObservabilityConfig  // capture + surface per-agent tool usage (default off)
   memoryBrowse?: MemoryBrowseConfig  // operator memory browse & forget UI (default off)
+  conversationMirror?: ConversationMirrorConfig  // two-way Discord↔web mirror for migrated channels (default off)
   receipts?: ReceiptsConfig      // outbound receipts for post_card/update_card/attach_file (default off)
   federation?: FederationConfig  // inter-hub consult federation over a private network (default off)
 }
@@ -385,6 +386,32 @@ export interface ToolObservabilityConfig {
 export interface MemoryBrowseConfig {
   enabled?: boolean         // master switch (default off)
   operatorIds?: string[]    // user ids allowed to use it; empty ⇒ [deployApproverUserId]
+}
+
+/** Two-way Discord↔web mirror for canonically-migrated Discord channels.
+ *  Absent/disabled ⇒ byte-identical to before: a migrated Discord conversation has
+ *  only its `system:discord-migration` owner plus `discord:<authorId>` members, so it
+ *  never lists for a web identity, and agent cards/updates reach Discord only.
+ *
+ *  When enabled:
+ *   - every identity in `participants` is added as a `member` of each Discord-migrated
+ *     conversation, so it appears in their web workspace. The migrator runs on EVERY
+ *     inbound Discord message (not just on creation), so this self-backfills existing
+ *     conversations on their next message — no manual DB edit needed.
+ *   - agent `card`/`update` replies on a conversation are additionally persisted to the
+ *     canonical transcript as text, so progress shows on the web surface too. Discord
+ *     delivery is unchanged (the legacy card path still owns it), so this never
+ *     double-posts.
+ *
+ *  NOTE: `participants` holds WEB identities (the value of the trusted identity header,
+ *  normally an email) — NOT Discord user ids. Matching is case-sensitive. This is
+ *  deliberately its own list: `workspace.operators` is a role-check list that accepts
+ *  the `"*"` wildcard (and is in fact `["*"]` in production), so it cannot yield concrete
+ *  identities, and `deployApproverUserId` is a Discord snowflake, not a web identity. */
+export interface ConversationMirrorConfig {
+  enabled?: boolean         // master switch (default off)
+  participants?: string[]   // web identities added as members of Discord-migrated conversations
+  mirrorCardsToWeb?: boolean // also persist agent card/update replies to the canonical transcript (default true when enabled)
 }
 
 /** Agent-initiated outbound file attachments. Absent/disabled ⇒ the attach_file

@@ -315,4 +315,27 @@ describe("TurnCoordinator", () => {
     expect(f.repo.listMessages(f.conversation.id).map(({ content }) => content)).toEqual(["persist me"])
     expect(f.events.filter(({ kind }) => kind === "turn_state").map(({ state }) => state)).toEqual(["queued", "failed"])
   })
+
+  // The shared dev-agent conversation shape: one canonical conversation carrying BOTH a
+  // Discord transport link and a web participant. Proves each leg of the two-way mirror.
+  test("a discord-linked conversation mirrors both ways for a web participant", async () => {
+    const f = fixture()
+    f.repo.addParticipant({ conversationId: f.conversation.id, identity: "ops@example.com", kind: "user", role: "member", createdAt: 1 })
+    const link = f.repo.createTransportLink({ id: "link-1", conversationId: f.conversation.id, adapter: "discord", externalLocationId: "chan-1", label: null, syncMode: "two_way", enabled: true }, 1)
+
+    // Leg 1 — web ➝ Discord: the web turn is persisted and queued for delivery to the link.
+    const web = await f.coordinator.submitWebTurn("ops@example.com", f.conversation.id, { content: "from the web", clientKey: "web-mirror-1" })
+    expect(web.inserted).toBe(true)
+    expect(f.delivered).toEqual([web.message.id])
+    expect(f.repo.resolveTransportLink("discord", "chan-1")?.id).toBe(link.id)
+
+    // Leg 2 — Discord ➝ web: an inbound surface event lands on the same canonical transcript,
+    // which the web participant can read (no second delivery — it came from that link).
+    const inbound = await f.coordinator.acceptSurfaceEvent({ adapter: "discord", eventId: "evt-1", externalLocationId: "chan-1", externalMessageId: "dm-1", authorId: "u1", authorName: "Ada", content: "from discord", createdAt: 200 })
+    expect(inbound?.inserted).toBe(true)
+    expect(f.delivered).toEqual([web.message.id])
+    expect(f.service.history("ops@example.com", f.conversation.id).map(m => [m.origin, m.content])).toEqual([
+      ["web", "from the web"], ["transport", "from discord"],
+    ])
+  })
 })
