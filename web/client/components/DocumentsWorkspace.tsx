@@ -1,9 +1,12 @@
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react"
 import { ApiError } from "../api"
-import type { DocumentSummary, Session, UploadDocumentResult } from "../types"
-import { DocumentCard } from "./DocumentCard"
+import type { ConnectionState, DocumentSummary, Session, UploadDocumentResult } from "../types"
+import { AppRail } from "./AppRail"
+import { DestinationMobileNav } from "./DestinationMobileNav"
+import { DocumentRow } from "./DocumentRow"
+import { DocumentViewer, type DocumentViewerApi } from "./DocumentViewer"
 
-export type DocumentsApi = {
+export type DocumentsApi = DocumentViewerApi & {
   listDocuments(scope: "mine" | "org"): Promise<DocumentSummary[]>
   uploadDocument(file: File, options?: { title?: string; visibility?: "private" | "org" }): Promise<UploadDocumentResult>
   setDocumentVisibility(token: string, visibility: "private" | "org"): Promise<{ ok: true }>
@@ -12,22 +15,48 @@ export type DocumentsApi = {
 
 type Scope = "mine" | "org"
 type LoadError = "forbidden" | "unavailable" | null
+type DocumentsLayout = "desktop" | "tablet" | "mobile"
 
-export function DocumentsWorkspace({ api, session }: { api: DocumentsApi; session: Session }) {
+/** The Documents library: the app-shell rail, a list pane, and an in-page viewer pane. Mirrors
+ *  `AgentsWorkspace` — same rail/connection/install props, same tablet/mobile pane collapse —
+ *  so the three destinations read as one product. */
+export function DocumentsWorkspace({ api, session, routeToken, connection, install, onNavigate, onNewConversation }: {
+  api: DocumentsApi
+  session: Session
+  routeToken?: string | null
+  connection?: ConnectionState
+  install?: { available: boolean; run(): Promise<void> }
+  onNavigate?(destination: "conversations" | "agents" | "documents", token?: string | null): void
+  onNewConversation?(): void
+}) {
   const [scope, setScope] = useState<Scope>("mine")
   const [documents, setDocuments] = useState<DocumentSummary[]>([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<LoadError>(null)
+  const [actionError, setActionError] = useState("")
   const [dragging, setDragging] = useState(false)
+  const [uploading, setUploading] = useState(false)
+  const [activeToken, setActiveToken] = useState<string | null>(routeToken ?? null)
+  const [layout, setLayout] = useState<DocumentsLayout>(() => readLayout())
   const generation = useRef(0)
+  const rows = useRef(new Map<string, HTMLButtonElement>())
+  const restoreFocus = useRef<string | null>(null)
+  const viewerCloseRef = useRef<HTMLButtonElement>(null)
+
+  useEffect(() => { setActiveToken(routeToken ?? null) }, [routeToken])
+  useEffect(() => {
+    const resize = () => setLayout(readLayout())
+    window.addEventListener("resize", resize)
+    return () => window.removeEventListener("resize", resize)
+  }, [])
 
   const load = useCallback(async (next: Scope) => {
     const token = ++generation.current
     setLoading(true)
     setLoadError(null)
     try {
-      const rows = await api.listDocuments(next)
-      if (token === generation.current) { setDocuments(rows); setLoading(false) }
+      const listed = await api.listDocuments(next)
+      if (token === generation.current) { setDocuments(listed); setLoading(false) }
     } catch (error) {
       if (token !== generation.current) return
       setLoading(false)
@@ -40,64 +69,128 @@ export function DocumentsWorkspace({ api, session }: { api: DocumentsApi; sessio
   const upload = useCallback(async (files: FileList | File[] | null) => {
     const list = files ? Array.from(files) : []
     if (list.length === 0) return
-    for (const file of list) await api.uploadDocument(file)
+    setActionError("")
+    setUploading(true)
+    try {
+      for (const file of list) await api.uploadDocument(file)
+    } catch (error) {
+      setActionError(error instanceof ApiError && error.status === 413 ? "That file is too large to upload." : "The upload failed. Try again.")
+    } finally {
+      setUploading(false)
+    }
     await load(scope)
   }, [api, load, scope])
 
   const toggleVisibility = useCallback(async (target: DocumentSummary) => {
-    await api.setDocumentVisibility(target.token, target.visibility === "org" ? "private" : "org")
+    setActionError("")
+    try {
+      await api.setDocumentVisibility(target.token, target.visibility === "org" ? "private" : "org")
+    } catch { setActionError("The visibility change did not stick. Try again."); return }
     await load(scope)
   }, [api, load, scope])
 
   const remove = useCallback(async (target: DocumentSummary) => {
-    await api.deleteDocument(target.token)
+    setActionError("")
+    try {
+      await api.deleteDocument(target.token)
+    } catch { setActionError("That document could not be deleted. Try again."); return }
+    if (target.token === activeToken) select(null)
     await load(scope)
-  }, [api, load, scope])
+  }, [api, activeToken, load, scope])
+
+  function select(token: string | null) {
+    if (token === null && activeToken) restoreFocus.current = activeToken
+    setActiveToken(token)
+    onNavigate?.("documents", token)
+  }
+
+  // Returning from the viewer puts focus back on the row that opened it.
+  useLayoutEffect(() => {
+    if (activeToken || !restoreFocus.current) return
+    const row = rows.current.get(restoreFocus.current)
+    if (!row?.isConnected) return
+    restoreFocus.current = null
+    row.focus()
+  }, [activeToken, documents])
+
+  useLayoutEffect(() => {
+    if (layout !== "desktop" && activeToken) viewerCloseRef.current?.focus()
+  }, [activeToken, layout])
+
+  const selected = documents.find(item => item.token === activeToken) ?? null
+  const changeScope = (next: Scope) => { if (next === scope) return; setScope(next); select(null) }
 
   return (
-    <main className="documents-shell">
-      <header className="documents-header">
-        <h1>Documents</h1>
+    <main className="documents-shell" data-layout={layout} data-mobile-pane={activeToken ? "viewer" : "list"}>
+      {onNavigate ? <AppRail
+        active="documents"
+        connection={connection ?? "live"}
+        features={session.features}
+        install={install}
+        onNew={() => onNewConversation?.()}
+        onNavigate={destination => onNavigate(destination)}
+      /> : null}
+      <section className="document-list" aria-label="Documents" data-region="document-navigation">
+        <header className="list-header">
+          <h1>Documents</h1>
+          <span className="agent-count">{loading ? "…" : `${documents.length} ${documents.length === 1 ? "file" : "files"}`}</span>
+        </header>
         <div className="documents-tabs" role="tablist" aria-label="Document scope">
-          <button type="button" role="tab" aria-selected={scope === "mine"} onClick={() => setScope("mine")}>Mine</button>
-          <button type="button" role="tab" aria-selected={scope === "org"} onClick={() => setScope("org")}>Org-wide</button>
+          <button type="button" role="tab" aria-selected={scope === "mine"} onClick={() => changeScope("mine")}>Mine</button>
+          <button type="button" role="tab" aria-selected={scope === "org"} onClick={() => changeScope("org")}>Org-wide</button>
         </div>
-        <label className="documents-upload">
-          <span>Upload a document</span>
-          <input type="file" onChange={event => { void upload(event.currentTarget.files); event.currentTarget.value = "" }} />
-        </label>
-      </header>
-      <section
-        className={dragging ? "documents-dropzone dragging" : "documents-dropzone"}
-        onDragOver={event => { event.preventDefault(); setDragging(true) }}
-        onDragLeave={() => setDragging(false)}
-        onDrop={event => { event.preventDefault(); setDragging(false); void upload(event.dataTransfer.files) }}
-      >
-        {loading ? <p role="status">Loading documents…</p>
-          : loadError ? <p role="alert">{loadError === "forbidden" ? "You do not have access to documents." : "Documents are unavailable. Try again."}</p>
-          : documents.length === 0 ? <p className="documents-empty">No documents yet.</p>
+        <div
+          className="documents-dropzone"
+          data-dragging={dragging}
+          onDragOver={event => { event.preventDefault(); setDragging(true) }}
+          onDragLeave={() => setDragging(false)}
+          onDrop={event => { event.preventDefault(); setDragging(false); void upload(event.dataTransfer.files) }}
+        >
+          <p className="documents-dropzone-hint">{dragging ? "Drop to upload" : uploading ? "Uploading…" : "Drag files here"}</p>
+          <label className="documents-upload">
+            <span>Upload a document</span>
+            <input type="file" multiple onChange={event => { void upload(event.currentTarget.files); event.currentTarget.value = "" }} />
+          </label>
+        </div>
+        {actionError ? <p className="documents-error" role="alert">{actionError}</p> : null}
+        {loading ? <p className="documents-status" role="status">Loading documents…</p>
+          : loadError ? <p className="documents-status documents-error" role="alert">{loadError === "forbidden" ? "You do not have access to documents." : "Documents are unavailable. Try again."}</p>
+          : documents.length === 0 ? (
+            <div className="empty-state">
+              <h2>{scope === "org" ? "Nothing shared org-wide yet" : "Your library is empty"}</h2>
+              <p>{scope === "org"
+                ? "Documents appear here once someone marks them org-wide. Publish one of yours to start the shelf."
+                : "Drag a file into the box above, or ask an agent to publish one from a conversation. Everything you add stays private until you say otherwise."}</p>
+            </div>
+          )
           : <ul className="documents-list">
-              {documents.map(document => {
-                const viewerIsOwner = document.ownerId === session.identity
-                return (
-                  <li key={document.token}>
-                    <DocumentCard
-                      token={document.token}
-                      title={document.title}
-                      contentType={document.contentType}
-                      mode={document.mode}
-                      visibility={document.visibility}
-                      ownerName={document.ownerName}
-                      sizeBytes={document.sizeBytes}
-                      viewerIsOwner={viewerIsOwner}
-                      onVisibilityToggle={() => void toggleVisibility(document)}
-                      onDelete={() => void remove(document)}
-                    />
-                  </li>
-                )
-              })}
+              {documents.map(item => (
+                <li key={item.token}>
+                  <DocumentRow
+                    document={item}
+                    selected={item.token === activeToken}
+                    viewerIsOwner={item.ownerId === session.identity}
+                    rowRef={element => { if (element) rows.current.set(item.token, element); else rows.current.delete(item.token) }}
+                    onSelect={() => select(item.token)}
+                    onVisibilityToggle={() => void toggleVisibility(item)}
+                    onDelete={() => void remove(item)}
+                  />
+                </li>
+              ))}
             </ul>}
       </section>
+      <DocumentViewer
+        document={selected}
+        api={api}
+        hidden={layout !== "desktop" && !activeToken}
+        closeRef={viewerCloseRef}
+        onBack={() => select(null)}
+      />
+      {onNavigate ? <DestinationMobileNav active="documents" features={session.features} onNavigate={destination => onNavigate(destination)} /> : null}
     </main>
   )
+}
+
+function readLayout(): DocumentsLayout {
+  return window.innerWidth < 768 ? "mobile" : window.innerWidth < 1200 ? "tablet" : "desktop"
 }

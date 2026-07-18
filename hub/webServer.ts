@@ -11,11 +11,41 @@ import type { ConversationEvent } from "./conversations/events"
 import { ConversationForbiddenError, ConversationValidationError, MAX_MESSAGES_PAGE_SIZE } from "./conversations/service"
 import { RepositoryConflictError, RepositoryNotFoundError, type AppendMessageResult } from "./conversations/repository"
 import { createBuiltWorkspaceAssets, type WorkspaceAssetHandler } from "./webAssets"
-import type { DocumentRow } from "./documents"
+import type { DocumentContentResult, DocumentRow } from "./documents"
 import type { PublishResult } from "./publishLink"
 
 /** Result of an owner-gated document mutation (visibility change / delete). */
 export type DocumentMutationResult = { ok: true } | { ok: false; reason: string }
+
+/** Content types the in-app viewer may receive under their own type. Everything else — HTML,
+ *  SVG, unknown binaries — is forced to an octet-stream attachment. The ReadyApp `/share`
+ *  renderer can afford a broader set because it serves into a sandboxed document; this endpoint
+ *  serves onto the workspace origin, so an executable type here would be same-origin XSS. */
+const INLINE_DOCUMENT_TYPES = new Set([
+  "image/png", "image/jpeg", "image/gif", "image/webp",
+  "application/pdf", "text/plain", "text/markdown", "text/csv",
+])
+
+/** Quote/control characters would let a filename break out of the Content-Disposition header. */
+const headerFilename = (filename: string): string => filename.replace(/[^\w.\- ]+/g, "_") || "document"
+
+function documentContentResponse(row: DocumentRow, bytes: Buffer): Response {
+  const inline = INLINE_DOCUMENT_TYPES.has(row.contentType)
+  const contentType = !inline ? "application/octet-stream"
+    : row.contentType.startsWith("text/") ? `${row.contentType}; charset=utf-8`
+    : row.contentType
+  return new Response(new Uint8Array(bytes), {
+    status: 200,
+    headers: {
+      "content-type": contentType,
+      "content-length": String(bytes.byteLength),
+      "content-disposition": `${inline ? "inline" : "attachment"}; filename="${headerFilename(row.filename)}"`,
+      "x-content-type-options": "nosniff",
+      "content-security-policy": "default-src 'none'; sandbox",
+      "cache-control": "private, no-store",
+    },
+  })
+}
 
 export interface ChannelInfo { channelId: string; name?: string; agent: string }
 
@@ -54,6 +84,7 @@ export interface WebDeps {
   uploadDocument?: (identity: string, input: { filename: string; bytes: Buffer; title?: string; visibility?: "private" | "org" }) => Promise<PublishResult>
   setDocumentVisibility?: (identity: string, token: string, visibility: "private" | "org") => Promise<DocumentMutationResult>
   deleteDocument?: (identity: string, token: string) => Promise<DocumentMutationResult>
+  readDocumentContent?: (identity: string, token: string) => DocumentContentResult
   documentsUiEnabled?: () => boolean
 }
 
@@ -165,6 +196,7 @@ export async function handleWebRequest(
   const conversationLinksMatch = /^\/api\/conversations\/([^/]+)\/links$/.exec(path)
   const documentsMatch = path === "/api/documents"
   const documentItemMatch = /^\/api\/documents\/([^/]+)$/.exec(path)
+  const documentContentMatch = /^\/api\/documents\/([^/]+)\/content$/.exec(path)
   const isGuardedRoute = path === "/api/channels" || approvalMatch || channelHistoryMatch ||
     channelTimelineMatch || channelStreamMatch || channelMessageMatch || commandMatch ||
     agentsMatch || agentPreviewMatch || agentConfirmMatch || operationsAgentsMatch || operationsAgentEventsMatch ||
@@ -172,7 +204,7 @@ export async function handleWebRequest(
     operationsAgentActionPreviewMatch || operationsAgentActionConfirmMatch ||
     hubConfigMatch || hubConfigPreviewMatch || hubConfigConfirmMatch || sessionMatch || conversationsMatch ||
     conversationItemMatch || conversationMessagesMatch || conversationEventsMatch || conversationLinksMatch ||
-    documentsMatch || documentItemMatch
+    documentsMatch || documentItemMatch || documentContentMatch
 
   if (isGuardedRoute) {
     // Auth runs before method dispatch below, so a wrong-method request without
@@ -199,6 +231,17 @@ export async function handleWebRequest(
       !deps.archiveConversation || !deps.appendConversationMessage || !deps.listConversationMessages ||
       !deps.addConversationLink || !deps.listConversationLinks || !deps.subscribeConversation)) {
       return json({ error: "conversation_service_unavailable" }, 503)
+    }
+
+    // The in-app viewer's byte feed. Owned by the same visibility rules as the listing
+    // (`readDocumentContent`); no separate gate, and unavailable whenever documents are.
+    if (documentContentMatch && method === "GET") {
+      if (!deps.readDocumentContent) return json({ error: "documents_unavailable" }, 503)
+      let token: string
+      try { token = decodeURIComponent(documentContentMatch[1]) } catch { return json({ error: "malformed_token" }, 400) }
+      const content = deps.readDocumentContent(email, token)
+      if (!content.ok) return json({ error: content.reason }, content.reason === "forbidden" ? 403 : 404)
+      return documentContentResponse(content.row, content.bytes)
     }
 
     const documentAction = (documentsMatch && (method === "GET" || method === "POST")) ||
