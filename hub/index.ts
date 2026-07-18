@@ -2474,6 +2474,8 @@ const webDeps: WebDeps = {
       setVisibility(token, visibility, identity, makeDocumentsOpts("upload")),
     deleteDocument: (identity: string, token: string) => deleteDocument(token, identity, makeDocumentsOpts("upload")),
   } : {}),
+  // Phase 2 web-UI gate: the Documents section only appears when the flag is set.
+  documentsUiEnabled: () => shareLinksOn && hub.shareLinks?.documentsUI === true,
 }
 const webServer = startWebServer(hub.webPort ?? 0, webDeps, hub.webHost)
 if (webServer) console.error(`switchboard hub: web dashboard on ${hub.webHost ?? "127.0.0.1"}:${hub.webPort}`)

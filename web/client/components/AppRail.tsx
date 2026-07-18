@@ -2,21 +2,22 @@ import type { ConnectionState } from "../types"
 import { ConnectionBanner } from "./ConnectionBanner"
 import { InstallButton } from "./InstallButton"
 import { webBase } from "../base"
-import { pathForAgent, pathForConversation } from "../routes"
+import { pathForAgent, pathForConversation, pathForDocument } from "../routes"
 
 interface AppRailProps {
-  active: "conversations" | "agents"
-  features: { agents: boolean }
+  active: "conversations" | "agents" | "documents"
+  features: { agents: boolean; documents: boolean }
   connection: ConnectionState
   install?: { available: boolean; run(): Promise<void> }
   onNew(): void
-  onNavigate(destination: "conversations" | "agents"): void
+  onNavigate(destination: "conversations" | "agents" | "documents"): void
 }
 
 export function AppRail({ active, features, connection, install, onNew, onNavigate }: AppRailProps) {
   const destinations = [
     { id: "conversations" as const, label: "Conversations", glyph: "≡", href: pathForConversation(null, webBase), available: true },
     { id: "agents" as const, label: "Agents", glyph: "⌁", href: pathForAgent(null, webBase), available: features.agents },
+    { id: "documents" as const, label: "Documents", glyph: "▤", href: pathForDocument(null, webBase), available: features.documents },
   ]
   return (
     <nav className="app-rail" aria-label="Application navigation" data-region="application-navigation">

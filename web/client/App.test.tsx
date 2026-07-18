@@ -13,7 +13,7 @@ const screen = within(document.body)
 
 const session: Session = {
   identity: "ada@example.com",
-  features: { agents: true },
+  features: { agents: true, documents: false },
   permissions: { agents: "operator" },
   agents: [
     { name: "architect", alive: true, busy: false },
@@ -95,13 +95,33 @@ describe("responsive workspace shell", () => {
   })
 
   test("hides Agents and rejects direct access when the feature is disabled", async () => {
-    const disabled = { ...session, features: { agents: false }, permissions: { agents: "hidden" as const } }
+    const disabled = { ...session, features: { agents: false, documents: false }, permissions: { agents: "hidden" as const } }
     const view = render(<App api={fakeApi({ session: disabled })} />)
     await screen.findByRole("heading", { name: "Switchboard" })
     expect(screen.queryByRole("link", { name: "Agents" })).toBeNull()
     view.unmount()
     history.replaceState(null, "", "/agents")
     render(<App api={fakeApi({ session: disabled })} />)
+    expect(await screen.findByRole("heading", { name: "Not found" })).toBeTruthy()
+  })
+
+  test("shows the Documents destination, routes to it, and renders the workspace", async () => {
+    const enabled = { ...session, features: { agents: true, documents: true } }
+    const api = { ...fakeApi({ session: enabled }), listDocuments: async () => [], uploadDocument: async () => ({ token: "t", url: "/share/t" }), setDocumentVisibility: async () => ({ ok: true as const }), deleteDocument: async () => ({ ok: true as const }) }
+    render(<App api={api} streamFactory={null} agentStreamFactory={null} />)
+    const documents = await screen.findByRole("link", { name: "Documents" })
+    await userEvent.click(documents)
+    expect(location.pathname).toBe("/documents")
+    expect(await screen.findByRole("heading", { name: "Documents" })).toBeTruthy()
+  })
+
+  test("hides Documents and rejects direct access when the feature is disabled", async () => {
+    render(<App api={fakeApi()} streamFactory={null} agentStreamFactory={null} />)
+    await screen.findByRole("heading", { name: "Switchboard" })
+    expect(screen.queryByRole("link", { name: "Documents" })).toBeNull()
+    cleanup()
+    history.replaceState(null, "", "/documents")
+    render(<App api={fakeApi()} streamFactory={null} agentStreamFactory={null} />)
     expect(await screen.findByRole("heading", { name: "Not found" })).toBeTruthy()
   })
 

@@ -7,7 +7,7 @@ export interface SessionAgentSummary { name: string; alive: boolean; busy: boole
 export interface Session {
   identity: string
   agents: SessionAgentSummary[]
-  features: { agents: boolean }
+  features: { agents: boolean; documents: boolean }
   permissions: { agents: "hidden" | "viewer" | "operator" }
 }
 
@@ -156,12 +156,30 @@ export interface Message { id: string; conversationId: string; sequence: number;
 export interface PostMessageInput { content: string; clientKey: string; replyTo?: string }
 export interface TransportLink { id: string; conversationId: string; adapter: string; externalLocationId: string; label: string | null; syncMode: SyncMode; enabled: boolean; createdAt: number; updatedAt: number }
 
+export interface DocumentSummary {
+  token: string
+  filename: string
+  title: string
+  contentType: string
+  mode: string
+  ownerId: string
+  ownerName: string
+  visibility: "private" | "org"
+  createdAt: string
+  expiresAt: string | null
+  conversationId: string | null
+  sizeBytes: number
+}
+export interface UploadDocumentResult { token: string; url: string }
+export interface DocumentAttachment { token: string; title: string; contentType: string; mode: string; visibility: string }
+
 export interface ConversationEvent {
-  kind: "message_committed" | "turn_state" | "activity"
+  kind: "message_committed" | "turn_state" | "activity" | "attachment"
   conversationId: string
   sequence: number
   ts: number
   message?: Message
   state?: MessageState
   detail?: Record<string, unknown>
+  attachment?: DocumentAttachment
 }

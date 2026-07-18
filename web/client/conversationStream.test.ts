@@ -72,6 +72,46 @@ test("message events advance reconnect cursor while activity does not", async ()
   expect(states).toEqual(["connecting", "live", "reconnecting"])
 })
 
+test("attachment events surface via onEvent without advancing the reconnect cursor", async () => {
+  const gaps: number[] = []
+  const opened: EventSourceHandlers[] = []
+  const events: ConversationEvent[] = []
+  const timers: Array<() => void | Promise<void>> = []
+  const stream = new ConversationStream({
+    fetchGap: async after => (gaps.push(after), []),
+    open: (_url, sourceHandlers) => (opened.push(sourceHandlers), { close() {} }),
+    online: () => true,
+    setTimer: callback => (timers.push(callback), timers.length),
+    clearTimer: () => {},
+  })
+  await stream.start("c1", 3, { ...handlers, onEvent: event => events.push(event) })
+  opened[0].open()
+  opened[0].message(JSON.stringify({
+    kind: "attachment", conversationId: "c1", sequence: 1_700_000_000_000, ts: 1,
+    attachment: { token: "tok1", title: "Doc", contentType: "application/pdf", mode: "view", visibility: "org" },
+  } satisfies ConversationEvent))
+  opened[0].error()
+  await timers[0]()
+
+  expect(events.map(event => event.kind)).toEqual(["attachment"])
+  expect(events[0].attachment?.token).toBe("tok1")
+  // Reconnect refetches from the ORIGINAL cursor — an attachment's Date.now() sequence must not move it.
+  expect(gaps).toEqual([3, 3])
+})
+
+test("duplicate attachment events (same token) collapse to one in the reducer; non-attachment stays in activity", () => {
+  const attachment = (token: string): ConversationEvent => ({
+    kind: "attachment", conversationId: "c1", sequence: Date.now(), ts: 1,
+    attachment: { token, title: "Doc", contentType: "application/pdf", mode: "view", visibility: "org" },
+  })
+  let state = workspaceReducer(initialWorkspaceState, { type: "activity/received", event: attachment("tok1") })
+  state = workspaceReducer(state, { type: "activity/received", event: attachment("tok1") })
+  state = workspaceReducer(state, { type: "activity/received", event: attachment("tok2") })
+  state = workspaceReducer(state, { type: "activity/received", event: { kind: "activity", conversationId: "c1", sequence: 5, ts: 2 } })
+  expect(state.attachments.map(a => a.token)).toEqual(["tok1", "tok2"])
+  expect(state.activity.map(e => e.kind)).toEqual(["activity"])
+})
+
 test("offline errors close the source without scheduling a reconnect", async () => {
   let sourceHandlers!: EventSourceHandlers
   let closed = 0
