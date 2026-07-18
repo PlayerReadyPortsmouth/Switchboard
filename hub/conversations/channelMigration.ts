@@ -11,6 +11,10 @@ export interface DiscordConversationMigrationDeps {
   id: () => string
   cachedHistory?: (channelId: string) => CachedMsg[]
   audit?: (detail: { channelId: string; imported: number; skipped: number }) => void
+  /** Web identities to join to every Discord-migrated conversation so it lists in
+   *  their workspace. Returns [] when the conversation mirror is disabled, which
+   *  keeps the pre-existing behaviour byte-identical. */
+  mirrorParticipants?: () => readonly string[]
 }
 
 /** Build the stateful channel migration boundary used by the Discord adapter. */
@@ -26,15 +30,30 @@ export function createDiscordConversationMigrator(deps: DiscordConversationMigra
       now: createdAt,
     })
     ensureExternalParticipant(deps, ensured.conversation.id, event.authorId)
+    // Runs for existing conversations too (this migrator is invoked on every inbound
+    // Discord message), so enabling the mirror backfills channels migrated earlier.
+    ensureMirrorParticipants(deps, ensured.conversation.id)
     importReliableHistory(deps, ensured.conversation.id, event.externalLocationId)
     return ensured.conversation
   }
 }
 
+function ensureMirrorParticipants(deps: DiscordConversationMigrationDeps, conversationId: string): void {
+  for (const identity of deps.mirrorParticipants?.() ?? []) {
+    const trimmed = identity.trim()
+    // "*" is a role-check wildcard elsewhere in config and is not an identity — never store it.
+    if (!trimmed || trimmed === "*") continue
+    ensureParticipant(deps, conversationId, trimmed, "user", "member")
+  }
+}
+
 function ensureExternalParticipant(deps: DiscordConversationMigrationDeps, conversationId: string, authorId: string): void {
-  const identity = `discord:${authorId}`
+  ensureParticipant(deps, conversationId, `discord:${authorId}`, "external", "member")
+}
+
+function ensureParticipant(deps: DiscordConversationMigrationDeps, conversationId: string, identity: string, kind: "user" | "external", role: "owner" | "member" | "viewer"): void {
   if (deps.repo.getParticipant(conversationId, identity)) return
-  try { deps.repo.addParticipant({ conversationId, identity, kind: "external", role: "member", createdAt: deps.now() }) }
+  try { deps.repo.addParticipant({ conversationId, identity, kind, role, createdAt: deps.now() }) }
   catch (error) { if (!deps.repo.getParticipant(conversationId, identity)) throw error }
 }
 

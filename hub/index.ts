@@ -83,7 +83,7 @@ import { makeAttachHandler } from "./attachHandler"
 import { selectExpired, reconcileDocuments } from "./publishCleanup"
 import { DocumentsDb, publishDocument, uploadDocument, setVisibility, deleteDocument, listDocuments, type DocumentsIO, type DocumentsOpts } from "./documents"
 import { runDocumentsMigrations } from "./documentsMigrations"
-import { randomBytes, randomUUID } from "crypto"
+import { createHash, randomBytes, randomUUID } from "crypto"
 import { Database } from "bun:sqlite"
 import { ConversationEventStream, ConversationService, createDiscordConversationMigrator, inboundLinkRoute, LegacyDiscordCompatibilityRouter, ProductionIngressGate, SqliteConversationRepository, TurnCoordinator, buildAttachmentEvent, buildToolStepEvent, summariseToolInput } from "./conversations"
 import { DeliveryWorker, DiscordAdapter, SurfaceRouter } from "./surfaces"
@@ -183,6 +183,13 @@ let turnCoordinator: TurnCoordinator | undefined
 let ensureDiscordConversation: ReturnType<typeof createDiscordConversationMigrator> | undefined
 const conversationIngress = new ProductionIngressGate()
 let resolveLegacyDiscordChatId = (chatId: string): string | null => chatId
+// Two-way Discord↔web mirror (default off ⇒ both hooks are inert no-ops).
+const conversationMirrorEnabled = hub.conversationMirror?.enabled === true
+let mirrorRichReplyToWeb = (_reply: AgentReply, _card: CardSpec): void => {}
+/** Distinguish successive revisions of the same card so each edit mirrors as its own
+ *  web message, while an identical re-send still dedupes on the canonical client key. */
+const cardRevision = (card: CardSpec): string =>
+  createHash("sha256").update(`${card.title ?? ""}\0${card.body ?? ""}`).digest("hex").slice(0, 16)
 const deployApprover = hub.deployApproverUserId ?? ""
 // Approval buttons are pressable only by configured approvers (default: the
 // deploy approver); everything else keeps the existing deploy/gated-action gate.
@@ -1146,18 +1153,26 @@ async function onAgentReply(reply: AgentReply, key: string): Promise<void | Send
   // Persist/stream text replies there and let the surface router fan out only to
   // configured links; never fall through to the legacy Discord reply path.
   if (reply.kind === "reply" && turnCoordinator && await turnCoordinator.acceptAgentReply(reply)) return
+  // Capture the canonical id before the legacy rewrite below swaps it for a raw
+  // Discord channel id — the web mirror must address the conversation, not the channel.
+  const canonicalReply = reply
   const legacyChatId = resolveLegacyDiscordChatId(reply.chatId)
   if (!legacyChatId) {
     audit.record({ kind: "event", actor: `agent:${reply.agent}`, action: "legacy_discord_rich_unroutable", chat: reply.chatId, outcome: "deny", detail: { kind: reply.kind } })
+    // A card on a canonical conversation with no Discord link is otherwise dropped
+    // outright; with the mirror on it still reaches the web surface.
+    if (canonicalReply.card) mirrorRichReplyToWeb(canonicalReply, canonicalReply.card)
     return
   }
   if (legacyChatId !== reply.chatId) reply = { ...reply, chatId: legacyChatId }
   if (reply.kind === "card" && reply.card) {
     trace.record({ agent: reply.agent, chat: reply.chatId, kind: "card", text: cardTraceText(reply.card) })
+    mirrorRichReplyToWeb(canonicalReply, reply.card)
     return await cardLifecycle.onCard(reply, key)
   }
   if (reply.kind === "update" && reply.card && reply.correlationId) {
     trace.record({ agent: reply.agent, chat: reply.chatId, kind: "update", text: cardTraceText(reply.card) })
+    mirrorRichReplyToWeb(canonicalReply, reply.card)
     return await cardLifecycle.onUpdate(reply.correlationId, reply.chatId, reply.card, key)
   }
   if (reply.kind === "reply" && reply.text) {
@@ -2307,7 +2322,26 @@ ensureDiscordConversation = createDiscordConversationMigrator({
   id: () => randomUUID(),
   cachedHistory: channelId => messageCache.recent(channelId),
   audit: detail => audit.record({ kind: "event", actor: "hub", action: "discord_channel_migration", chat: detail.channelId, detail }),
+  mirrorParticipants: () => conversationMirrorEnabled ? (hub.conversationMirror?.participants ?? []) : [],
 })
+// Card/update replies are rich Discord objects with no canonical representation. When
+// the mirror is on, persist their text to the canonical transcript (with NO transport
+// links) so the web surface sees agent progress; Discord delivery stays on the legacy
+// card path, so this cannot double-post.
+mirrorRichReplyToWeb = (reply, card) => {
+  if (!conversationMirrorEnabled || hub.conversationMirror?.mirrorCardsToWeb === false) return
+  if (!conversationRepo.getConversation(reply.chatId)) return
+  const text = [card.title?.trim(), card.body?.trim()].filter(Boolean).join("\n\n")
+  if (!text) return
+  const callbackId = reply.correlationId ?? reply.messageId
+  if (!callbackId) return
+  try {
+    conversationService.appendAgentMessage({
+      id: randomUUID(), conversationId: reply.chatId, author: reply.agent, origin: "agent", content: text,
+      state: "completed", clientKey: `agent:${reply.agent}:${reply.kind}:${callbackId}:${cardRevision(card)}`, createdAt: Date.now(),
+    }, [])
+  } catch (error) { process.stderr.write(`conversation mirror: card persist failed: ${error}\n`) }
+}
 turnCoordinator = new TurnCoordinator(
   conversationService,
   conversationRepo,
