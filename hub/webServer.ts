@@ -11,6 +11,11 @@ import type { ConversationEvent } from "./conversations/events"
 import { ConversationForbiddenError, ConversationValidationError, MAX_MESSAGES_PAGE_SIZE } from "./conversations/service"
 import { RepositoryConflictError, RepositoryNotFoundError, type AppendMessageResult } from "./conversations/repository"
 import { createBuiltWorkspaceAssets, type WorkspaceAssetHandler } from "./webAssets"
+import type { DocumentRow } from "./documents"
+import type { PublishResult } from "./publishLink"
+
+/** Result of an owner-gated document mutation (visibility change / delete). */
+export type DocumentMutationResult = { ok: true } | { ok: false; reason: string }
 
 export interface ChannelInfo { channelId: string; name?: string; agent: string }
 
@@ -45,6 +50,10 @@ export interface WebDeps {
   addConversationLink?: (identity: string, conversationId: string, input: { adapter: string; externalLocationId: string; label?: string | null; syncMode?: SyncMode; enabled?: boolean }) => TransportLink
   listConversationLinks?: (identity: string, conversationId: string) => TransportLink[]
   subscribeConversation?: (identity: string, conversationId: string, afterSequence: number, cb: (event: ConversationEvent) => void) => () => void
+  listDocuments?: (identity: string, scope: "mine" | "org") => DocumentRow[]
+  uploadDocument?: (identity: string, input: { filename: string; bytes: Buffer; title?: string; visibility?: "private" | "org" }) => Promise<PublishResult>
+  setDocumentVisibility?: (identity: string, token: string, visibility: "private" | "org") => Promise<DocumentMutationResult>
+  deleteDocument?: (identity: string, token: string) => Promise<DocumentMutationResult>
 }
 
 const json = (body: unknown, status = 200) =>
@@ -153,13 +162,16 @@ export async function handleWebRequest(
   const conversationMessagesMatch = /^\/api\/conversations\/([^/]+)\/messages$/.exec(path)
   const conversationEventsMatch = /^\/api\/conversations\/([^/]+)\/events$/.exec(path)
   const conversationLinksMatch = /^\/api\/conversations\/([^/]+)\/links$/.exec(path)
+  const documentsMatch = path === "/api/documents"
+  const documentItemMatch = /^\/api\/documents\/([^/]+)$/.exec(path)
   const isGuardedRoute = path === "/api/channels" || approvalMatch || channelHistoryMatch ||
     channelTimelineMatch || channelStreamMatch || channelMessageMatch || commandMatch ||
     agentsMatch || agentPreviewMatch || agentConfirmMatch || operationsAgentsMatch || operationsAgentEventsMatch ||
     operationsAgentDetailMatch || operationsAgentConfigPreviewMatch || operationsAgentConfigConfirmMatch ||
     operationsAgentActionPreviewMatch || operationsAgentActionConfirmMatch ||
     hubConfigMatch || hubConfigPreviewMatch || hubConfigConfirmMatch || sessionMatch || conversationsMatch ||
-    conversationItemMatch || conversationMessagesMatch || conversationEventsMatch || conversationLinksMatch
+    conversationItemMatch || conversationMessagesMatch || conversationEventsMatch || conversationLinksMatch ||
+    documentsMatch || documentItemMatch
 
   if (isGuardedRoute) {
     // Auth runs before method dispatch below, so a wrong-method request without
@@ -186,6 +198,51 @@ export async function handleWebRequest(
       !deps.archiveConversation || !deps.appendConversationMessage || !deps.listConversationMessages ||
       !deps.addConversationLink || !deps.listConversationLinks || !deps.subscribeConversation)) {
       return json({ error: "conversation_service_unavailable" }, 503)
+    }
+
+    const documentAction = (documentsMatch && (method === "GET" || method === "POST")) ||
+      (documentItemMatch && (method === "PATCH" || method === "DELETE"))
+    if (documentAction && (!deps.listDocuments || !deps.uploadDocument || !deps.setDocumentVisibility || !deps.deleteDocument)) {
+      return json({ error: "documents_unavailable" }, 503)
+    }
+
+    if (documentAction) {
+      const mutationResponse = (result: DocumentMutationResult): Response =>
+        result.ok ? json({ ok: true }) : json({ error: result.reason },
+          result.reason === "not_found" ? 404 : result.reason === "not_owner" ? 403 : 400)
+      try {
+        if (documentsMatch && method === "GET") {
+          const scope = url.searchParams.get("scope") ?? "mine"
+          if (scope !== "mine" && scope !== "org") return json({ error: "invalid_scope" }, 400)
+          return json(deps.listDocuments!(email, scope))
+        }
+        if (documentsMatch && method === "POST") {
+          const form = await req.formData().catch(() => null)
+          const file = form?.get("file")
+          if (!(file instanceof File)) return json({ error: "missing_file" }, 400)
+          const visibilityRaw = form!.get("visibility")
+          if (visibilityRaw !== null && visibilityRaw !== "private" && visibilityRaw !== "org") return json({ error: "invalid_visibility" }, 400)
+          const titleRaw = form!.get("title")
+          const result = await deps.uploadDocument!(email, {
+            filename: file.name, bytes: Buffer.from(await file.arrayBuffer()),
+            ...(typeof titleRaw === "string" && titleRaw ? { title: titleRaw } : {}),
+            ...(visibilityRaw ? { visibility: visibilityRaw } : {}),
+          })
+          if (result.ok) return json({ token: result.token, url: result.url }, 201)
+          return json({ error: result.reason }, result.reason === "oversize" ? 413 : 400)
+        }
+        if (documentItemMatch && method === "PATCH") {
+          const body = await bodyJson(req)
+          if (body?.visibility !== "private" && body?.visibility !== "org") return json({ error: "invalid_visibility" }, 400)
+          return mutationResponse(await deps.setDocumentVisibility!(email, decodeURIComponent(documentItemMatch[1]), body.visibility))
+        }
+        if (documentItemMatch && method === "DELETE") {
+          return mutationResponse(await deps.deleteDocument!(email, decodeURIComponent(documentItemMatch[1])))
+        }
+      } catch (error) {
+        if (error instanceof URIError) return json({ error: "malformed_token" }, 400)
+        throw error
+      }
     }
 
     try {

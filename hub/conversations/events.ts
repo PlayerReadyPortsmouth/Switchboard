@@ -1,13 +1,30 @@
 import type { Message, MessageState } from "./types"
 
+/** A document published into a web conversation, surfaced as an inline card in the transcript. */
+export interface AttachmentInfo {
+  token: string
+  title: string
+  contentType: string
+  mode: string
+  visibility: string
+}
+
 export interface ConversationEvent {
-  kind: "message_committed" | "turn_state" | "activity"
+  kind: "message_committed" | "turn_state" | "activity" | "attachment"
   conversationId: string
   sequence: number
   ts: number
   message?: Message
   state?: MessageState
   detail?: Record<string, unknown>
+  attachment?: AttachmentInfo
+}
+
+/** Build an `attachment` event. These are live-only (not replayed from message history), so the
+ *  monotonic clock value doubles as the sequence — attachments don't participate in replay
+ *  ordering and never advance a subscriber's message high-water mark. */
+export function buildAttachmentEvent(conversationId: string, info: AttachmentInfo, now: number): ConversationEvent {
+  return { kind: "attachment", conversationId, sequence: now, ts: now, attachment: info }
 }
 
 type Callback = (event: ConversationEvent) => void

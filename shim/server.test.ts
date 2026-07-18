@@ -141,7 +141,13 @@ ut("attach_file maps to an attach wire message", () => {
 
 ut("publish_link maps to a publish wire message", () => {
   ue(wire("publish_link", { path: "r.pdf", mode: "view", title: "R", scope: "staff", ttl_days: 7 }) as any)
-    .toEqual({ t: "publish", path: "r.pdf", mode: "view", title: "R", scope: "staff", ttlDays: 7 })
+    .toEqual({ t: "publish", path: "r.pdf", mode: "view", title: "R", scope: "staff", ttlDays: 7, visibility: undefined })
+})
+
+ut("publish_link forwards visibility and treats omitted ttl_days as permanent", () => {
+  const w = wire("publish_link", { path: "r.pdf", visibility: "org" }) as any
+  ue(w.visibility).toEqual("org")
+  ue(w.ttlDays).toEqual(undefined)   // omitted → hub defaults to permanent
 })
 
 ut("notify_peer maps to a fire-and-forget wire frame", () => {

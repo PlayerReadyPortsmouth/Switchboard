@@ -77,7 +77,7 @@ export function toolCallToWire(name: string, args: Record<string, any>) {
     case "attach_file":
       return { t: "attach", chatId: args.chat_id, path: args.path, caption: args.caption, filename: args.filename }
     case "publish_link":
-      return { t: "publish", path: args.path, mode: args.mode, title: args.title, scope: args.scope, ttlDays: args.ttl_days }
+      return { t: "publish", path: args.path, mode: args.mode, title: args.title, scope: args.scope, ttlDays: args.ttl_days, visibility: args.visibility }
     case "notify_peer":
       return { t: "notify_peer", target: args.target, text: args.text }
     default:
@@ -244,13 +244,14 @@ async function main() {
       }] : []),
       ...(process.env.PUBLISH_LINK === "1" ? [{
         name: "publish_link",
-        description: "Publish a file you produced (write it into your outbox first) to a staff-only Entra-gated URL and get the link back. Use for artifacts too big or unviewable as Discord attachments (PDF statements, rendered HTML dashboards, large CSVs, markdown reports). `mode`: download | page (live HTML) | view (pretty pdf/markdown/csv); inferred from the file type if omitted. `scope`: \"staff\" (default) or an RA permission string for sensitive data. `ttl_days`: link lifetime (default 30).",
+        description: "Publish a file you produced (write it into your outbox first) to a staff-only Entra-gated URL and get the link back. Use for artifacts too big or unviewable as Discord attachments (PDF statements, rendered HTML dashboards, large CSVs, markdown reports). `mode`: download | page (live HTML) | view (pretty pdf/markdown/csv); inferred from the file type if omitted. `scope`: \"staff\" (default) or an RA permission string for sensitive data. `ttl_days`: link lifetime — OMIT it to make the file a permanent entry in the org's Documents library (default is now permanent, not 30 days); pass a number only for a genuinely temporary link. `visibility`: \"private\" (owner-only, the default) or \"org\" (visible org-wide in the Documents library).",
         inputSchema: { type: "object", properties: {
           path: { type: "string", description: "Path relative to your outbox." },
           mode: { type: "string", enum: ["download", "page", "view"] },
           title: { type: "string" },
           scope: { type: "string", description: "\"staff\" or an RA permission string." },
-          ttl_days: { type: "number" } },
+          visibility: { type: "string", enum: ["private", "org"], description: "private (owner-only, default) or org (org-wide)." },
+          ttl_days: { type: "number", description: "Omit for a permanent Documents-library entry; set for a temporary link." } },
           required: ["path"] },
       }] : []),
       ...(process.env.PEERING === "1" ? [
@@ -312,7 +313,7 @@ async function main() {
       const id = `p${++reqCounter}`
       const result = await new Promise<{ url?: string; error?: string }>((resolve) => {
         pendingPublish.set(id, resolve)
-        sock.write(encode({ t: "publish", id, path: args.path, mode: args.mode, title: args.title, scope: args.scope, ttlDays: args.ttl_days }))
+        sock.write(encode({ t: "publish", id, path: args.path, mode: args.mode, title: args.title, scope: args.scope, ttlDays: args.ttl_days, visibility: args.visibility }))
         const timer = setTimeout(() => { if (pendingPublish.delete(id)) resolve({ error: "timed out" }) }, 30000)
         ;(timer as { unref?: () => void }).unref?.()
       })
