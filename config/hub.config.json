@@ -161,6 +161,12 @@
   "receipts": {
     "enabled": true
   },
+  "shareLinks": {
+    "enabled": true,
+    "documentsUI": true,
+    "artifactsDir": "/srv/share-artifacts",
+    "raHost": "readyapp.player-ready.co.uk"
+  },
   "approvals": {
     "enabled": true,
     "channelId": "<channel id for Approve/Deny cards, or omit to use the effect's origin channel>",
