@@ -42,8 +42,19 @@ test("workspace session uses the configured trusted header and exposes status-sa
     ], overseers: [], routes: [], routeRate10m: 0, ephemerals: [] }, audit: { total: 0, byKind: {}, byOutcome: {}, costUsd: 0, actors: 0 }, recent: [], pendingApprovals: 0, pendingApprovalList: [] }),
   }))
   expect(response.status).toBe(200)
-  expect(await response.json()).toEqual({ identity: "ada@example.com", agents: [{ name: "qa", alive: true, busy: false }], features: { agents: true, documents: false }, permissions: { agents: "operator" } })
+  expect(await response.json()).toEqual({ identity: "ada@example.com", agents: [{ name: "qa", alive: true, busy: false }], features: { agents: true, documents: false, turnSteps: false }, permissions: { agents: "operator" } })
   expect((await handleWebRequest(new Request("http://x/api/session"), deps())).status).toBe(400)
+})
+
+test("workspace session reports the UI feature gates, defaulting both off when unwired", async () => {
+  const session = async (extra: Parameters<typeof deps>[0] = {}) => {
+    const response = await handleWebRequest(req("/api/session", "GET"), deps(extra))
+    return (await response.json() as { features: Record<string, boolean> }).features
+  }
+  // No gate dependency supplied at all ⇒ off, exactly as before the feature existed.
+  expect(await session()).toEqual({ agents: true, documents: false, turnSteps: false })
+  expect(await session({ turnStepsEnabled: () => false })).toEqual({ agents: true, documents: false, turnSteps: false })
+  expect(await session({ turnStepsEnabled: () => true })).toEqual({ agents: true, documents: false, turnSteps: true })
 })
 
 test("PATCH conversation validates input and dispatches an owner update", async () => {

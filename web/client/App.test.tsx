@@ -13,7 +13,7 @@ const screen = within(document.body)
 
 const session: Session = {
   identity: "ada@example.com",
-  features: { agents: true, documents: false },
+  features: { agents: true, documents: false, turnSteps: false },
   permissions: { agents: "operator" },
   agents: [
     { name: "architect", alive: true, busy: false },
@@ -95,7 +95,7 @@ describe("responsive workspace shell", () => {
   })
 
   test("hides Agents and rejects direct access when the feature is disabled", async () => {
-    const disabled = { ...session, features: { agents: false, documents: false }, permissions: { agents: "hidden" as const } }
+    const disabled = { ...session, features: { agents: false, documents: false, turnSteps: false }, permissions: { agents: "hidden" as const } }
     const view = render(<App api={fakeApi({ session: disabled })} />)
     await screen.findByRole("heading", { name: "Switchboard" })
     expect(screen.queryByRole("link", { name: "Agents" })).toBeNull()
@@ -106,7 +106,7 @@ describe("responsive workspace shell", () => {
   })
 
   test("shows the Documents destination, routes to it, and renders the workspace", async () => {
-    const enabled = { ...session, features: { agents: true, documents: true } }
+    const enabled = { ...session, features: { agents: true, documents: true, turnSteps: false } }
     const api = { ...fakeApi({ session: enabled }), listDocuments: async () => [], uploadDocument: async () => ({ token: "t", url: "/share/t" }), setDocumentVisibility: async () => ({ ok: true as const }), deleteDocument: async () => ({ ok: true as const }) }
     render(<App api={api} streamFactory={null} agentStreamFactory={null} />)
     const documents = await screen.findByRole("link", { name: "Documents" })

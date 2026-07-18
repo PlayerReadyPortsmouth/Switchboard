@@ -13,7 +13,7 @@ const conversation: Conversation = {
 }
 const session: Session = {
   identity: "ada@example.com",
-  features: { agents: true, documents: false },
+  features: { agents: true, documents: false, turnSteps: false },
   permissions: { agents: "operator" },
   agents: [{ name: "architect", alive: true, busy: false }, { name: "reviewer", alive: true, busy: false }, { name: "operator", alive: true, busy: false }],
 }
@@ -144,7 +144,7 @@ describe("canonical conversation view", () => {
     expect(document.querySelector(".reply-preview")).toBeNull()
   })
 
-  test("collapses live activity and does not repeat streaming announcements", () => {
+  test("folds turn states into the execution spine without repeating streaming announcements", () => {
     const activity: ConversationEvent[] = [
       { kind: "turn_state", conversationId: "c1", sequence: 1, ts: 1, state: "queued" },
       { kind: "turn_state", conversationId: "c1", sequence: 1, ts: 2, state: "working" },
@@ -152,10 +152,27 @@ describe("canonical conversation view", () => {
       { kind: "turn_state", conversationId: "c1", sequence: 1, ts: 4, state: "streaming", detail: { chunk: "b" } },
     ]
     render(<ConversationView api={api()} conversation={conversation} activity={activity} />)
-    const disclosure = screen.getByText("Live activity").closest("details")!
-    expect(disclosure.hasAttribute("open")).toBe(false)
-    expect(within(disclosure).getAllByText("Streaming")).toHaveLength(1)
+    const spine = screen.getByRole("list", { name: "Turn activity" })
+    expect(within(spine).getAllByText("Streaming")).toHaveLength(1)
+    expect(within(spine).getByText("Queued")).toBeTruthy()
     expect(document.querySelectorAll("[data-activity-announcement='streaming']")).toHaveLength(1)
+  })
+
+  test("renders tool steps inline in the spine only when the turnSteps feature is on", () => {
+    const toolSteps = [
+      { id: "t1", name: "Read", summary: "hub/index.ts", status: "ok" as const, durationMs: 420 },
+      { id: "t2", name: "Grep", summary: "shareLinks", status: "running" as const },
+    ]
+    const off = render(<ConversationView api={api()} conversation={conversation} session={session} toolSteps={toolSteps} />)
+    expect(screen.queryByText("Read")).toBeNull()
+    off.unmount()
+
+    render(<ConversationView api={api()} conversation={conversation} session={{ ...session, features: { ...session.features, turnSteps: true } }} toolSteps={toolSteps} />)
+    const spine = screen.getByRole("list", { name: "Turn activity" })
+    expect(within(spine).getByText("Read")).toBeTruthy()
+    expect(within(spine).getByText("hub/index.ts")).toBeTruthy()
+    expect(within(spine).getByText("420ms")).toBeTruthy()
+    expect(spine.querySelector("[data-tool='Grep']")?.getAttribute("data-status")).toBe("running")
   })
 
   test("refreshes the header from the canonical primary-agent PATCH response", async () => {

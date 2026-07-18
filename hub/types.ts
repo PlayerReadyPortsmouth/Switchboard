@@ -377,6 +377,10 @@ export interface AttachmentConfig {
 export interface ToolObservabilityConfig {
   enabled?: boolean           // master switch (default off)
   channelId?: string          // where to post the tool board (default: statusChannelId)
+  // Web-UI sub-gate, mirroring `shareLinks.documentsUI`: surface each turn's tool
+  // calls live in the web transcript's execution spine. Needs `enabled` too, so
+  // the UI can never outlive the capture it renders. Default off.
+  webTurnSteps?: boolean
 }
 
 /** Operator-only card UI to browse/search the vault and forget (archive) or

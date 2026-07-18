@@ -1,10 +1,15 @@
 import { parseUsage, parseUsageObj } from "../usage"
 import type { TurnUsage } from "../types"
 
+/** One `tool_use` block lifted off an assistant frame. `input` is the raw tool
+ *  arguments — carried so callers can render a one-line argument summary; every
+ *  existing consumer only reads `id`/`name` and is unaffected by its presence. */
+export interface ToolUseBlock { id: string; name: string; input?: Record<string, unknown> }
+
 /** A parsed stdout stream-json event we care about. */
 export type StreamEvent =
   | { kind: "result"; text: string; usage?: TurnUsage }
-  | { kind: "assistant"; usage?: TurnUsage; tools?: { id: string; name: string }[] }
+  | { kind: "assistant"; usage?: TurnUsage; tools?: ToolUseBlock[] }
   | { kind: "tool_result"; results: { id: string; isError: boolean }[] }
   | { kind: "init"; sessionId: string }
 
@@ -27,7 +32,9 @@ export function parseStreamEvent(line: string): StreamEvent | null {
     const content = Array.isArray(ev.message?.content) ? ev.message.content : []
     const tools = content
       .filter((b: any) => b?.type === "tool_use" && typeof b.id === "string" && typeof b.name === "string")
-      .map((b: any) => ({ id: b.id as string, name: b.name as string }))
+      .map((b: any): ToolUseBlock => b.input && typeof b.input === "object" && !Array.isArray(b.input)
+        ? { id: b.id as string, name: b.name as string, input: b.input as Record<string, unknown> }
+        : { id: b.id as string, name: b.name as string })
     const out: Extract<StreamEvent, { kind: "assistant" }> = { kind: "assistant" }
     if (usage) out.usage = usage
     if (tools.length) out.tools = tools

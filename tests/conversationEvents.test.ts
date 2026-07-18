@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { ConversationEventStream, buildAttachmentEvent, type AttachmentInfo } from "../hub/conversations/events"
+import { ConversationEventStream, buildAttachmentEvent, buildToolStepEvent, summariseToolInput, type AttachmentInfo, type ToolStepInfo } from "../hub/conversations/events"
 import type { Message } from "../hub/conversations/types"
 
 const attachment = (over: Partial<AttachmentInfo> = {}): AttachmentInfo => ({
@@ -153,4 +153,51 @@ test("an attachment event is not replayed to a later subscriber (live-only)", ()
   const seen: string[] = []
   stream.subscribe("c1", 0, event => seen.push(event.kind))
   expect(seen).toEqual([])
+})
+
+test("buildToolStepEvent stamps the clock as both sequence and ts and carries the step", () => {
+  const step: ToolStepInfo = { id: "t1", name: "Read", summary: "hub/index.ts", status: "ok", durationMs: 412 }
+  expect(buildToolStepEvent("c1", step, 999)).toEqual({
+    kind: "tool_step", conversationId: "c1", sequence: 999, ts: 999, tool: step,
+  })
+})
+
+test("a tool_step event is delivered live and never advances the message high-water mark", () => {
+  const history = [message(1)]
+  const stream = new ConversationEventStream((_conversationId, after) => history.filter(item => item.sequence > after))
+  const seen: string[] = []
+  stream.subscribe("c1", 1, event => seen.push(event.kind === "tool_step" ? `tool_step:${event.tool!.status}` : event.kind))
+
+  // A far-future sequence would silently swallow the next real message if tool steps
+  // were gated on sequence like message_committed is.
+  stream.publish(buildToolStepEvent("c1", { id: "t1", name: "Bash", status: "running" }, 9_999_999))
+  stream.publish(buildToolStepEvent("c1", { id: "t1", name: "Bash", status: "ok", durationMs: 30 }, 9_999_999))
+  stream.publish({ kind: "message_committed", conversationId: "c1", sequence: 2, ts: 20, message: message(2) })
+
+  expect(seen).toEqual(["tool_step:running", "tool_step:ok", "message_committed"])
+})
+
+test("a tool_step event is not replayed to a later subscriber (live-only)", () => {
+  const stream = new ConversationEventStream(() => [])
+  stream.publish(buildToolStepEvent("c1", { id: "t1", name: "Grep", status: "running" }, Date.now()))
+  const seen: string[] = []
+  stream.subscribe("c1", 0, event => seen.push(event.kind))
+  expect(seen).toEqual([])
+})
+
+test("summariseToolInput picks the tool's telling argument and truncates one line", () => {
+  expect(summariseToolInput({ command: "git log --oneline -12" })).toBe("git log --oneline -12")
+  expect(summariseToolInput({ file_path: "hub/index.ts", offset: 10 })).toBe("hub/index.ts")
+  expect(summariseToolInput({ pattern: "shareLinks", path: "hub/" })).toBe("shareLinks  hub/")
+  // Multi-line commands collapse to a single spine line.
+  expect(summariseToolInput({ command: "one\n  two\n\tthree" })).toBe("one two three")
+  // No input, no string field, and blank strings all yield no summary rather than "".
+  expect(summariseToolInput(undefined)).toBeUndefined()
+  expect(summariseToolInput({ depth: 3, deep: true })).toBeUndefined()
+  expect(summariseToolInput({ command: "   " })).toBeUndefined()
+  // Unknown tools fall back to their first string argument.
+  expect(summariseToolInput({ somethingElse: "fallback value" })).toBe("fallback value")
+  const long = summariseToolInput({ command: "x".repeat(500) })!
+  expect(long.length).toBe(160)
+  expect(long.endsWith("…")).toBe(true)
 })

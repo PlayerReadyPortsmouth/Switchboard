@@ -7,7 +7,7 @@ export interface SessionAgentSummary { name: string; alive: boolean; busy: boole
 export interface Session {
   identity: string
   agents: SessionAgentSummary[]
-  features: { agents: boolean; documents: boolean }
+  features: { agents: boolean; documents: boolean; turnSteps: boolean }
   permissions: { agents: "hidden" | "viewer" | "operator" }
 }
 
@@ -173,8 +173,19 @@ export interface DocumentSummary {
 export interface UploadDocumentResult { token: string; url: string }
 export interface DocumentAttachment { token: string; title: string; contentType: string; mode: string; visibility: string }
 
+export type ToolStepStatus = "running" | "ok" | "error"
+/** One tool call in an agent's turn — mirrors the hub's `ToolStepInfo`. Arrives twice
+ *  (as `running`, then with its terminal status); the reducer pairs them by `id`. */
+export interface ToolStep {
+  id: string
+  name: string
+  summary?: string
+  status: ToolStepStatus
+  durationMs?: number
+}
+
 export interface ConversationEvent {
-  kind: "message_committed" | "turn_state" | "activity" | "attachment"
+  kind: "message_committed" | "turn_state" | "activity" | "attachment" | "tool_step"
   conversationId: string
   sequence: number
   ts: number
@@ -182,4 +193,5 @@ export interface ConversationEvent {
   state?: MessageState
   detail?: Record<string, unknown>
   attachment?: DocumentAttachment
+  tool?: ToolStep
 }

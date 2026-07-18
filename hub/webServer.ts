@@ -55,6 +55,7 @@ export interface WebDeps {
   setDocumentVisibility?: (identity: string, token: string, visibility: "private" | "org") => Promise<DocumentMutationResult>
   deleteDocument?: (identity: string, token: string) => Promise<DocumentMutationResult>
   documentsUiEnabled?: () => boolean
+  turnStepsEnabled?: () => boolean
 }
 
 const json = (body: unknown, status = 200) =>
@@ -186,7 +187,11 @@ export async function handleWebRequest(
       return json({
         identity: email,
         agents: deps.collect().status.agents.filter(({ mode }) => mode === "persistent").map(({ name, alive, busy }) => ({ name, alive, busy })),
-        features: { agents: access.feature, documents: deps.documentsUiEnabled?.() ?? false },
+        features: {
+          agents: access.feature,
+          documents: deps.documentsUiEnabled?.() ?? false,
+          turnSteps: deps.turnStepsEnabled?.() ?? false,
+        },
         permissions: { agents: access.role },
       })
     }

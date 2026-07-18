@@ -54,6 +54,7 @@ Source of truth: this file is a snapshot of the code as of 2026-07-02. Re-derive
 | `escalation` | object | — | `{ enabled, auto, autoMaxPerHour }` — `!hard` / auto re-run at higher effort. |
 | `reload` | object | — | `{ enabled }` — gates the `!reload` operator command. |
 | `trace` | object | — | `{ enabled, retentionDays, sweepIntervalMs }` |
+| `toolObservability` | object | **absent = off** | `{ enabled, channelId?, webTurnSteps? }` — captures per-agent tool usage. `enabled` gates the registry, the Discord tool board and `!tools`. `webTurnSteps` (default `false`, requires `enabled`) additionally publishes each tool call as a `tool_step` conversation event, drawing the web transcript's live execution spine; it also surfaces as `features.turnSteps` on `GET /api/session`. Plain boolean — all-staff or nobody, no per-user canary. |
 | `receipts` | object | — | `{ enabled }` — `post_card`/`update_card`/`attach_file` become request/response with a message-id confirmation. |
 | `approvals` | object | — | `{ enabled, channelId?, approvers[], ttlMs }` — human-in-the-loop gate. |
 | `peering` | object | — | Cross-VPS hub liaison: `{ enabled, listenPath, selfName, selfBaseUrl, askTimeoutMs, mirrorChannelId, dedupeWindowMs, maxClockSkewMs, ratePerPeerPerMin, notifyRetry{maxAttempts,baseDelayMs}, peers[]{name,baseUrl,secretEnv} }` |

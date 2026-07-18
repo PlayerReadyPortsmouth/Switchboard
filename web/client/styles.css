@@ -133,12 +133,23 @@ button { color: inherit; }
 .message-reply { margin: 13px 0 0; padding: 8px 11px; border-left: 1px solid var(--origin); color: var(--muted); font-size: .77rem; line-height: 1.45; }
 .message-reply-action { position: absolute; right: 0; bottom: 15px; min-width: 40px; min-height: 32px; padding: 0 5px; border: 0; background: transparent; color: var(--muted); font-size: .7rem; cursor: pointer; }
 .message-reply-action:hover { color: var(--text); }
-.activity-disclosure { margin-top: 20px; border-bottom: 1px solid var(--line); }
-.activity-disclosure summary { min-height: 44px; display: flex; align-items: center; gap: 10px; color: var(--muted); font: 600 .68rem/1 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: .07em; text-transform: uppercase; cursor: pointer; }
-.activity-trace { position: relative; width: 28px; height: 8px; border-top: 1px solid var(--accent); }
-.activity-trace::after { content: ""; position: absolute; right: 0; top: -4px; width: 6px; height: 6px; border: 1px solid var(--accent); border-radius: 50%; background: var(--ink-0); }
-.activity-disclosure ol { list-style: none; margin: 0; padding: 0 0 12px 12px; border-left: 1px solid var(--line); }
-.activity-item { min-height: 34px; display: grid; grid-template-columns: 12px 1fr auto; align-items: center; gap: 8px; font-size: .76rem; }
+/* Execution spine — the transcript's one signature element. A single vertical rail
+   with the turn's tool calls and lifecycle states hanging off it, in order. No boxes,
+   no shadows, no rounded panels: the read comes from alignment and mono rhythm. */
+.turn-spine { list-style: none; margin: 20px 0 0; padding: 2px 0 2px 14px; border-left: 1px solid var(--line); }
+.turn-step { min-height: 26px; display: grid; grid-template-columns: 12px minmax(4.5rem, auto) minmax(0, 1fr) auto; align-items: center; gap: 10px; font-size: .76rem; }
+.turn-step-node { position: relative; width: 6px; height: 6px; margin-left: -18px; border: 1px solid var(--muted); border-radius: 50%; background: var(--ink-0); }
+/* The node sits on the rail; this stub is the tick joining the two. */
+.turn-step-node::before { content: ""; position: absolute; right: 100%; top: 50%; width: 7px; border-top: 1px solid var(--line); }
+.turn-step-name { color: var(--text); font: .74rem/1 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.turn-step-summary { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--muted); font: .72rem/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.turn-step-status { justify-self: end; color: var(--muted); font: .66rem/1 ui-monospace, SFMono-Regular, Consolas, monospace; font-variant-numeric: tabular-nums; }
+.turn-step[data-status="running"] .turn-step-node { border-color: var(--accent); background: var(--accent); animation: turn-step-pulse 2s ease-in-out infinite; }
+.turn-step[data-status="error"] .turn-step-node { border-color: var(--danger); background: var(--danger); }
+.turn-step[data-status="error"] .turn-step-status { color: var(--danger); }
+@keyframes turn-step-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+.activity-item { min-height: 26px; display: grid; grid-template-columns: 12px 1fr auto; align-items: center; gap: 10px; font-size: .76rem; }
+.activity-item .activity-node { margin-left: -18px; }
 .activity-item time { color: var(--muted); font: .63rem/1 ui-monospace, SFMono-Regular, Consolas, monospace; }
 .activity-node { width: 6px; height: 6px; border: 1px solid var(--accent); border-radius: 50%; background: var(--ink-0); }
 .activity-failed .activity-node { border-color: var(--danger); }
@@ -358,6 +369,12 @@ dialog input, dialog select { min-height: 44px; width: 100%; padding: 0 11px; bo
   .transcript-header .inspector-toggle::after { content: "i"; position: absolute; inset: 0; display: grid; place-items: center; color: var(--text); }
   .transcript-header .danger-action::after { content: "×"; position: absolute; inset: 0; display: grid; place-items: center; color: var(--danger); font-size: 1.2rem; }
   .composer-shell { padding: 12px 16px max(16px, env(safe-area-inset-bottom)); }
+  /* The spine collapses to a narrow gutter; the summary keeps the remaining width
+     and the tool name loses its reserved column so nothing wraps. */
+  .turn-spine { padding-left: 9px; }
+  .turn-step { grid-template-columns: 8px auto minmax(0, 1fr) auto; gap: 7px; }
+  .turn-step-node, .activity-item .activity-node { margin-left: -13px; }
+  .turn-step-node::before { width: 5px; }
   .mobile-nav { position: fixed; z-index: 80; left: 0; right: 0; bottom: 0; min-height: calc(64px + env(safe-area-inset-bottom)); display: grid; grid-template-columns: repeat(3, 1fr); padding: 5px max(8px, env(safe-area-inset-right)) max(5px, env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left)); background: var(--ink-0); border-top: 1px solid var(--line); }
   .mobile-nav button { min-height: 48px; border: 0; border-top: 1px solid transparent; background: transparent; color: var(--muted); font-size: .72rem; cursor: pointer; }
   .mobile-nav button[aria-current="page"] { color: var(--text); border-top-color: var(--accent); }
@@ -385,4 +402,7 @@ dialog input, dialog select { min-height: 44px; width: 100%; padding: 0 11px; bo
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+  /* The blanket rule above stops the pulse mid-cycle; pin the running node fully
+     opaque so it never freezes dimmed. */
+  .turn-step[data-status="running"] .turn-step-node { animation: none !important; opacity: 1; }
 }
