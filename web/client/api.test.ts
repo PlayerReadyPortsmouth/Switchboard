@@ -89,6 +89,42 @@ test("typed agent methods encode names and use documented request shapes", async
   expect(calls[5].headers.get("idempotency-key")).toBe("retry-key")
 })
 
+test("typed document methods use documented request shapes", async () => {
+  const calls: Request[] = []
+  const responses: unknown[] = [[], { token: "tok9", url: "https://h/share/tok9" }, { ok: true }, { ok: true }]
+  const api = new WorkspaceApi(async input => {
+    calls.push(input as Request)
+    return Response.json(responses.shift())
+  })
+
+  await api.listDocuments()
+  await api.uploadDocument(new File([new Uint8Array([1, 2, 3])], "report.pdf", { type: "application/pdf" }), { title: "Report", visibility: "org" })
+  await api.setDocumentVisibility("tok/1", "org")
+  await api.deleteDocument("tok/1")
+
+  expect(calls.map(call => `${call.method} ${new URL(call.url).pathname}${new URL(call.url).search}`)).toEqual([
+    "GET /api/documents?scope=mine",
+    "POST /api/documents",
+    "PATCH /api/documents/tok%2F1",
+    "DELETE /api/documents/tok%2F1",
+  ])
+  // Upload sends multipart form data (runtime-managed content-type + boundary), not JSON.
+  expect(calls[1].headers.get("content-type")).toContain("multipart/form-data")
+  const form = await calls[1].formData()
+  expect((form.get("file") as File).name).toBe("report.pdf")
+  expect(form.get("title")).toBe("Report")
+  expect(form.get("visibility")).toBe("org")
+  expect(await calls[2].json()).toEqual({ visibility: "org" })
+  expect(calls[2].headers.get("content-type")).toBe("application/json")
+})
+
+test("listDocuments forwards the org scope", async () => {
+  const calls: Request[] = []
+  const api = new WorkspaceApi(async input => { calls.push(input as Request); return Response.json([]) })
+  await api.listDocuments("org")
+  expect(new URL(calls[0].url).search).toBe("?scope=org")
+})
+
 test("applies a non-root base path to every request", async () => {
   const calls: Request[] = []
   const api = new WorkspaceApi(async input => {

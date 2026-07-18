@@ -4,6 +4,8 @@ import { ConversationStream } from "./conversationStream"
 import { AgentStream } from "./agentStream"
 import { DraftStore } from "./drafts"
 import { AgentsWorkspace } from "./components/AgentsWorkspace"
+import { DocumentsWorkspace, type DocumentsApi } from "./components/DocumentsWorkspace"
+import { DocumentCard } from "./components/DocumentCard"
 import { AppRail } from "./components/AppRail"
 import { ConversationList } from "./components/ConversationList"
 import { Inspector } from "./components/Inspector"
@@ -13,9 +15,9 @@ import { ActivityDisclosure } from "./components/ActivityItem"
 import { MobileNav, type MobilePane } from "./components/MobileNav"
 import { useModalDialog } from "./components/useModalDialog"
 import { initialWorkspaceState, workspaceReducer } from "./state"
-import type { ConnectionState, Conversation, ConversationEvent, ConversationInput, ConversationUpdate, Message, PostMessageInput, Session, TransportLink } from "./types"
+import type { ConnectionState, Conversation, ConversationEvent, ConversationInput, ConversationUpdate, DocumentAttachment, Message, PostMessageInput, Session, TransportLink } from "./types"
 import type { PwaController, PwaState } from "./pwa"
-import { parseWorkspaceRoute, pathForAgent, pathForConversation, type WorkspaceRoute } from "./routes"
+import { parseWorkspaceRoute, pathForAgent, pathForConversation, pathForDocument, type WorkspaceRoute } from "./routes"
 import { webBase } from "./base"
 
 export interface AppApi {
@@ -33,6 +35,10 @@ export interface AppApi {
   confirmAgentConfig?: WorkspaceApi["confirmAgentConfig"]
   previewAgentAction?: WorkspaceApi["previewAgentAction"]
   confirmAgentAction?: WorkspaceApi["confirmAgentAction"]
+  listDocuments?: WorkspaceApi["listDocuments"]
+  uploadDocument?: WorkspaceApi["uploadDocument"]
+  setDocumentVisibility?: WorkspaceApi["setDocumentVisibility"]
+  deleteDocument?: WorkspaceApi["deleteDocument"]
 }
 
 export interface ConversationViewApi {
@@ -54,7 +60,7 @@ interface ConversationWorkspaceProps extends AppProps {
   session?: Session | null
   controllerState?: PwaState
   onSessionLoaded?(session: Session): void
-  onNavigateDestination?(destination: "conversations" | "agents"): void
+  onNavigateDestination?(destination: "conversations" | "agents" | "documents"): void
 }
 
 type LoadState = "loading" | "ready" | "forbidden" | "unavailable"
@@ -94,11 +100,12 @@ export function createWorkspaceStream(api: AppApi): ConversationStream {
   }, webBase)
 }
 
-export function ConversationView({ api, conversation: suppliedConversation, messages, activity = [], drafts: suppliedDrafts, session: suppliedSession, links: suppliedLinks, inspectorOpen = true, composerRef, inspectorCloseRef, onOpenInspector, onCloseInspector = () => {}, onInspectorEscape, onArchive, onCanonicalMessage, onConversationUpdated }: {
+export function ConversationView({ api, conversation: suppliedConversation, messages, activity = [], attachments = [], drafts: suppliedDrafts, session: suppliedSession, links: suppliedLinks, inspectorOpen = true, composerRef, inspectorCloseRef, onOpenInspector, onCloseInspector = () => {}, onInspectorEscape, onArchive, onCanonicalMessage, onConversationUpdated }: {
   api: ConversationViewApi
   conversation: Conversation
   messages?: Message[]
   activity?: ConversationEvent[]
+  attachments?: DocumentAttachment[]
   drafts?: DraftStore
   session?: Session
   links?: TransportLink[]
@@ -132,7 +139,7 @@ export function ConversationView({ api, conversation: suppliedConversation, mess
   const session = suppliedSession ?? {
     identity: suppliedConversation.createdBy,
     agents: [{ name: conversation.primaryAgent, alive: true, busy: false }],
-    features: { agents: false },
+    features: { agents: false, documents: false },
     permissions: { agents: "hidden" as const },
   }
   const links = suppliedLinks ?? loadedLinks
@@ -237,7 +244,11 @@ export function ConversationView({ api, conversation: suppliedConversation, mess
           {onArchive ? <button type="button" className="danger-action" onClick={onArchive}>Archive conversation</button> : null}
         </div>
       </header>
-      <div className="transcript-body"><Transcript messages={renderedMessages} onReply={setReplyTo} /><ActivityDisclosure events={activity} /></div>
+      <div className="transcript-body">
+        <Transcript messages={renderedMessages} onReply={setReplyTo} />
+        {attachments.length > 0 ? <ul className="transcript-attachments" aria-label="Shared documents">{attachments.map(attachment => <li key={attachment.token}><DocumentCard token={attachment.token} title={attachment.title} contentType={attachment.contentType} mode={attachment.mode} visibility={attachment.visibility === "org" ? "org" : "private"} viewerIsOwner={false} /></li>)}</ul> : null}
+        <ActivityDisclosure events={activity} />
+      </div>
       <Composer value={text} replyTo={replyTo} sending={sending} error={sendError} textareaRef={composerRef} onChange={changeText} onSubmit={submit} onRetry={retry} onDismissReply={() => setReplyTo(null)} />
     </section>
     <Inspector conversation={conversation} session={session} links={links} primaryAgentError={agentError} open={inspectorOpen} closeRef={inspectorCloseRef} onClose={onCloseInspector} onEscape={onInspectorEscape} onPrimaryAgentChange={api.updateConversation ? primaryAgent => { void updatePrimaryAgent(primaryAgent) } : undefined} />
@@ -310,7 +321,7 @@ export function ConversationWorkspace({ api: suppliedApi, drafts: suppliedDrafts
         const now = Date.now()
         dispatch({
           type: "session/loaded",
-          session: { identity: "", agents: [], features: { agents: false }, permissions: { agents: "hidden" } },
+          session: { identity: "", agents: [], features: { agents: false, documents: false }, permissions: { agents: "hidden" } },
         })
         if (!current()) return
         dispatch({ type: "conversations/loaded", conversations: [{
@@ -470,7 +481,7 @@ export function ConversationWorkspace({ api: suppliedApi, drafts: suppliedDrafts
         connection={displayedConnection}
         install={pwa ? { available: pwaState.installAvailable, run: () => pwa.install() } : install ? { available: true, run: async () => install.run() } : undefined}
         onNew={() => openDialog("new")}
-        onNavigate={destination => destination === "conversations" ? navigate(null) : onNavigateDestination?.("agents")}
+        onNavigate={destination => destination === "conversations" ? navigate(null) : onNavigateDestination?.(destination)}
       />
       <ConversationList
         conversations={state.conversations}
@@ -489,6 +500,7 @@ export function ConversationWorkspace({ api: suppliedApi, drafts: suppliedDrafts
         conversation={selected}
         messages={state.messages}
         activity={state.activity}
+        attachments={state.attachments}
         drafts={drafts}
         session={state.session}
         links={links}
@@ -527,6 +539,12 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, st
     previewAgentAction: (name: string, action: Parameters<WorkspaceApi["previewAgentAction"]>[1]) => api.previewAgentAction ? api.previewAgentAction(name, action) : Promise.reject(new ApiError(503, "operation_unavailable")),
     confirmAgentAction: (name: string, previewId: string, idempotencyKey: string) => api.confirmAgentAction ? api.confirmAgentAction(name, previewId, idempotencyKey) : Promise.reject(new ApiError(503, "operation_unavailable")),
   } : null, [api])
+  const documentsApi = useMemo<DocumentsApi | null>(() => api.listDocuments && api.uploadDocument && api.setDocumentVisibility && api.deleteDocument ? {
+    listDocuments: scope => api.listDocuments!(scope),
+    uploadDocument: (file, options) => api.uploadDocument!(file, options),
+    setDocumentVisibility: (token, visibility) => api.setDocumentVisibility!(token, visibility),
+    deleteDocument: token => api.deleteDocument!(token),
+  } : null, [api])
   const [route, setRoute] = useState<WorkspaceRoute>(() => parseWorkspaceRoute(location.pathname, webBase))
   const [session, setSession] = useState<Session | null>(null)
   const [sessionState, setSessionState] = useState<LoadState>("loading")
@@ -558,13 +576,13 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, st
   }, [api])
 
   useEffect(() => {
-    if (route.destination !== "agents" || session) return
+    if ((route.destination !== "agents" && route.destination !== "documents") || session) return
     void loadSession()
     return () => { sessionGeneration.current++ }
   }, [loadSession, route.destination, session])
 
-  const navigate = useCallback((destination: "conversations" | "agents", agent: string | null = null) => {
-    const path = destination === "agents" ? pathForAgent(agent, webBase) : pathForConversation(null, webBase)
+  const navigate = useCallback((destination: "conversations" | "agents" | "documents", agent: string | null = null) => {
+    const path = destination === "agents" ? pathForAgent(agent, webBase) : destination === "documents" ? pathForDocument(null, webBase) : pathForConversation(null, webBase)
     history.pushState(null, "", path)
     setRoute(parseWorkspaceRoute(path, webBase))
   }, [])
@@ -587,6 +605,16 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, st
         onNavigate={navigate}
         onNewConversation={() => navigate("conversations")}
       />
+    </>
+  }
+  if (route.destination === "documents") {
+    if (sessionState === "forbidden") return <main className="status-page"><section role="alert"><h1>Workspace access denied</h1><p>Ask a Switchboard administrator to grant your identity access.</p></section></main>
+    if (sessionState === "unavailable") return <main className="status-page"><section role="alert"><h1>Switchboard is unavailable</h1><p>Check the service connection, then try again.</p><button type="button" onClick={() => void loadSession()}>Try again</button></section></main>
+    if (sessionState === "loading" || !session) return <main className="status-page"><div role="status"><span className="status-node" />Loading your workspace…</div></main>
+    if (!session.features.documents || !documentsApi) return <NotFound />
+    return <>
+      <PwaIssueBanner issue={pwaState.issue} />
+      <DocumentsWorkspace api={documentsApi} session={session} />
     </>
   }
 

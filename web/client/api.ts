@@ -15,6 +15,8 @@ import type {
   PostMessageInput,
   Session,
   TransportLink,
+  DocumentSummary,
+  UploadDocumentResult,
 } from "./types"
 
 export class ApiError extends Error {
@@ -107,13 +109,33 @@ export class WorkspaceApi {
     })
   }
 
-  private async request<T>(path: string, options: { method?: string; json?: unknown; headers?: HeadersInit } = {}): Promise<T> {
-    const headers = new Headers(options.headers)
-    const body = options.json === undefined ? undefined : JSON.stringify(options.json)
-    if (body !== undefined) headers.set("content-type", "application/json")
-    // basePath has a trailing slash and path a leading slash; drop one to avoid "//". "/" → "".
-    const prefixed = `${this.basePath.replace(/\/$/, "")}${path}`
-    const response = await this.fetcher(new Request(new URL(prefixed, this.baseUrl), { method: options.method, headers, body }))
+  listDocuments(scope: "mine" | "org" = "mine"): Promise<DocumentSummary[]> {
+    return this.request(`/api/documents?scope=${scope}`)
+  }
+
+  uploadDocument(file: File, options: { title?: string; visibility?: "private" | "org" } = {}): Promise<UploadDocumentResult> {
+    const form = new FormData()
+    form.set("file", file)
+    if (options.title !== undefined) form.set("title", options.title)
+    if (options.visibility !== undefined) form.set("visibility", options.visibility)
+    return this.requestForm("/api/documents", form)
+  }
+
+  setDocumentVisibility(token: string, visibility: "private" | "org"): Promise<{ ok: true }> {
+    return this.request(`/api/documents/${encodeURIComponent(token)}`, { method: "PATCH", json: { visibility } })
+  }
+
+  deleteDocument(token: string): Promise<{ ok: true }> {
+    return this.request(`/api/documents/${encodeURIComponent(token)}`, { method: "DELETE" })
+  }
+
+  // basePath has a trailing slash and path a leading slash; drop one to avoid "//". "/" → "".
+  private endpoint(path: string): URL {
+    return new URL(`${this.basePath.replace(/\/$/, "")}${path}`, this.baseUrl)
+  }
+
+  private async send<T>(request: Request): Promise<T> {
+    const response = await this.fetcher(request)
     const contentType = response.headers.get("content-type") ?? ""
     const value = contentType.includes("application/json") ? await response.json().catch(() => null) : null
     if (!response.ok) {
@@ -124,5 +146,18 @@ export class WorkspaceApi {
     }
     if (value === null) throw new ApiError(response.status, "invalid_response")
     return value as T
+  }
+
+  private request<T>(path: string, options: { method?: string; json?: unknown; headers?: HeadersInit } = {}): Promise<T> {
+    const headers = new Headers(options.headers)
+    const body = options.json === undefined ? undefined : JSON.stringify(options.json)
+    if (body !== undefined) headers.set("content-type", "application/json")
+    return this.send<T>(new Request(this.endpoint(path), { method: options.method, headers, body }))
+  }
+
+  // Multipart uploads omit an explicit content-type so the runtime sets the
+  // multipart boundary itself (the proxy forwards it verbatim to the hub).
+  private requestForm<T>(path: string, form: FormData): Promise<T> {
+    return this.send<T>(new Request(this.endpoint(path), { method: "POST", body: form }))
   }
 }

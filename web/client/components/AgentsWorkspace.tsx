@@ -26,7 +26,7 @@ export function AgentsWorkspace({ api, session, routeAgent, connection: supplied
   connection: ConnectionState
   install?: { available: boolean; run(): Promise<void> }
   streamFactory?: (() => AgentStream) | null
-  onNavigate(destination: "conversations" | "agents", agent?: string | null): void
+  onNavigate(destination: "conversations" | "agents" | "documents", agent?: string | null): void
   onNewConversation(): void
 }) {
   const [agents, setAgents] = useState<AgentSummary[]>([])

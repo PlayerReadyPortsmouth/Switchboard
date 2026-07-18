@@ -1,6 +1,7 @@
 export type WorkspaceRoute =
   | { destination: "conversations"; conversationId: string | null }
   | { destination: "agents"; agent: string | null }
+  | { destination: "documents"; token: string | null }
   | { destination: "not_found" }
 
 function decodePathPart(value: string): string | null {
@@ -26,6 +27,7 @@ export function parseWorkspaceRoute(pathname: string, base = "/"): WorkspaceRout
 
   if (rooted === "/") return { destination: "conversations", conversationId: null }
   if (rooted === "/agents") return { destination: "agents", agent: null }
+  if (rooted === "/documents") return { destination: "documents", token: null }
 
   const conversation = /^\/conversations\/([^/]+)$/.exec(rooted)
   if (conversation) {
@@ -39,6 +41,12 @@ export function parseWorkspaceRoute(pathname: string, base = "/"): WorkspaceRout
     return name === null ? { destination: "not_found" } : { destination: "agents", agent: name }
   }
 
+  const document = /^\/documents\/([^/]+)$/.exec(rooted)
+  if (document) {
+    const token = decodePathPart(document[1])
+    return token === null ? { destination: "not_found" } : { destination: "documents", token }
+  }
+
   return { destination: "not_found" }
 }
 
@@ -50,3 +58,6 @@ export const pathForConversation = (conversationId: string | null, base = "/"): 
 
 export const pathForAgent = (agent: string | null, base = "/"): string =>
   withBase(base, agent === null ? "/agents" : `/agents/${encodeURIComponent(agent)}`)
+
+export const pathForDocument = (token: string | null, base = "/"): string =>
+  withBase(base, token === null ? "/documents" : `/documents/${encodeURIComponent(token)}`)

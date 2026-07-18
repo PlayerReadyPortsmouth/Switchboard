@@ -409,6 +409,7 @@ export interface ShareLinksConfig {
   defaultTtlDays?: number        // default 30
   maxBytes?: number              // default 26214400 (25 MB)
   cleanupIntervalMs?: number     // default 86400000 (daily)
+  documentsUI?: boolean          // web-client Documents section gate (default off; requires enabled)
 }
 
 /** One step of a workflow: run `agent` with a templated `prompt` ({{input}} and

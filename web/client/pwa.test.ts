@@ -30,7 +30,7 @@ const api: AppApi = {
   session: async () => ({
     identity: "ada@example.com",
     agents: [{ name: "architect", alive: true, busy: false }],
-    features: { agents: true },
+    features: { agents: true, documents: false },
     permissions: { agents: "operator" },
   }),
   listConversations: async () => [],

@@ -414,6 +414,18 @@ const uploadReq = (fields: { file?: File; title?: string; visibility?: string },
   return new Request("http://hub/api/documents", { method: "POST", headers, body: form })
 }
 
+test("GET /api/session reports features.documents = false when documentsUiEnabled is absent/off", async () => {
+  const res = await handleWebRequest(get("/api/session", AUTH), fakeDeps())
+  expect(res.status).toBe(200)
+  expect((await res.json()).features.documents).toBe(false)
+})
+
+test("GET /api/session reports features.documents = true when documentsUiEnabled returns true", async () => {
+  const res = await handleWebRequest(get("/api/session", AUTH), fakeDeps({ documentsUiEnabled: () => true }))
+  expect(res.status).toBe(200)
+  expect((await res.json()).features.documents).toBe(true)
+})
+
 test("documents routes 400 without the identity header", async () => {
   expect((await handleWebRequest(get("/api/documents"), documentDeps())).status).toBe(400)
 })

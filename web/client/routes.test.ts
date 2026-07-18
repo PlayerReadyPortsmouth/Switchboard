@@ -1,11 +1,24 @@
 import { expect, test } from "bun:test"
-import { parseWorkspaceRoute, pathForAgent, pathForConversation } from "./routes"
+import { parseWorkspaceRoute, pathForAgent, pathForConversation, pathForDocument } from "./routes"
 
 test("parses conversation and agent workspace routes", () => {
   expect(parseWorkspaceRoute("/")).toEqual({ destination: "conversations", conversationId: null })
   expect(parseWorkspaceRoute("/conversations/design%2Freview")).toEqual({ destination: "conversations", conversationId: "design/review" })
   expect(parseWorkspaceRoute("/agents")).toEqual({ destination: "agents", agent: null })
   expect(parseWorkspaceRoute("/agents/design%2Freview")).toEqual({ destination: "agents", agent: "design/review" })
+})
+
+test("parses document workspace routes", () => {
+  expect(parseWorkspaceRoute("/documents")).toEqual({ destination: "documents", token: null })
+  expect(parseWorkspaceRoute("/documents/tok%2F1")).toEqual({ destination: "documents", token: "tok/1" })
+  expect(parseWorkspaceRoute("/documents/%E0%A4%A")).toEqual({ destination: "not_found" })
+})
+
+test("builds encoded document paths", () => {
+  expect(pathForDocument(null)).toBe("/documents")
+  expect(pathForDocument("tok/1")).toBe("/documents/tok%2F1")
+  expect(pathForDocument(null, "/switchboard/")).toBe("/switchboard/documents")
+  expect(pathForDocument("tok/1", "/switchboard/")).toBe("/switchboard/documents/tok%2F1")
 })
 
 test("rejects malformed and unknown workspace routes", () => {

@@ -42,7 +42,7 @@ test("workspace session uses the configured trusted header and exposes status-sa
     ], overseers: [], routes: [], routeRate10m: 0, ephemerals: [] }, audit: { total: 0, byKind: {}, byOutcome: {}, costUsd: 0, actors: 0 }, recent: [], pendingApprovals: 0, pendingApprovalList: [] }),
   }))
   expect(response.status).toBe(200)
-  expect(await response.json()).toEqual({ identity: "ada@example.com", agents: [{ name: "qa", alive: true, busy: false }], features: { agents: true }, permissions: { agents: "operator" } })
+  expect(await response.json()).toEqual({ identity: "ada@example.com", agents: [{ name: "qa", alive: true, busy: false }], features: { agents: true, documents: false }, permissions: { agents: "operator" } })
   expect((await handleWebRequest(new Request("http://x/api/session"), deps())).status).toBe(400)
 })
 
