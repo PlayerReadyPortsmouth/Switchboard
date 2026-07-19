@@ -93,7 +93,8 @@ import { DocumentsDb, publishDocument, uploadDocument, setVisibility, deleteDocu
 import { runDocumentsMigrations } from "./documentsMigrations"
 import { createHash, randomBytes, randomUUID } from "crypto"
 import { Database } from "bun:sqlite"
-import { ConversationEventStream, ConversationService, createDiscordConversationMigrator, inboundLinkRoute, LegacyDiscordCompatibilityRouter, ProductionIngressGate, SqliteConversationRepository, TurnCoordinator, buildAttachmentEvent, buildToolStepEvent, buildCardEvent, summariseToolInput, attachmentCreatedAt } from "./conversations"
+import { ConversationEventStream, ConversationService, createDiscordConversationMigrator, inboundLinkRoute, LegacyDiscordCompatibilityRouter, ProductionIngressGate, SqliteConversationRepository, TurnCoordinator, buildAttachmentEvent, buildToolStepEvent, buildCardEvent, summariseToolInput, attachmentCreatedAt, resolveConversationId } from "./conversations"
+import { publishCardToWeb } from "./webCardPublisher"
 import { DeliveryWorker, DiscordAdapter, SurfaceRouter } from "./surfaces"
 import { createAsyncShutdown } from "./shutdown"
 import { MemoryBrowse } from "./memoryBrowse"
@@ -681,6 +682,11 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): ProcessAgen
         await mirrorAttachment(frame, {
           enabled: true,
           currentConversation: () => {
+            // Deliberately NOT `resolveConversationId`: this feeds `documentOwnership`, and
+            // resolving a Discord channel onto a human-created conversation would stamp that
+            // human as owner, flipping the mirrored document from org-visible to private and
+            // breaking the share link for everyone else in the channel. UUID-only is the
+            // conservative reading here; see hub/conversations/resolveConversation.ts.
             const chat = transports.get(key)?.getLastChatId() ?? ""
             const conversation = chat ? conversationRepo.getConversation(chat) : null
             return conversation ? { id: conversation.id, createdBy: conversation.createdBy } : null
@@ -716,6 +722,8 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): ProcessAgen
       // canonical conversations (web + migrated Discord) and thread replicas alike.
       // The socket is per-key, so the process publishing here is exactly transport `key`.
       const chat = transports.get(key)?.getLastChatId() ?? ""
+      // UUID-only on purpose — see the matching note in `mirrorAttachment.currentConversation`.
+      // `resolveConversationId` must not be used on an ownership path.
       const conversation = chat ? conversationRepo.getConversation(chat) : null
       // Shared with `mirrorAttachment` so the two publish paths cannot drift: an owner is
       // stamped only when the conversation's creator is HUMAN. A canonically-migrated Discord
@@ -782,16 +790,18 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): ProcessAgen
     if (chat) channelStream.publish(chat, { kind: "tool_use", ts: Date.now(), agent: name, tools })
     if (toolObs) toolUsage.recordToolUse(name, tools)
     // Web execution spine: only for chats that resolve to a canonical conversation.
-    // A Discord-only chat has no conversation row, so nothing is tracked or published
-    // and behaviour is byte-identical to before.
+    // Via the shared resolver — `lastChatId` is a Discord channel snowflake for a mirrored
+    // conversation, and the bare `getConversation` lookup this replaces dropped the spine
+    // for every one of them. A chat that resolves to nothing is still untracked, so a
+    // Discord-only channel behaves exactly as before.
     if (!turnStepsOn || !chat) return
-    const conversation = conversationRepo.getConversation(chat)
-    if (!conversation) return
+    const conversationId = resolveConversationId(conversationRepo, chat)
+    if (!conversationId) return
     const now = Date.now()
     for (const tool of tools) {
       const summary = summariseToolInput(tool.input)
-      pendingToolSteps.set(tool.id, { agent: name, conversationId: conversation.id, name: tool.name, summary, startedAt: now })
-      conversationEvents.publish(buildToolStepEvent(conversation.id, {
+      pendingToolSteps.set(tool.id, { agent: name, conversationId, name: tool.name, summary, startedAt: now })
+      conversationEvents.publish(buildToolStepEvent(conversationId, {
         id: tool.id, name: tool.name, status: "running", ...(summary ? { summary } : {}),
       }, now))
     }
@@ -2447,14 +2457,20 @@ ensureDiscordConversation = createDiscordConversationMigrator({
 // card path, so this cannot double-post.
 mirrorRichReplyToWeb = (reply, card) => {
   if (!conversationMirrorEnabled || hub.conversationMirror?.mirrorCardsToWeb === false) return
-  if (!conversationRepo.getConversation(reply.chatId)) return
+  // Shared resolver: `reply.chatId` is a Discord channel snowflake whenever the agent is
+  // serving the conversation through its Discord mirror, so a bare `getConversation` lookup
+  // (what this used to do) missed every Discord-linked conversation.
+  const conversationId = resolveConversationId(conversationRepo, reply.chatId)
+  if (!conversationId) return
   const text = [card.title?.trim(), card.body?.trim()].filter(Boolean).join("\n\n")
   if (!text) return
   const callbackId = reply.correlationId ?? reply.messageId
   if (!callbackId) return
   try {
+    // No transport links are passed, so this creates no deliveries: the canonical transcript
+    // gets the text and Discord delivery stays entirely on the legacy card path.
     conversationService.appendAgentMessage({
-      id: randomUUID(), conversationId: reply.chatId, author: reply.agent, origin: "agent", content: text,
+      id: randomUUID(), conversationId, author: reply.agent, origin: "agent", content: text,
       state: "completed", clientKey: `agent:${reply.agent}:${reply.kind}:${callbackId}:${cardRevision(card)}`, createdAt: Date.now(),
     }, [])
   } catch (error) { process.stderr.write(`conversation mirror: card persist failed: ${error}\n`) }
@@ -2469,18 +2485,12 @@ mirrorRichReplyToWeb = (reply, card) => {
 // identified across edits, so it is skipped rather than stored under a synthetic id that a
 // later edit could never match.
 publishCanonicalCard = (reply, card) => {
-  if (!webCardStore) return
-  const correlationId = reply.correlationId
-  if (!correlationId) return
-  if (!conversationRepo.getConversation(reply.chatId)) return
-  try {
-    const info = webCardStore.record({
-      correlationId, conversationId: reply.chatId, agent: reply.agent, card,
-    })
-    if (info) conversationEvents.publish(buildCardEvent(info, Date.now()))
-  } catch (error) {
-    process.stderr.write(`web cards: publish failed: ${error}\n`)
-  }
+  publishCardToWeb(reply, card, {
+    store: webCardStore,
+    resolveConversation: chatId => resolveConversationId(conversationRepo, chatId),
+    publish: info => conversationEvents.publish(buildCardEvent(info, Date.now())),
+    onError: error => process.stderr.write(`web cards: publish failed: ${error}\n`),
+  })
 }
 
 turnCoordinator = new TurnCoordinator(

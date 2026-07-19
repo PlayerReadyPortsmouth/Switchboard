@@ -1,6 +1,7 @@
 export * from "./events"
 export * from "./channelMigration"
 export * from "./repository"
+export * from "./resolveConversation"
 export * from "./service"
 export * from "./sqliteRepository"
 export * from "./turnCoordinator"
