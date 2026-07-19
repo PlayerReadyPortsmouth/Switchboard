@@ -1,4 +1,4 @@
-import "./testSetup"
+import { resetViewport, setViewport } from "./testSetup"
 import { afterEach, describe, expect, test } from "bun:test"
 import { act, cleanup, fireEvent, render, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
@@ -39,11 +39,6 @@ function deferred<T>() {
   return { promise, resolve, reject }
 }
 
-function setViewport(width: number) {
-  Object.defineProperty(window, "innerWidth", { configurable: true, value: width })
-  window.dispatchEvent(new Event("resize"))
-}
-
 function fakeApi(options: {
   conversations?: Conversation[]
   session?: Session
@@ -79,7 +74,7 @@ function fakeApi(options: {
 afterEach(() => {
   cleanup()
   history.replaceState(null, "", "/")
-  setViewport(1280)
+  resetViewport()
 })
 
 describe("responsive workspace shell", () => {

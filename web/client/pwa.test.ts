@@ -1,4 +1,4 @@
-import "./testSetup"
+import { resetViewport, setViewport } from "./testSetup"
 import { afterEach, describe, expect, test } from "bun:test"
 import { act, cleanup, render, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
@@ -17,6 +17,7 @@ afterEach(() => {
   if (originalIsSecureContext) Object.defineProperty(globalThis, "isSecureContext", originalIsSecureContext)
   else Reflect.deleteProperty(globalThis, "isSecureContext")
   history.replaceState(null, "", "/")
+  resetViewport()
 })
 
 function installEvent(prompt: () => Promise<void> = async () => {}) {
@@ -193,7 +194,7 @@ describe("registerPwa", () => {
     ["mobile", 500, { source: "install", message: "The install prompt could not open. Reload the page, then try Install Switchboard again." }],
   ] as const) {
     test(`shows a visible install error with recovery guidance when unavailable on ${layout}`, async () => {
-      Object.defineProperty(window, "innerWidth", { configurable: true, value: width })
+      setViewport(width)
       const pwa = {
         state: () => ({ installAvailable: false, online: true, issue }),
         subscribe: (listener: (state: PwaState) => void) => { listener(pwa.state()); return () => {} },
