@@ -135,7 +135,8 @@ function wireAgentActivity(
     const token = "tok-1"
     if (conversation) {
       events.publish(buildAttachmentEvent(conversation.id, {
-        token, title: doc.title, contentType: doc.contentType, mode: doc.mode, visibility: doc.visibility,
+        token, title: doc.title, contentType: doc.contentType, mode: doc.mode,
+        visibility: doc.visibility, createdAt: now(),
       }, now()))
     }
     return args

@@ -1,11 +1,10 @@
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useReducer, useRef, useState, type FormEvent, type Ref } from "react"
+import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type FormEvent, type Ref } from "react"
 import { ApiError, WorkspaceApi } from "./api"
 import { ConversationStream } from "./conversationStream"
 import { AgentStream } from "./agentStream"
 import { DraftStore } from "./drafts"
 import { AgentsWorkspace } from "./components/AgentsWorkspace"
 import { DocumentsWorkspace, type DocumentsApi } from "./components/DocumentsWorkspace"
-import { DocumentCard } from "./components/DocumentCard"
 import { AppRail } from "./components/AppRail"
 import { ConversationList } from "./components/ConversationList"
 import { Inspector } from "./components/Inspector"
@@ -30,6 +29,7 @@ export interface AppApi {
   postMessage?(conversationId: string, input: PostMessageInput): Promise<Message>
   updateConversation?(conversationId: string, input: ConversationUpdate): Promise<Conversation>
   listLinks?(conversationId: string): Promise<TransportLink[]>
+  listConversationDocuments?: WorkspaceApi["listConversationDocuments"]
   listAgents?: WorkspaceApi["listAgents"]
   getAgent?: WorkspaceApi["getAgent"]
   previewAgentConfig?: WorkspaceApi["previewAgentConfig"]
@@ -153,7 +153,6 @@ export function ConversationView({ api, conversation: suppliedConversation, mess
   }
   const links = suppliedLinks ?? loadedLinks
   const renderedSteps = session.features.turnSteps ? toolSteps : []
-  const attachmentsHeadingId = `attachments-${useId()}`
   // Everything rendered inside the scroll container, so late arrivals below the
   // messages (attachment cards, the turn-steps spine) also re-settle the bottom.
   const transcriptContentKey = `${renderedMessages.length}:${renderedMessages.at(-1)?.id ?? ""}:${attachments.length}:${renderedSteps.length}:${activity.length}`
@@ -260,29 +259,17 @@ export function ConversationView({ api, conversation: suppliedConversation, mess
         </div>
       </header>
       <div className="transcript-body" ref={scrollRef} data-region="transcript-scroll">
-        <Transcript messages={renderedMessages} onReply={setReplyTo} />
-        {attachments.length > 0 ? (
-          <section className="transcript-attachments" aria-labelledby={attachmentsHeadingId} data-region="transcript-attachments">
-            <p className="eyebrow" id={attachmentsHeadingId}>
-              {attachments.length === 1 ? "1 document shared" : `${attachments.length} documents shared`}
-            </p>
-            <ul className="transcript-attachment-list">
-              {attachments.map(attachment => (
-                <li key={attachment.token}>
-                  <DocumentCard
-                    token={attachment.token}
-                    title={attachment.title}
-                    contentType={attachment.contentType}
-                    mode={attachment.mode}
-                    visibility={attachment.visibility === "org" ? "org" : "private"}
-                    thumbnailUrl={api.documentContentUrl?.(attachment.token)}
-                    {...(onOpenDocument ? { onOpen: onOpenDocument } : {})}
-                  />
-                </li>
-              ))}
-            </ul>
-          </section>
-        ) : null}
+        {/* Attachment cards render INSIDE the agent message that produced them (see
+            `anchorAttachments`); the Transcript owns that placement now. `documentContentUrl`
+            is called THROUGH `api` rather than handed over as a detached reference —
+            WorkspaceApi's method body uses `this`, so the bare function would break. */}
+        <Transcript
+          messages={renderedMessages}
+          onReply={setReplyTo}
+          attachments={attachments}
+          {...(onOpenDocument ? { onOpenDocument } : {})}
+          {...(api.documentContentUrl ? { documentContentUrl: (token: string) => api.documentContentUrl!(token) } : {})}
+        />
         <TurnSteps steps={renderedSteps} events={activity} />
       </div>
       {pinned || !renderedMessages.length ? null : <button type="button" className="jump-to-latest" data-region="jump-to-latest" onClick={() => jumpToLatest()}>Jump to latest</button>}
@@ -409,6 +396,20 @@ export function ConversationWorkspace({ api: suppliedApi, drafts: suppliedDrafts
     })
     return () => stream.stop()
   }, [api, state.selectedConversationId, streamFactory])
+
+  // Rehydrate the transcript's attachment cards. `attachment` events are live-only — they are
+  // not replayed from message history — so on a remount (navigate away and back) messages
+  // refetch but every card the user had seen would otherwise disappear. Failure is silent and
+  // non-fatal: the transcript still renders, it just shows only cards seen live this session.
+  useEffect(() => {
+    const conversationId = state.selectedConversationId
+    if (!conversationId || !api.listConversationDocuments) return
+    let active = true
+    void api.listConversationDocuments(conversationId)
+      .then(attachments => { if (active) dispatch({ type: "attachments/loaded", attachments }) })
+      .catch(() => {})
+    return () => { active = false }
+  }, [api, state.selectedConversationId])
 
   const selected = useMemo(() => state.conversations.find(item => item.id === state.selectedConversationId) ?? null, [state.conversations, state.selectedConversationId])
   useEffect(() => {

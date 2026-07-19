@@ -88,7 +88,7 @@ test("attachment events surface via onEvent without advancing the reconnect curs
   opened[0].open()
   opened[0].message(JSON.stringify({
     kind: "attachment", conversationId: "c1", sequence: 1_700_000_000_000, ts: 1,
-    attachment: { token: "tok1", title: "Doc", contentType: "application/pdf", mode: "view", visibility: "org" },
+    attachment: { token: "tok1", title: "Doc", contentType: "application/pdf", mode: "view", visibility: "org", createdAt: 0 },
   } satisfies ConversationEvent))
   opened[0].error()
   await timers[0]()
@@ -102,7 +102,7 @@ test("attachment events surface via onEvent without advancing the reconnect curs
 test("duplicate attachment events (same token) collapse to one in the reducer; non-attachment stays in activity", () => {
   const attachment = (token: string): ConversationEvent => ({
     kind: "attachment", conversationId: "c1", sequence: Date.now(), ts: 1,
-    attachment: { token, title: "Doc", contentType: "application/pdf", mode: "view", visibility: "org" },
+    attachment: { token, title: "Doc", contentType: "application/pdf", mode: "view", visibility: "org", createdAt: 0 },
   })
   let state = workspaceReducer(initialWorkspaceState, { type: "activity/received", event: attachment("tok1") })
   state = workspaceReducer(state, { type: "activity/received", event: attachment("tok1") })

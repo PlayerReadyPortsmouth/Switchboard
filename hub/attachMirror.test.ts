@@ -56,7 +56,12 @@ test("a web conversation stores the document and emits the inline transcript car
   }])
   expect(emitted).toEqual([{
     conversationId: "conv-1",
-    info: { token: "tok1", title: "test-file.md", contentType: "text/markdown", mode: "view", visibility: "private" },
+    // sizeBytes and createdAt ride the same emit so a rehydrated card is identical to a live
+    // one; createdAt is the sbmd's own stamp (what the mirror row stores), not the wall clock.
+    info: {
+      token: "tok1", title: "test-file.md", contentType: "text/markdown", mode: "view",
+      visibility: "private", sizeBytes: 196, createdAt: Date.parse("2026-07-19T00:00:00.000Z"),
+    },
   }])
 })
 

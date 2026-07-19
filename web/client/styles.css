@@ -148,6 +148,31 @@ button { color: inherit; }
 .turn-step[data-status="error"] .turn-step-node { border-color: var(--danger); background: var(--danger); }
 .turn-step[data-status="error"] .turn-step-status { color: var(--danger); }
 @keyframes turn-step-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+
+/* Mobile-only collapse for the spine. The wrapper is rendered ONLY on narrow viewports, so
+   these rules never apply on desktop and the desktop spine keeps its exact previous box.
+   A native <details>, so the toggle works without JS and is keyboard-operable for free. */
+.turn-spine-disclosure { margin: 20px 0 0; border-top: 1px solid var(--line); }
+.turn-spine-summary {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  min-height: 44px; padding: 6px 2px; cursor: pointer; list-style: none;
+  color: var(--muted); font: .7rem/1.3 ui-monospace, SFMono-Regular, Consolas, monospace;
+  text-transform: uppercase; letter-spacing: .055em;
+}
+.turn-spine-summary::-webkit-details-marker { display: none; }
+.turn-spine-summary:hover { color: var(--text); }
+.turn-spine-summary:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+.turn-spine-summary-detail { color: var(--text); text-transform: none; letter-spacing: 0; }
+/* A caret the disclosure state drives, so open/closed is legible without reading the label. */
+.turn-spine-summary-label::before {
+  content: "▸"; display: inline-block; width: 1em; margin-right: 2px;
+  transition: transform 120ms ease;
+}
+.turn-spine-disclosure[open] .turn-spine-summary-label::before { transform: rotate(90deg); }
+.turn-spine-disclosure[open] .turn-spine { margin-top: 4px; }
+@media (prefers-reduced-motion: reduce) {
+  .turn-spine-summary-label::before { transition: none; }
+}
 .activity-item { min-height: 26px; display: grid; grid-template-columns: 12px 1fr auto; align-items: center; gap: 10px; font-size: .76rem; }
 .activity-item .activity-node { margin-left: -18px; }
 .activity-item time { color: var(--muted); font: .63rem/1 ui-monospace, SFMono-Regular, Consolas, monospace; }
@@ -558,6 +583,22 @@ dialog input, dialog select { min-height: 44px; width: 100%; padding: 0 11px; bo
    Appended as its own block. */
 .transcript-attachments { margin: 26px 0 4px; }
 .transcript-attachments .eyebrow { margin-bottom: 9px; }
+
+/* Nested inside the agent message that produced the document, so the card reads as part of
+   that reply rather than as a separate band at the end of the transcript. It sits within the
+   message's origin stripe and is indented off it by a hairline rule in the same colour, which
+   is what ties the two together visually; the tighter top margin keeps it attached to the
+   message text above instead of floating between messages. */
+.transcript-attachments[data-nested="true"] {
+  margin: 12px 0 2px;
+  padding-left: 11px;
+  border-left: 1px solid color-mix(in srgb, var(--origin, var(--line)) 45%, transparent);
+}
+.transcript-attachments[data-nested="true"] .eyebrow { margin-bottom: 7px; }
+/* One card to a row inside a message: the message column is already narrow, and a nested
+   card competing for width with a sibling reads as a gallery rather than as an artifact
+   belonging to the text above it. */
+.transcript-attachments[data-nested="true"] .transcript-attachment-list { grid-template-columns: minmax(0, 1fr); }
 .transcript-attachment-list { list-style: none; display: grid; grid-template-columns: repeat(auto-fill, minmax(268px, 1fr)); gap: 8px; margin: 0; padding: 0; }
 .transcript-attachment-list > li { min-width: 0; display: grid; }
 

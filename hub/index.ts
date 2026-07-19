@@ -83,11 +83,11 @@ import { makeAttachHandler, type AttachFrame } from "./attachHandler"
 import { mirrorAttachment, chatTargetsConversation } from "./attachMirror"
 import { documentOwnership } from "./identity"
 import { selectExpired, reconcileDocuments } from "./publishCleanup"
-import { DocumentsDb, publishDocument, uploadDocument, setVisibility, deleteDocument, listDocuments, readDocumentContent, type DocumentsIO, type DocumentsOpts } from "./documents"
+import { DocumentsDb, publishDocument, uploadDocument, setVisibility, deleteDocument, listDocuments, listConversationDocuments, readDocumentContent, type DocumentsIO, type DocumentsOpts } from "./documents"
 import { runDocumentsMigrations } from "./documentsMigrations"
 import { createHash, randomBytes, randomUUID } from "crypto"
 import { Database } from "bun:sqlite"
-import { ConversationEventStream, ConversationService, createDiscordConversationMigrator, inboundLinkRoute, LegacyDiscordCompatibilityRouter, ProductionIngressGate, SqliteConversationRepository, TurnCoordinator, buildAttachmentEvent, buildToolStepEvent, summariseToolInput } from "./conversations"
+import { ConversationEventStream, ConversationService, createDiscordConversationMigrator, inboundLinkRoute, LegacyDiscordCompatibilityRouter, ProductionIngressGate, SqliteConversationRepository, TurnCoordinator, buildAttachmentEvent, buildToolStepEvent, summariseToolInput, attachmentCreatedAt } from "./conversations"
 import { DeliveryWorker, DiscordAdapter, SurfaceRouter } from "./surfaces"
 import { createAsyncShutdown } from "./shutdown"
 import { MemoryBrowse } from "./memoryBrowse"
@@ -674,7 +674,8 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): ProcessAgen
       if (r.ok && conversation) {
         conversationEvents.publish(buildAttachmentEvent(conversation.id, {
           token: r.token, title: r.sbmd.title, contentType: r.sbmd.contentType,
-          mode: r.sbmd.mode, visibility: r.sbmd.visibility ?? "org",
+          mode: r.sbmd.mode, visibility: r.sbmd.visibility ?? "org", sizeBytes: r.sizeBytes,
+          createdAt: attachmentCreatedAt(r.sbmd.createdAt),
         }, Date.now()))
       }
       return r.ok ? { url: r.url } : { error: r.reason }
@@ -2593,6 +2594,15 @@ const webDeps: WebDeps = {
     setDocumentVisibility: (identity: string, token: string, visibility: "private" | "org") =>
       setVisibility(token, visibility, identity, makeDocumentsOpts("upload")),
     deleteDocument: (identity: string, token: string) => deleteDocument(token, identity, makeDocumentsOpts("upload")),
+    // Rehydrates the transcript's attachment cards on load. Maps the durable mirror rows onto
+    // the SAME `AttachmentInfo` shape the live `attachment` event carries, so the client can
+    // merge the two by token without caring which one it got first.
+    listConversationDocuments: (identity: string, conversationId: string) =>
+      listConversationDocuments(conversationId, identity, { db: documentsDb }).map(row => ({
+        token: row.token, title: row.title, contentType: row.contentType,
+        mode: row.mode, visibility: row.visibility, sizeBytes: row.sizeBytes,
+        createdAt: attachmentCreatedAt(row.createdAt),
+      })),
     // Byte feed for the in-app document viewer; same visibility contract as the listing.
     readDocumentContent: (identity: string, token: string) => readDocumentContent(token, identity, {
       db: documentsDb, artifactsDir: shareArtifactsDir, io: { readBytes: (p) => readFileSync(p) },

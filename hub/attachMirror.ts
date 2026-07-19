@@ -1,7 +1,7 @@
 // hub/attachMirror.ts
 import type { AttachFrame } from "./attachHandler"
 import type { PublishResult } from "./publishLink"
-import type { AttachmentInfo } from "./conversations/events"
+import { attachmentCreatedAt, type AttachmentInfo } from "./conversations/events"
 import { documentOwnership } from "./identity"
 
 /** A conversation the mirror is allowed to publish into. */
@@ -121,7 +121,8 @@ export async function mirrorAttachment(frame: AttachFrame, deps: AttachMirrorDep
   try {
     deps.emit(conversation.id, {
       token: r.token, title: r.sbmd.title, contentType: r.sbmd.contentType,
-      mode: r.sbmd.mode, visibility: r.sbmd.visibility ?? "org",
+      mode: r.sbmd.mode, visibility: r.sbmd.visibility ?? "org", sizeBytes: r.sizeBytes,
+      createdAt: attachmentCreatedAt(r.sbmd.createdAt),
     })
   } catch (error) {
     deps.audit?.(false, { reason: "emit_threw", error: String(error), token: r.token })

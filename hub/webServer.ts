@@ -7,7 +7,7 @@ import { AgentOperationsError, type AgentOperationsService } from "./operations/
 import type { AgentOperationsEvent } from "./operations/agentEvents"
 import type { WorkspaceRole } from "./operations/access"
 import type { Conversation, ConversationUpdate, Message, SyncMode, TransportLink } from "./conversations/types"
-import type { ConversationEvent } from "./conversations/events"
+import type { AttachmentInfo, ConversationEvent } from "./conversations/events"
 import { ConversationForbiddenError, ConversationValidationError, MAX_MESSAGES_PAGE_SIZE } from "./conversations/service"
 import { RepositoryConflictError, RepositoryNotFoundError, type AppendMessageResult } from "./conversations/repository"
 import { createBuiltWorkspaceAssets, type WorkspaceAssetHandler } from "./webAssets"
@@ -81,6 +81,9 @@ export interface WebDeps {
   listConversationLinks?: (identity: string, conversationId: string) => TransportLink[]
   subscribeConversation?: (identity: string, conversationId: string, afterSequence: number, cb: (event: ConversationEvent) => void) => () => void
   listDocuments?: (identity: string, scope: "mine" | "org") => DocumentRow[]
+  /** Rehydrates the transcript's attachment cards on load — see `listConversationDocuments`
+   *  in hub/documents.ts for why the live `attachment` events aren't enough on their own. */
+  listConversationDocuments?: (identity: string, conversationId: string) => AttachmentInfo[]
   uploadDocument?: (identity: string, input: { filename: string; bytes: Buffer; title?: string; visibility?: "private" | "org" }) => Promise<PublishResult>
   setDocumentVisibility?: (identity: string, token: string, visibility: "private" | "org") => Promise<DocumentMutationResult>
   deleteDocument?: (identity: string, token: string) => Promise<DocumentMutationResult>
@@ -195,6 +198,7 @@ export async function handleWebRequest(
   const conversationMessagesMatch = /^\/api\/conversations\/([^/]+)\/messages$/.exec(path)
   const conversationEventsMatch = /^\/api\/conversations\/([^/]+)\/events$/.exec(path)
   const conversationLinksMatch = /^\/api\/conversations\/([^/]+)\/links$/.exec(path)
+  const conversationDocumentsMatch = /^\/api\/conversations\/([^/]+)\/documents$/.exec(path)
   const documentsMatch = path === "/api/documents"
   const documentItemMatch = /^\/api\/documents\/([^/]+)$/.exec(path)
   const documentContentMatch = /^\/api\/documents\/([^/]+)\/content$/.exec(path)
@@ -205,7 +209,7 @@ export async function handleWebRequest(
     operationsAgentActionPreviewMatch || operationsAgentActionConfirmMatch ||
     hubConfigMatch || hubConfigPreviewMatch || hubConfigConfirmMatch || sessionMatch || conversationsMatch ||
     conversationItemMatch || conversationMessagesMatch || conversationEventsMatch || conversationLinksMatch ||
-    documentsMatch || documentItemMatch || documentContentMatch
+    conversationDocumentsMatch || documentsMatch || documentItemMatch || documentContentMatch
 
   if (isGuardedRoute) {
     // Auth runs before method dispatch below, so a wrong-method request without
@@ -247,6 +251,21 @@ export async function handleWebRequest(
       const content = deps.readDocumentContent(email, token)
       if (!content.ok) return json({ error: content.reason }, content.reason === "forbidden" ? 403 : 404)
       return documentContentResponse(content.row, content.bytes)
+    }
+
+    // Transcript attachment hydration. A conversation sub-resource (it sits with /messages,
+    // /events and /links) rather than a `/api/documents` filter, because its question — "every
+    // document in this conversation that I may see" — is org rows PLUS my own private rows,
+    // which is neither of `scope`'s two values and would have overloaded it with a third
+    // meaning. Visibility is enforced in SQL by `listByConversation`, identical to the contract
+    // `/api/documents` and `readDocumentContent` already apply, so this exposes nothing a
+    // caller could not already reach: an org row is staff-readable anyway and a private row
+    // stays owner-only. Unavailable exactly when documents are.
+    if (conversationDocumentsMatch && method === "GET") {
+      if (!deps.listConversationDocuments) return json({ error: "documents_unavailable" }, 503)
+      let conversationId: string
+      try { conversationId = decodeURIComponent(conversationDocumentsMatch[1]) } catch { return json({ error: "malformed_conversation_id" }, 400) }
+      return json(deps.listConversationDocuments(email, conversationId))
     }
 
     const documentAction = (documentsMatch && (method === "GET" || method === "POST")) ||

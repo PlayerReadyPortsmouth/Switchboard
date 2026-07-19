@@ -334,7 +334,8 @@ describe("canonical conversation view", () => {
 
 describe("transcript attachments", () => {
   const attachment = (overrides: Partial<DocumentAttachment> = {}): DocumentAttachment => ({
-    token: "tok-1", title: "sprint-notes.md", contentType: "text/markdown", mode: "view", visibility: "org", ...overrides,
+    token: "tok-1", title: "sprint-notes.md", contentType: "text/markdown", mode: "view",
+    visibility: "org", createdAt: 0, ...overrides,
   })
 
   test("renders one labelled group holding a card per attachment", () => {
@@ -400,5 +401,87 @@ describe("transcript attachments", () => {
       attachments={[attachment({ token: "tok-img", title: "screenshot.png", contentType: "image/png" })]}
     />)
     expect(document.querySelector("img.document-card-thumb")?.getAttribute("src")).toBe("/api/documents/tok-img/content")
+  })
+})
+
+describe("attachment cards belong to the agent message that produced them", () => {
+  const attach = (token: string, createdAt: number): DocumentAttachment => ({
+    token, title: `${token}.md`, contentType: "text/markdown", mode: "view", visibility: "org", createdAt,
+  })
+  const agentMessage = (over: Partial<Message> = {}) =>
+    message({ id: "a1", sequence: 2, author: "architect", origin: "agent", content: "Done", createdAt: 2_000, ...over })
+
+  test("a document published mid-turn nests INSIDE the agent reply that followed it", () => {
+    // The publish is stamped BEFORE the reply commits — that is the real turn ordering, and
+    // the reason the anchor looks forward rather than back.
+    render(<ConversationView
+      api={api()}
+      conversation={conversation}
+      messages={[message({ id: "u1", sequence: 1, createdAt: 1_000 }), agentMessage({ createdAt: 3_000 })]}
+      attachments={[attach("tok-1", 2_000)]}
+    />)
+    const agentArticle = screen.getByLabelText("Message from architect (Agent)")
+    const group = within(agentArticle).getByRole("region", { name: "1 document shared" })
+    expect(group.getAttribute("data-nested")).toBe("true")
+    expect(within(group).getByText("tok-1.md")).toBeTruthy()
+  })
+
+  test("a document is NOT hung off the previous turn's agent reply", () => {
+    // Two turns. The document is published during the second, so it must land on the second
+    // reply — anchoring to the nearest PRECEDING agent message would have picked the first.
+    render(<ConversationView
+      api={api()}
+      conversation={conversation}
+      messages={[
+        agentMessage({ id: "a1", sequence: 1, content: "First", createdAt: 1_000 }),
+        agentMessage({ id: "a2", sequence: 2, content: "Second", createdAt: 5_000 }),
+      ]}
+      attachments={[attach("tok-1", 4_000)]}
+    />)
+    const articles = screen.getAllByLabelText("Message from architect (Agent)")
+    expect(within(articles[0]).queryByRole("region")).toBeNull()
+    expect(within(articles[1]).getByRole("region", { name: "1 document shared" })).toBeTruthy()
+  })
+
+  test("before the reply lands, the card renders at the tail rather than vanishing", () => {
+    // The live moment between publish and commit: no agent message follows it yet.
+    render(<ConversationView
+      api={api()}
+      conversation={conversation}
+      messages={[message({ id: "u1", sequence: 1, createdAt: 1_000 })]}
+      attachments={[attach("tok-1", 2_000)]}
+    />)
+    const group = screen.getByRole("region", { name: "1 document shared" })
+    expect(group.getAttribute("data-nested")).toBe("false")
+    // Not inside any message article.
+    expect(group.closest(".message-item")).toBeNull()
+  })
+
+  test("several documents from one turn group under that turn's single reply", () => {
+    render(<ConversationView
+      api={api()}
+      conversation={conversation}
+      messages={[agentMessage({ createdAt: 9_000 })]}
+      attachments={[attach("tok-1", 2_000), attach("tok-2", 3_000)]}
+    />)
+    const agentArticle = screen.getByLabelText("Message from architect (Agent)")
+    const group = within(agentArticle).getByRole("region", { name: "2 documents shared" })
+    expect(within(group).getAllByRole("article")).toHaveLength(2)
+  })
+
+  test("a nested card still opens in page and still shows its size", () => {
+    const opened: string[] = []
+    render(<ConversationView
+      api={api()}
+      conversation={conversation}
+      messages={[agentMessage({ createdAt: 9_000 })]}
+      attachments={[{ ...attach("tok-1", 2_000), sizeBytes: 2048 }]}
+      onOpenDocument={token => opened.push(token)}
+    />)
+    const agentArticle = screen.getByLabelText("Message from architect (Agent)")
+    // sizeBytes now arrives from the hub, so the card's size line finally renders.
+    expect(within(agentArticle).getByText(/2\.0 KB/)).toBeTruthy()
+    within(agentArticle).getByRole("button", { name: /tok-1\.md/ }).click()
+    expect(opened).toEqual(["tok-1"])
   })
 })

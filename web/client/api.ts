@@ -15,6 +15,7 @@ import type {
   PostMessageInput,
   Session,
   TransportLink,
+  DocumentAttachment,
   DocumentSummary,
   UploadDocumentResult,
 } from "./types"
@@ -66,6 +67,12 @@ export class WorkspaceApi {
       json,
       headers: { "idempotency-key": clientKey },
     })
+  }
+
+  /** The transcript's attachment cards, for hydration on conversation load. `attachment`
+   *  events are live-only, so without this a remount loses every card already on screen. */
+  listConversationDocuments(conversationId: string): Promise<DocumentAttachment[]> {
+    return this.request(`/api/conversations/${encodeURIComponent(conversationId)}/documents`)
   }
 
   listLinks(conversationId: string): Promise<TransportLink[]> {

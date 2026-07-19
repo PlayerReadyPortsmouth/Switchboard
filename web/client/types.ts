@@ -171,7 +171,20 @@ export interface DocumentSummary {
   sizeBytes: number
 }
 export interface UploadDocumentResult { token: string; url: string }
-export interface DocumentAttachment { token: string; title: string; contentType: string; mode: string; visibility: string }
+/** Mirrors the hub's `AttachmentInfo`. Arrives two ways — live over SSE, or rehydrated from
+ *  `GET /api/conversations/:id/documents` on load — and the two shapes are identical on
+ *  purpose, so the reducer can merge them by `token` without knowing which came first.
+ *  `createdAt` is epoch ms on the same clock as `Message.createdAt`; the transcript anchors
+ *  each card to the nearest preceding agent message by it. */
+export interface DocumentAttachment {
+  token: string
+  title: string
+  contentType: string
+  mode: string
+  visibility: string
+  sizeBytes?: number
+  createdAt: number
+}
 
 export type ToolStepStatus = "running" | "ok" | "error"
 /** One tool call in an agent's turn — mirrors the hub's `ToolStepInfo`. Arrives twice

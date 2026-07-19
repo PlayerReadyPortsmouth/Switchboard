@@ -7,7 +7,7 @@ import { tmpdir } from "os"
 import { runDocumentsMigrations } from "./documentsMigrations"
 import {
   DocumentsDb, publishDocument, uploadDocument, setVisibility, deleteDocument, listDocuments,
-  rowFromSbmd, type DocumentsIO, type DocumentsOpts,
+  rowFromSbmd, listConversationDocuments, type DocumentRow, type DocumentsIO, type DocumentsOpts,
 } from "./documents"
 
 function fakeIo() {
@@ -161,4 +161,55 @@ test("deleteDocument: owner removes fs + row; non-owner and discord rejected", a
     createdAt: "2026-07-03T00:00:00Z", expiresAt: "", producer: "agent:zed",
   }, 5, null))
   expect(await deleteDocument("t-discord", "anyone@ready.co", opts)).toEqual({ ok: false, reason: "not_owner" })
+})
+
+// --- Conversation-scoped listing (transcript attachment hydration) -------------------
+// Deliberately driven through `DocumentsDb`/`listConversationDocuments` with rows inserted
+// directly: this path never touches the filesystem, so these tests are free of the path
+// separator assumption that makes the fs-backed tests above fail on Windows.
+
+const conversationRow = (over: Partial<DocumentRow> = {}): DocumentRow => ({
+  token: "t1", filename: "notes.md", title: "notes.md", contentType: "text/markdown", mode: "view",
+  ownerId: "ada@ready.co", ownerName: "Ada", visibility: "org", createdAt: "2026-07-19T10:00:00.000Z",
+  expiresAt: null, conversationId: "conv-1", sizeBytes: 128, ...over,
+})
+
+test("listConversationDocuments returns a conversation's org documents to any staff identity", () => {
+  const { opts } = setup()
+  opts.db.upsert(conversationRow())
+  const rows = listConversationDocuments("conv-1", "someone@else.co", opts)
+  expect(rows.map(r => r.token)).toEqual(["t1"])
+  // size_bytes must survive the round trip — the card renders a size only when it is supplied.
+  expect(rows[0]!.sizeBytes).toBe(128)
+})
+
+test("listConversationDocuments EXCLUDES a private document owned by someone else, and includes the requester's own", () => {
+  const { opts } = setup()
+  opts.db.upsert(conversationRow({ token: "mine", visibility: "private", ownerId: "ada@ready.co" }))
+  opts.db.upsert(conversationRow({ token: "theirs", visibility: "private", ownerId: "bob@ready.co" }))
+  opts.db.upsert(conversationRow({ token: "shared", visibility: "org", ownerId: "bob@ready.co" }))
+
+  // Ada sees her own private row and the org row — never Bob's private one.
+  expect(listConversationDocuments("conv-1", "ada@ready.co", opts).map(r => r.token).sort())
+    .toEqual(["mine", "shared"])
+  expect(listConversationDocuments("conv-1", "bob@ready.co", opts).map(r => r.token).sort())
+    .toEqual(["shared", "theirs"])
+  // A third party gets the org row only.
+  expect(listConversationDocuments("conv-1", "eve@ready.co", opts).map(r => r.token))
+    .toEqual(["shared"])
+})
+
+test("listConversationDocuments does not leak documents from another conversation", () => {
+  const { opts } = setup()
+  opts.db.upsert(conversationRow({ token: "here", conversationId: "conv-1" }))
+  opts.db.upsert(conversationRow({ token: "elsewhere", conversationId: "conv-2" }))
+  opts.db.upsert(conversationRow({ token: "unattached", conversationId: null }))
+  expect(listConversationDocuments("conv-1", "ada@ready.co", opts).map(r => r.token)).toEqual(["here"])
+})
+
+test("listConversationDocuments orders oldest-first so cards anchor in publish order", () => {
+  const { opts } = setup()
+  opts.db.upsert(conversationRow({ token: "second", createdAt: "2026-07-19T11:00:00.000Z" }))
+  opts.db.upsert(conversationRow({ token: "first", createdAt: "2026-07-19T09:00:00.000Z" }))
+  expect(listConversationDocuments("conv-1", "ada@ready.co", opts).map(r => r.token)).toEqual(["first", "second"])
 })

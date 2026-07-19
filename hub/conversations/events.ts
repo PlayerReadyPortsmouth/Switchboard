@@ -1,12 +1,22 @@
 import type { Message, MessageState } from "./types"
 
-/** A document published into a web conversation, surfaced as an inline card in the transcript. */
+/** A document published into a web conversation, surfaced as an inline card in the transcript.
+ *
+ *  This shape is emitted on the LIVE event AND returned by the conversation-documents
+ *  hydration route, so a card looks identical whether it arrived over SSE or was rehydrated
+ *  on load. Keep the two producers in step — a field added here must be filled by both. */
 export interface AttachmentInfo {
   token: string
   title: string
   contentType: string
   mode: string
   visibility: string
+  /** Optional: the card renders a size only when one is supplied. */
+  sizeBytes?: number
+  /** Epoch ms, same clock as `Message.createdAt`. The transcript anchors each card to the
+   *  nearest preceding agent message by this value, so it must survive hydration — the live
+   *  event's own `ts` is lost once the client folds the event into its attachment slice. */
+  createdAt: number
 }
 
 /** One tool call in an agent's turn, surfaced live in the web transcript's execution
@@ -30,6 +40,16 @@ export interface ConversationEvent {
   detail?: Record<string, unknown>
   attachment?: AttachmentInfo
   tool?: ToolStepInfo
+}
+
+/** Parse a document's `.sbmd`/mirror-row `createdAt` (ISO) into the epoch ms the transcript
+ *  anchors on. The live emit and the hydration route both feed the SAME stored string through
+ *  here, so a card's anchor is identical whether it arrived over SSE or was rehydrated.
+ *  An unparseable stamp yields 0 — the card then anchors before every message and renders in
+ *  the transcript's leading group rather than vanishing. Degrade, don't drop. */
+export function attachmentCreatedAt(iso: string | undefined): number {
+  const parsed = iso ? Date.parse(iso) : NaN
+  return Number.isFinite(parsed) ? parsed : 0
 }
 
 /** Build an `attachment` event. These are live-only (not replayed from message history), so the

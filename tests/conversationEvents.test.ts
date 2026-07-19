@@ -3,7 +3,8 @@ import { ConversationEventStream, buildAttachmentEvent, buildToolStepEvent, summ
 import type { Message } from "../hub/conversations/types"
 
 const attachment = (over: Partial<AttachmentInfo> = {}): AttachmentInfo => ({
-  token: "tok1", title: "Report", contentType: "application/pdf", mode: "view", visibility: "org", ...over,
+  token: "tok1", title: "Report", contentType: "application/pdf", mode: "view", visibility: "org",
+  createdAt: 0, ...over,
 })
 
 const message = (sequence: number): Message => ({
