@@ -10,6 +10,7 @@ import { AppRail } from "./components/AppRail"
 import { ConversationList } from "./components/ConversationList"
 import { Inspector } from "./components/Inspector"
 import { Transcript, canonicalMessages } from "./components/Transcript"
+import { useTranscriptAutoscroll } from "./components/useTranscriptAutoscroll"
 import { Composer } from "./components/Composer"
 import { TurnSteps } from "./components/TurnSteps"
 import { MobileNav, type MobilePane } from "./components/MobileNav"
@@ -146,6 +147,11 @@ export function ConversationView({ api, conversation: suppliedConversation, mess
     permissions: { agents: "hidden" as const },
   }
   const links = suppliedLinks ?? loadedLinks
+  const renderedSteps = session.features.turnSteps ? toolSteps : []
+  // Everything rendered inside the scroll container, so late arrivals below the
+  // messages (attachment cards, the turn-steps spine) also re-settle the bottom.
+  const transcriptContentKey = `${renderedMessages.length}:${renderedMessages.at(-1)?.id ?? ""}:${attachments.length}:${renderedSteps.length}:${activity.length}`
+  const { scrollRef, pinned, jumpToLatest } = useTranscriptAutoscroll(suppliedConversation.id, transcriptContentKey)
 
   useLayoutEffect(() => {
     conversationIdRef.current = suppliedConversation.id
@@ -247,11 +253,12 @@ export function ConversationView({ api, conversation: suppliedConversation, mess
           {onArchive ? <button type="button" className="danger-action" onClick={onArchive}>Archive conversation</button> : null}
         </div>
       </header>
-      <div className="transcript-body">
+      <div className="transcript-body" ref={scrollRef} data-region="transcript-scroll">
         <Transcript messages={renderedMessages} onReply={setReplyTo} />
         {attachments.length > 0 ? <ul className="transcript-attachments" aria-label="Shared documents">{attachments.map(attachment => <li key={attachment.token}><DocumentCard token={attachment.token} title={attachment.title} contentType={attachment.contentType} mode={attachment.mode} visibility={attachment.visibility === "org" ? "org" : "private"} viewerIsOwner={false} /></li>)}</ul> : null}
-        <TurnSteps steps={session.features.turnSteps ? toolSteps : []} events={activity} />
+        <TurnSteps steps={renderedSteps} events={activity} />
       </div>
+      {pinned || !renderedMessages.length ? null : <button type="button" className="jump-to-latest" data-region="jump-to-latest" onClick={() => jumpToLatest()}>Jump to latest</button>}
       <Composer value={text} replyTo={replyTo} sending={sending} error={sendError} textareaRef={composerRef} onChange={changeText} onSubmit={submit} onRetry={retry} onDismissReply={() => setReplyTo(null)} />
     </section>
     <Inspector conversation={conversation} session={session} links={links} primaryAgentError={agentError} open={inspectorOpen} closeRef={inspectorCloseRef} onClose={onCloseInspector} onEscape={onInspectorEscape} onPrimaryAgentChange={api.updateConversation ? primaryAgent => { void updatePrimaryAgent(primaryAgent) } : undefined} />
