@@ -107,6 +107,35 @@ test("routeToken opens the matching document without a click", async () => {
   await waitFor(() => expect(screen.getByRole("heading", { name: "Deep linked" })).toBeTruthy())
 })
 
+test("a routeToken absent from Mine falls through to the org shelf", async () => {
+  render(<DocumentsWorkspace
+    api={fakeApi({
+      mine: [doc({ token: "m1", title: "Mine only" })],
+      org: [doc({ token: "agent-1", title: "Agent published", filename: "notes.md", contentType: "text/markdown", ownerId: "discord", visibility: "org" })],
+      text: "hello",
+    })}
+    session={session}
+    {...shellProps}
+    routeToken="agent-1"
+  />)
+  await waitFor(() => expect(screen.getByRole("heading", { name: "Agent published" })).toBeTruthy())
+  expect(screen.getByRole("tab", { name: /org-wide/i }).getAttribute("aria-selected")).toBe("true")
+})
+
+test("an unknown routeToken settles instead of flipping scope forever", async () => {
+  let calls = 0
+  const api = fakeApi({ mine: [doc({ token: "m1" })], org: [doc({ token: "o1" })] })
+  render(<DocumentsWorkspace
+    api={{ ...api, listDocuments: async scope => { calls++; return api.listDocuments(scope) } }}
+    session={session}
+    {...shellProps}
+    routeToken="ghost"
+  />)
+  await waitFor(() => expect(screen.getByRole("tab", { name: /org-wide/i }).getAttribute("aria-selected")).toBe("true"))
+  await waitFor(() => expect(screen.getByRole("heading", { name: "Nothing open" })).toBeTruthy())
+  expect(calls).toBe(2)
+})
+
 test("upload input triggers uploadDocument and refreshes the list", async () => {
   const user = userEvent.setup()
   let uploaded: File | null = null
