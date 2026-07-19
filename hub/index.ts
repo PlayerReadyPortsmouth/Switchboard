@@ -2131,6 +2131,7 @@ if (discordGateway) gateway.handleInbound((m) => {
     adapter: "discord", eventId: m.messageId, externalLocationId: m.chatId,
     externalMessageId: m.messageId, authorId: m.userId, authorName: m.user,
     content: m.content, createdAt: Date.parse(m.ts), replyToExternalId: m.replyToMessageId,
+    locationName: m.channelName, threadParentName: m.threadParentName, isDM: m.isDM,
   }, resolvePinnedAgent(m.chatId, hub.channelAgents ?? []) ?? hub.defaultAgent)
   // Linked locations are canonical conversation traffic and are handled by the
   // Discord surface adapter; all other locations retain the legacy command/card path.

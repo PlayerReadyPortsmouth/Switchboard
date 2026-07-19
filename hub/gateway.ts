@@ -156,11 +156,19 @@ export function buildInboundFromMessage(
   forwards: { content: string; attachments: { name: string; type: string; size: number; url?: string }[] }[],
   quote?: { user: string; content: string },
 ): InboundMessage {
+  const isThread = "isThread" in msg.channel && msg.channel.isThread()
+  // Duck-typed: DM channels carry no `name`, and partially-populated channels may
+  // not have resolved their `parent`. Never let naming break message ingestion.
+  const channel = msg.channel as { name?: string | null; parent?: { name?: string | null } | null }
+  const nonEmpty = (value: unknown): string | undefined =>
+    typeof value === "string" && value.trim() ? value : undefined
   return {
     chatId: msg.channelId, messageId: msg.id, userId: msg.author.id,
     user: msg.author.username, content: msg.content,
     ts: msg.createdAt.toISOString(), isDM: msg.channel.type === ChannelType.DM,
-    threadParentId: "isThread" in msg.channel && msg.channel.isThread() ? (msg.channel.parentId ?? undefined) : undefined,
+    threadParentId: isThread ? (msg.channel.parentId ?? undefined) : undefined,
+    channelName: nonEmpty(channel.name),
+    threadParentName: isThread ? nonEmpty(channel.parent?.name) : undefined,
     attachments: [
       ...[...msg.attachments.values()].map(a => ({
         name: a.name ?? a.id, type: a.contentType ?? "unknown", size: a.size, url: a.url })),

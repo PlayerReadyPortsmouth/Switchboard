@@ -8,6 +8,11 @@ export interface InboundMessage {
   ts: string            // ISO timestamp
   isDM: boolean
   threadParentId?: string  // set when chatId is a Discord thread: the parent channel's id
+  // Human-readable names for the location, carried so canonical conversations can be
+  // titled legibly instead of by snowflake. Optional: DMs have no channel name, and
+  // other InboundMessage producers (tests, non-Discord transports) may omit them.
+  channelName?: string       // the channel's own name; for a thread, the THREAD's name
+  threadParentName?: string  // set when chatId is a thread: the parent channel's name
   attachments?: { name: string; type: string; size: number; url?: string }[]
   quote?: { user: string; content: string }   // the message this one quote-replies to
   replyToMessageId?: string

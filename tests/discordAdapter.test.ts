@@ -25,7 +25,17 @@ describe("DiscordAdapter", () => {
     await adapter.start(async value => { event = value })
     inbound({ chatId: "channel-1", messageId: "discord-1", userId: "user-1", user: "Alice", content: "hello", ts: "2026-07-12T12:00:00.000Z", isDM: false, quote: { user: "Bob", content: "earlier" }, replyToMessageId: "discord-parent" })
     await Promise.resolve()
-    expect(event).toEqual({ adapter: "discord", eventId: "discord-1", externalLocationId: "channel-1", externalMessageId: "discord-1", authorId: "user-1", authorName: "Alice", content: "hello", createdAt: Date.parse("2026-07-12T12:00:00.000Z"), replyToExternalId: "discord-parent" })
+    expect(event).toEqual({ adapter: "discord", eventId: "discord-1", externalLocationId: "channel-1", externalMessageId: "discord-1", authorId: "user-1", authorName: "Alice", content: "hello", createdAt: Date.parse("2026-07-12T12:00:00.000Z"), replyToExternalId: "discord-parent", locationName: undefined, threadParentName: undefined, isDM: false })
+  })
+
+  test("carries location naming through so conversations can be titled legibly", async () => {
+    let inbound!: (message: InboundMessage) => void
+    let event: any
+    const adapter = new DiscordAdapter(port({ handleInbound(cb) { inbound = cb } }), "token")
+    await adapter.start(async value => { event = value })
+    inbound({ chatId: "thread-1", messageId: "discord-2", userId: "user-1", user: "Alice", content: "hello", ts: "2026-07-12T12:00:00.000Z", isDM: false, channelName: "deploy questions", threadParentName: "dev-agent" })
+    await Promise.resolve()
+    expect(event).toMatchObject({ locationName: "deploy questions", threadParentName: "dev-agent", isDM: false })
   })
 
   test("declares Discord capabilities and delegates lifecycle", async () => {
