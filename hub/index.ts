@@ -81,6 +81,7 @@ import type { AgentConfig, AgentReply, InboundMessage, SpawnTrigger, SpawnCardUp
 import { resolveOutboxFile } from "./outboxAttach"
 import { makeAttachHandler, type AttachFrame } from "./attachHandler"
 import { mirrorAttachment, chatTargetsConversation } from "./attachMirror"
+import { documentOwnership } from "./identity"
 import { selectExpired, reconcileDocuments } from "./publishCleanup"
 import { DocumentsDb, publishDocument, uploadDocument, setVisibility, deleteDocument, listDocuments, readDocumentContent, type DocumentsIO, type DocumentsOpts } from "./documents"
 import { runDocumentsMigrations } from "./documentsMigrations"
@@ -659,9 +660,14 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): ProcessAgen
       // The socket is per-key, so the process publishing here is exactly transport `key`.
       const chat = transports.get(key)?.getLastChatId() ?? ""
       const conversation = chat ? conversationRepo.getConversation(chat) : null
+      // Shared with `mirrorAttachment` so the two publish paths cannot drift: an owner is
+      // stamped only when the conversation's creator is HUMAN. A canonically-migrated Discord
+      // channel resolves here too and its creator is `system:discord-migration` — stamping
+      // that made the document private to an identity nobody can authenticate as, i.e.
+      // unopenable by everyone, forever. See hub/identity.ts.
       const r = await publishDocument({
         ...a,
-        ...(conversation ? { ownerId: conversation.createdBy, ownerName: conversation.createdBy, conversationId: conversation.id } : {}),
+        ...documentOwnership(conversation),
       }, makeDocumentsOpts(name))
       if (!auditOptedOut(name)) audit.record({ kind: "event", actor: `agent:${name}`, action: "publish_link", outcome: r.ok ? "ok" : "deny", detail: r.ok ? { token: r.token } : { reason: r.reason } })
       // Surface the new document inline in the web transcript it was published into.

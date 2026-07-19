@@ -2,6 +2,7 @@
 import type { AttachFrame } from "./attachHandler"
 import type { PublishResult } from "./publishLink"
 import type { AttachmentInfo } from "./conversations/events"
+import { documentOwnership } from "./identity"
 
 /** A conversation the mirror is allowed to publish into. */
 export interface MirrorConversation { id: string; createdBy: string }
@@ -50,8 +51,10 @@ export interface AttachMirrorDeps {
   /** Does the frame's (agent-supplied) `chatId` corroborate the same canonical conversation?
    *  See `chatTargetsConversation`, which is what the hub passes here. */
   targetsConversation: (chatId: string, conversationId: string) => boolean
-  /** Route the attached bytes through the documents pipeline (publishDocument). */
-  store: (args: { path: string; title?: string; ownerId: string; ownerName: string; conversationId: string })
+  /** Route the attached bytes through the documents pipeline (publishDocument).
+   *  `ownerId`/`ownerName` are OPTIONAL: a conversation with no human owner publishes
+   *  ownerless on purpose — see `documentOwnership`. */
+  store: (args: { path: string; title?: string; ownerId?: string; ownerName?: string; conversationId?: string })
     => Promise<PublishResult>
   /** Emit the inline transcript card. */
   emit: (conversationId: string, info: AttachmentInfo) => void
@@ -70,8 +73,13 @@ export type MirrorOutcome =
  *  oversize for `shareLinks.maxBytes`, a disk/DB write blowing up) returns a non-mirrored
  *  outcome and the caller still reports the attach as delivered. Degrade, don't fail.
  *
- *  Ownership follows `onPublish`: a web conversation stamps its creator's identity, which
- *  makes the document default to "private" in `publishDocument`. The conversation itself is
+ *  Ownership follows `onPublish` because both now go through the same `documentOwnership`:
+ *  a conversation with a HUMAN creator stamps that identity, which makes the document default
+ *  to "private" in `publishDocument`; a conversation created by a synthetic identity (a
+ *  Discord-migrated channel, created by `system:discord-migration`) publishes ownerless and
+ *  reconciles to the org-visible bucket. Stamping the synthetic creator as owner is what made
+ *  mirrored Discord attachments permanently unopenable — no human is ever that identity, so
+ *  `readDocumentContent` returned `forbidden` to everyone. The conversation itself is
  *  resolved from the TRANSPORT's last chat id, not from the frame, so an agent cannot stamp a
  *  document onto a conversation it is not currently serving; the frame's chat id only has to
  *  agree with it. A chat that resolves to no conversation is never mirrored — there is no web
@@ -99,8 +107,7 @@ export async function mirrorAttachment(frame: AttachFrame, deps: AttachMirrorDep
     r = await deps.store({
       path: frame.path,
       ...(frame.filename ? { title: frame.filename } : {}),
-      ownerId: conversation.createdBy, ownerName: conversation.createdBy,
-      conversationId: conversation.id,
+      ...documentOwnership(conversation),
     })
   } catch (error) {
     deps.audit?.(false, { reason: "store_threw", error: String(error) })
