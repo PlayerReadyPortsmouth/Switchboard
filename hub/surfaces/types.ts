@@ -10,6 +10,12 @@ export interface NormalizedSurfaceEvent {
   content: string
   createdAt: number
   replyToExternalId?: string
+  // Human-readable location naming, used to title canonical conversations legibly.
+  // All optional — an adapter that cannot resolve a name simply omits them and the
+  // consumer falls back to the raw external id.
+  locationName?: string      // the location's own name; for a thread, the THREAD's name
+  threadParentName?: string  // set when the location is a thread: the parent's name
+  isDM?: boolean             // direct message: there is no channel name to show
 }
 
 export interface SurfaceDelivery {

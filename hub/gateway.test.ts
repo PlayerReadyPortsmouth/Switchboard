@@ -176,6 +176,39 @@ test("buildInboundFromMessage omits threadParentId for a non-thread message", ()
   expect(inbound.threadParentId).toBeUndefined()
 })
 
+test("buildInboundFromMessage carries channel and thread-parent names", () => {
+  const thread = {
+    channelId: "thread123", id: "m1", author: { id: "u1", username: "alice", bot: false },
+    content: "hi", createdAt: new Date("2026-07-02T00:00:00Z"),
+    channel: { type: ChannelType.PublicThread, isThread: () => true, parentId: "chan456", name: "deploy questions", parent: { name: "dev-agent" } },
+    attachments: new Map(), reference: null,
+  } as any
+  expect(buildInboundFromMessage(thread, [])).toMatchObject({ channelName: "deploy questions", threadParentName: "dev-agent" })
+
+  const channel = {
+    channelId: "chan456", id: "m2", author: { id: "u1", username: "alice", bot: false },
+    content: "hi", createdAt: new Date("2026-07-02T00:00:00Z"),
+    channel: { type: ChannelType.GuildText, isThread: () => false, name: "dev-agent" },
+    attachments: new Map(), reference: null,
+  } as any
+  const built = buildInboundFromMessage(channel, [])
+  expect(built.channelName).toBe("dev-agent")
+  expect(built.threadParentName).toBeUndefined()
+})
+
+test("buildInboundFromMessage omits names a DM channel cannot supply", () => {
+  const dm = {
+    channelId: "dm1", id: "m3", author: { id: "u1", username: "alice", bot: false },
+    content: "hi", createdAt: new Date("2026-07-02T00:00:00Z"),
+    channel: { type: ChannelType.DM, isThread: () => false },
+    attachments: new Map(), reference: null,
+  } as any
+  const built = buildInboundFromMessage(dm, [])
+  expect(built.isDM).toBe(true)
+  expect(built.channelName).toBeUndefined()
+  expect(built.threadParentName).toBeUndefined()
+})
+
 test("Gateway exposes lifecycle and adapter send methods", () => {
   expect(typeof Gateway.prototype.stop).toBe("function")
   expect(typeof Gateway.prototype.sendText).toBe("function")

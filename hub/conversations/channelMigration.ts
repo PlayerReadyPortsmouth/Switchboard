@@ -5,8 +5,55 @@ import type { ConversationRepository } from "./repository"
 import type { Conversation } from "./types"
 
 export type DiscordMigrationEvent = NormalizedSurfaceEvent & { locationName?: string }
+
+/** Separator between a thread's parent channel and the thread itself. U+203A — a
+ *  single glyph that reads as a path and can't be confused with a name character. */
+const THREAD_SEPARATOR = " › "
+const DM_PREFIX = "DM · "
+/** Discord caps channel names at 100 chars; clip well below that so a sidebar row
+ *  stays readable and a two-part thread title still fits. */
+const MAX_NAME = 48
+
+/** Collapse whitespace and clip an over-long name to a readable width. */
+function clip(name: string): string {
+  const tidy = name.trim().replace(/\s+/g, " ")
+  return tidy.length > MAX_NAME ? `${tidy.slice(0, MAX_NAME - 1).trimEnd()}…` : tidy
+}
+
+/** Render a channel name in Discord's own `#channel` idiom, without doubling a `#`
+ *  that the channel name already carries. */
+function channelLabel(name: string): string {
+  const tidy = clip(name)
+  return tidy.startsWith("#") ? tidy : `#${tidy}`
+}
+
+/** The legible title for a Discord-migrated conversation:
+ *   - guild channel  → `#dev-agent`
+ *   - thread         → `#dev-agent › deploy questions` (parent AND thread, so it's unambiguous)
+ *   - DM             → `DM · ada`
+ *   - name unknown   → `Discord <id>` — the pre-existing fallback. We never invent a
+ *     title; an unresolvable name degrades to exactly what it rendered as before. */
+export function discordConversationTitle(event: DiscordMigrationEvent): string {
+  const fallback = `Discord ${event.externalLocationId}`
+  const own = event.locationName?.trim()
+  if (event.isDM) {
+    const who = event.authorName?.trim()
+    return who ? `${DM_PREFIX}${clip(who)}` : fallback
+  }
+  if (!own) return fallback
+  const parent = event.threadParentName?.trim()
+  return parent ? `${channelLabel(parent)}${THREAD_SEPARATOR}${clip(own)}` : channelLabel(own)
+}
+
+/** Does this title look like one WE generated, rather than one a human chose in the
+ *  web UI? Only migrator-owned titles are refreshed on rename — a conversation a
+ *  person deliberately renamed to "ReadyAPP" must never be clobbered by the channel
+ *  name on its next inbound message. */
+function isMigratorOwnedTitle(title: string, externalLocationId: string): boolean {
+  return title === `Discord ${externalLocationId}` || title.startsWith("#") || title.startsWith(DM_PREFIX)
+}
 export interface DiscordConversationMigrationDeps {
-  repo: Pick<ConversationRepository, "ensureConversationForTransport" | "getParticipant" | "addParticipant" | "appendMessage">
+  repo: Pick<ConversationRepository, "ensureConversationForTransport" | "getParticipant" | "addParticipant" | "appendMessage" | "updateConversation">
   now: () => number
   id: () => string
   cachedHistory?: (channelId: string) => CachedMsg[]
@@ -23,19 +70,36 @@ export function createDiscordConversationMigrator(deps: DiscordConversationMigra
     const createdAt = deps.now()
     const conversationId = deps.id()
     const creator = "system:discord-migration"
+    const title = discordConversationTitle(event)
     const ensured = deps.repo.ensureConversationForTransport({
-      conversation: { id: conversationId, title: event.locationName?.trim() || `Discord ${event.externalLocationId}`, primaryAgent: configuredAgent, createdBy: creator, createdAt },
+      conversation: { id: conversationId, title, primaryAgent: configuredAgent, createdBy: creator, createdAt },
       owner: { conversationId, identity: creator, kind: "user", role: "owner", createdAt },
       link: { id: deps.id(), conversationId, adapter: "discord", externalLocationId: event.externalLocationId, label: event.locationName?.trim() || null, syncMode: "two_way", enabled: true },
       now: createdAt,
     })
+    // Runs for existing conversations too, so a channel rename — and the legacy
+    // `Discord <snowflake>` titles migrated before names were carried — self-correct
+    // on the next inbound message, with no manual DB edit.
+    const conversation = refreshTitle(deps, ensured.conversation, title, event.externalLocationId)
     ensureExternalParticipant(deps, ensured.conversation.id, event.authorId)
     // Runs for existing conversations too (this migrator is invoked on every inbound
     // Discord message), so enabling the mirror backfills channels migrated earlier.
     ensureMirrorParticipants(deps, ensured.conversation.id)
     importReliableHistory(deps, ensured.conversation.id, event.externalLocationId)
-    return ensured.conversation
+    return conversation
   }
+}
+
+/** Correct a stale machine-generated title in place. No-ops unless the title actually
+ *  changed — `updateConversation` bumps `updated_at`, which is the web sidebar's sort
+ *  key, so writing on every inbound message would both churn the DB and reshuffle the
+ *  list. Never throws: a failed rename must not drop the message. */
+function refreshTitle(deps: DiscordConversationMigrationDeps, conversation: Conversation, desired: string, externalLocationId: string): Conversation {
+  if (conversation.title === desired) return conversation
+  if (desired === `Discord ${externalLocationId}`) return conversation  // never downgrade a real name back to the snowflake
+  if (!isMigratorOwnedTitle(conversation.title, externalLocationId)) return conversation
+  try { return deps.repo.updateConversation(conversation.id, { title: desired }, deps.now()) }
+  catch { return conversation }
 }
 
 function ensureMirrorParticipants(deps: DiscordConversationMigrationDeps, conversationId: string): void {
