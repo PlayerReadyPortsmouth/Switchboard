@@ -80,7 +80,7 @@ import { MissionRegistry, findWorkflow, renderStepPrompt, renderMissionCard, typ
 import type { AgentConfig, AgentReply, InboundMessage, SpawnTrigger, SpawnCardUpdate, CardSpec, DirectCommand, OutboundRoute, HubConfig, AgentRegistry, SendOutcome } from "./types"
 import { resolveOutboxFile } from "./outboxAttach"
 import { makeAttachHandler, type AttachFrame } from "./attachHandler"
-import { mirrorAttachment } from "./attachMirror"
+import { mirrorAttachment, chatTargetsConversation } from "./attachMirror"
 import { selectExpired, reconcileDocuments } from "./publishCleanup"
 import { DocumentsDb, publishDocument, uploadDocument, setVisibility, deleteDocument, listDocuments, readDocumentContent, type DocumentsIO, type DocumentsOpts } from "./documents"
 import { runDocumentsMigrations } from "./documentsMigrations"
@@ -628,7 +628,7 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): ProcessAgen
             return conversation ? { id: conversation.id, createdBy: conversation.createdBy } : null
           },
           targetsConversation: (chatId, conversationId) =>
-            chatId === conversationId || conversationRepo.getConversation(chatId)?.id === conversationId,
+            chatTargetsConversation(conversationRepo, chatId, conversationId),
           store: (a) => publishDocument(a, makeDocumentsOpts(name)),
           emit: (conversationId, info) =>
             conversationEvents.publish(buildAttachmentEvent(conversationId, info, Date.now())),

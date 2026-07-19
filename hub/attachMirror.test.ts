@@ -1,5 +1,8 @@
 import { test, expect } from "bun:test"
-import { mirrorAttachment, type AttachMirrorDeps, type MirrorConversation } from "./attachMirror"
+import {
+  mirrorAttachment, chatTargetsConversation,
+  type AttachMirrorDeps, type MirrorConversation, type MirrorConversationLookup,
+} from "./attachMirror"
 import { makeAttachHandler, type AttachDeps } from "./attachHandler"
 import type { PublishResult } from "./publishLink"
 import type { AttachmentInfo } from "./conversations/events"
@@ -95,6 +98,80 @@ test("a throwing document write is contained, not propagated", async () => {
 test("a throwing event publish is contained too", async () => {
   const { deps } = harness({ emit: () => { throw new Error("stream closed") } })
   expect(await mirrorAttachment(frame, deps)).toEqual({ mirrored: false, reason: "emit_threw" })
+})
+
+// ---- chat-id corroboration: the real-world Discord-channel-id case ----
+//
+// The frame's chatId is whatever the agent last saw, which for a conversation that also has a
+// Discord transport link is the raw CHANNEL id — not the conversation UUID. Prod audit for the
+// failing attach: {"action":"attach","chat":"1496399854593904690",...} while the transport's
+// getLastChatId() resolved conversation 659bcc60-…. Same conversation, two identifiers.
+
+const SERVED = "659bcc60-25d4-49b2-b969-540e5941b9e6"
+const CHANNEL = "1496399854593904690"
+
+/** A repo where SERVED is linked to Discord channel CHANNEL, and a second, unrelated
+ *  conversation OTHER is linked to channel 999. */
+const repo: MirrorConversationLookup = {
+  getConversation: (id) => (id === SERVED || id === "other-conv" ? { id } : null),
+  listTransportLinks: (conversationId) =>
+    conversationId === SERVED ? [{ externalLocationId: CHANNEL }]
+      : conversationId === "other-conv" ? [{ externalLocationId: "999" }]
+        : [],
+}
+
+test("a chat id that is the conversation's own UUID still corroborates", () => {
+  expect(chatTargetsConversation(repo, SERVED, SERVED)).toBe(true)
+})
+
+test("a Discord channel id linked to the served conversation corroborates it", () => {
+  expect(chatTargetsConversation(repo, CHANNEL, SERVED)).toBe(true)
+})
+
+test("a Discord channel id linked to a DIFFERENT conversation does not corroborate", () => {
+  // The security property: an agent cannot borrow another conversation's channel id.
+  expect(chatTargetsConversation(repo, "999", SERVED)).toBe(false)
+  expect(chatTargetsConversation(repo, CHANNEL, "other-conv")).toBe(false)
+})
+
+test("an unknown chat id corroborates nothing", () => {
+  expect(chatTargetsConversation(repo, "1111111111", SERVED)).toBe(false)
+  expect(chatTargetsConversation(repo, "", SERVED)).toBe(false)
+})
+
+test("a frame carrying the served conversation's Discord channel id DOES mirror", async () => {
+  const conversation: MirrorConversation = { id: SERVED, createdBy: "aurora@player-ready.co.uk" }
+  const { deps, stored, emitted } = harness({
+    currentConversation: () => conversation,
+    targetsConversation: (chatId, conversationId) => chatTargetsConversation(repo, chatId, conversationId),
+  })
+  expect(await mirrorAttachment({ chatId: CHANNEL, path: "test-file.md" }, deps))
+    .toEqual({ mirrored: true, token: "tok1" })
+  // Still stamped with the TRANSPORT-resolved conversation, never the frame's id.
+  expect(stored[0]!.conversationId).toBe(SERVED)
+  expect(emitted[0]!.conversationId).toBe(SERVED)
+})
+
+test("a channel id belonging to another conversation is still rejected end to end", async () => {
+  const conversation: MirrorConversation = { id: SERVED, createdBy: "aurora@player-ready.co.uk" }
+  const { deps, stored, emitted, audits } = harness({
+    currentConversation: () => conversation,
+    targetsConversation: (chatId, conversationId) => chatTargetsConversation(repo, chatId, conversationId),
+  })
+  expect(await mirrorAttachment({ chatId: "999", path: "test-file.md" }, deps))
+    .toEqual({ mirrored: false, reason: "chat_mismatch" })
+  expect(stored).toEqual([])
+  expect(emitted).toEqual([])
+  // and the bail-out is auditable, not silent
+  expect(audits).toEqual([{ ok: false, detail: { reason: "chat_mismatch", chat: "999", conversation: SERVED } }])
+})
+
+// ---- bail-outs must be greppable ----
+
+test("a Discord-only chat records why it was skipped", async () => {
+  const { deps, audits } = harness({ currentConversation: () => null })
+  await mirrorAttachment({ chatId: "1496399854593904690", path: "test-file.md" }, deps)
+  expect(audits).toEqual([{ ok: false, detail: { reason: "not_conversation", chat: "1496399854593904690" } }])
 })
 
 // ---- composition with the Discord send: the mirror must never change the attach outcome ----
