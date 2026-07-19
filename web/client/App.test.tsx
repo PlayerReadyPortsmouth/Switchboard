@@ -7,13 +7,13 @@ import { ApiError } from "./api"
 import { App, createWorkspaceStream, type AppApi } from "./App"
 import type { ConversationStreamHandlers } from "./conversationStream"
 import { DraftStore } from "./drafts"
-import type { AgentDetail, AgentSummary, Conversation, ConversationInput, DocumentAttachment, Message, Session } from "./types"
+import type { AgentDetail, AgentSummary, CardInfo, Conversation, ConversationInput, DocumentAttachment, Message, Session } from "./types"
 
 const screen = within(document.body)
 
 const session: Session = {
   identity: "ada@example.com",
-  features: { agents: true, documents: false, turnSteps: false },
+  features: { agents: true, documents: false, turnSteps: false, cards: false },
   permissions: { agents: "operator" },
   agents: [
     { name: "architect", alive: true, busy: false },
@@ -90,7 +90,7 @@ describe("responsive workspace shell", () => {
   })
 
   test("hides Agents and rejects direct access when the feature is disabled", async () => {
-    const disabled = { ...session, features: { agents: false, documents: false, turnSteps: false }, permissions: { agents: "hidden" as const } }
+    const disabled = { ...session, features: { agents: false, documents: false, turnSteps: false, cards: false }, permissions: { agents: "hidden" as const } }
     const view = render(<App api={fakeApi({ session: disabled })} />)
     await screen.findByRole("heading", { name: "Switchboard" })
     expect(screen.queryByRole("link", { name: "Agents" })).toBeNull()
@@ -101,7 +101,7 @@ describe("responsive workspace shell", () => {
   })
 
   test("shows the Documents destination, routes to it, and renders the workspace", async () => {
-    const enabled = { ...session, features: { agents: true, documents: true, turnSteps: false } }
+    const enabled = { ...session, features: { agents: true, documents: true, turnSteps: false, cards: false } }
     const api = { ...fakeApi({ session: enabled }), listDocuments: async () => [], uploadDocument: async () => ({ token: "t", url: "/share/t" }), setDocumentVisibility: async () => ({ ok: true as const }), deleteDocument: async () => ({ ok: true as const }) }
     render(<App api={api} streamFactory={null} agentStreamFactory={null} />)
     const documents = await screen.findByRole("link", { name: "Documents" })
@@ -723,5 +723,116 @@ describe("transcript attachment hydration", () => {
     await userEvent.click(await screen.findByRole("button", { name: /Design review/ }))
     expect(await screen.findByRole("region", { name: "Transcript" })).toBeTruthy()
     expect(screen.queryByRole("region", { name: /documents shared/ })).toBeNull()
+  })
+})
+
+describe("transcript card hydration and gating", () => {
+  /** The same failure mode attachments shipped with: `card` events are live-only and never
+   *  replay from message history, so without a hydration fetch every card — buttons and all —
+   *  disappears on navigate-away-and-back. */
+  const cardsSession: Session = { ...session, features: { ...session.features, cards: true } }
+  const cardInfo = (correlationId: string, overrides: Partial<CardInfo> = {}): CardInfo => ({
+    correlationId, conversationId: "design/review", agent: "triage", revision: 1,
+    createdAt: 1_000, updatedAt: 1_000,
+    card: { title: `Card ${correlationId}`, body: "", buttons: [{ customId: `act:${correlationId}`, label: "Fix now", style: "success" }] },
+    ...overrides,
+  })
+
+  const cardApi = (ids: string[], override: Partial<Session> = {}) => {
+    const api = fakeApi({ session: { ...cardsSession, ...override } })
+    const requested: string[] = []
+    api.listMessages = async () => []
+    api.listConversationCards = async (conversationId: string) => {
+      requested.push(conversationId)
+      return ids.map(id => cardInfo(id))
+    }
+    return { api, requested }
+  }
+
+  const openConversation = async () => userEvent.click(await screen.findByRole("button", { name: /Design review/ }))
+
+  test("opening a conversation hydrates its cards with no live events", async () => {
+    const { api, requested } = cardApi(["corr-1", "corr-2"])
+    render(<App api={api} streamFactory={null} agentStreamFactory={null} />)
+    await openConversation()
+    await waitFor(() => expect(screen.getByRole("region", { name: "2 cards" })).toBeTruthy())
+    expect(requested).toEqual(["design/review"])
+    expect(screen.getByText("Card corr-1")).toBeTruthy()
+  })
+
+  test("a live event for an already-hydrated card replaces it rather than doubling it", async () => {
+    let handlers: ConversationStreamHandlers | undefined
+    const { api } = cardApi(["corr-1"])
+    const stream = {
+      start: async (_id: string, _after: number, next: ConversationStreamHandlers) => { handlers = next },
+      stop() {},
+    }
+    render(<App api={api} streamFactory={() => stream as ReturnType<typeof createWorkspaceStream>} agentStreamFactory={null} />)
+    await openConversation()
+    await waitFor(() => expect(screen.getByRole("region", { name: "1 card" })).toBeTruthy())
+    await waitFor(() => expect(handlers).toBeDefined())
+
+    // An edit-in-place: same correlationId, higher revision. One card, new title, no duplicate.
+    act(() => handlers!.onEvent({
+      kind: "card", conversationId: "design/review", sequence: 2, ts: 2,
+      card: cardInfo("corr-1", { revision: 2, updatedAt: 2_000, card: { title: "🚀 Fix ready", body: "", buttons: [] } }),
+    }))
+    expect(screen.getByRole("region", { name: "1 card" })).toBeTruthy()
+    expect(screen.getByText("🚀 Fix ready")).toBeTruthy()
+    expect(screen.queryByText("Card corr-1")).toBeNull()
+
+    // A genuinely new card still lands alongside it.
+    act(() => handlers!.onEvent({
+      kind: "card", conversationId: "design/review", sequence: 3, ts: 3, card: cardInfo("corr-9", { createdAt: 9_000 }),
+    }))
+    expect(screen.getByRole("region", { name: "2 cards" })).toBeTruthy()
+  })
+
+  test("a failing hydration fetch leaves the transcript usable", async () => {
+    const api = fakeApi({ session: cardsSession })
+    api.listMessages = async () => []
+    api.listConversationCards = async () => { throw new Error("offline") }
+    render(<App api={api} streamFactory={null} agentStreamFactory={null} />)
+    await openConversation()
+    expect(await screen.findByRole("region", { name: "Transcript" })).toBeTruthy()
+    expect(screen.queryByRole("region", { name: /card/ })).toBeNull()
+  })
+
+  test("features.cards off: nothing is hydrated and no card is rendered", async () => {
+    const { api, requested } = cardApi(["corr-1"], { features: { ...session.features, cards: false } })
+    render(<App api={api} streamFactory={null} agentStreamFactory={null} />)
+    await openConversation()
+    expect(await screen.findByRole("region", { name: "Transcript" })).toBeTruthy()
+    // The route answers 503 with the flag off, so it is never called.
+    expect(requested).toEqual([])
+    expect(screen.queryByRole("region", { name: /card/ })).toBeNull()
+  })
+
+  test("features.cards off suppresses live card events too", async () => {
+    let handlers: ConversationStreamHandlers | undefined
+    const { api } = cardApi([], { features: { ...session.features, cards: false } })
+    const stream = {
+      start: async (_id: string, _after: number, next: ConversationStreamHandlers) => { handlers = next },
+      stop() {},
+    }
+    render(<App api={api} streamFactory={() => stream as ReturnType<typeof createWorkspaceStream>} agentStreamFactory={null} />)
+    await openConversation()
+    await waitFor(() => expect(handlers).toBeDefined())
+    act(() => handlers!.onEvent({ kind: "card", conversationId: "design/review", sequence: 2, ts: 2, card: cardInfo("corr-1") }))
+    expect(screen.queryByRole("region", { name: /card/ })).toBeNull()
+  })
+
+  test("a button click reaches the interaction endpoint with the conversation and customId", async () => {
+    const calls: { conversationId: string; customId: string }[] = []
+    const { api } = cardApi(["corr-1"])
+    api.submitCardInteraction = async (conversationId, input) => {
+      calls.push({ conversationId, customId: input.customId })
+      return { status: "ok" }
+    }
+    render(<App api={api} streamFactory={null} agentStreamFactory={null} />)
+    await openConversation()
+    await waitFor(() => expect(screen.getByRole("region", { name: "1 card" })).toBeTruthy())
+    await userEvent.click(screen.getByRole("button", { name: /Fix now/ }))
+    expect(calls).toEqual([{ conversationId: "design/review", customId: "act:corr-1" }])
   })
 })

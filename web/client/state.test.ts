@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test"
 import { initialWorkspaceState, workspaceReducer, type WorkspaceState } from "./state"
-import type { ConversationEvent, DocumentAttachment, ToolStep } from "./types"
+import type { CardInfo, ConversationEvent, DocumentAttachment, ToolStep } from "./types"
 
 const toolStepEvent = (tool: ToolStep, ts = 1): ConversationEvent =>
   ({ kind: "tool_step", conversationId: "c1", sequence: ts, ts, tool })
@@ -109,4 +109,103 @@ test("a hydration that adds nothing new returns the SAME state object (no needle
 test("selecting a different conversation clears hydrated attachments", () => {
   const state = workspaceReducer(initialWorkspaceState, { type: "attachments/loaded", attachments: [attachment("tok-1")] })
   expect(workspaceReducer(state, { type: "conversation/selected", conversationId: "c2" }).attachments).toEqual([])
+})
+
+// --- Interactive agent cards ---------------------------------------------------------------
+
+const spec = (title: string, buttons: { customId: string; label: string }[] = []) => ({ title, body: "", buttons })
+const cardInfo = (overrides: Partial<CardInfo> = {}): CardInfo => ({
+  correlationId: "corr-1", conversationId: "c1", agent: "triage", revision: 1,
+  createdAt: 1000, updatedAt: 1000, card: spec("🐛 Cannot view CYP profiles", [{ customId: "triage:fix:1", label: "Fix now" }]),
+  ...overrides,
+})
+const cardEvent = (info: CardInfo, ts = info.updatedAt): ConversationEvent =>
+  ({ kind: "card", conversationId: "c1", sequence: ts, ts, card: info })
+
+test("a card event lands in the card slice, not in the raw activity feed", () => {
+  const state = reduce(initialWorkspaceState, cardEvent(cardInfo()))
+  expect(state.cards).toHaveLength(1)
+  expect(state.activity).toEqual([])
+})
+
+test("an edit REPLACES the card in place by correlationId instead of appending a second one", () => {
+  const posted = reduce(initialWorkspaceState, cardEvent(cardInfo()))
+  const edited = reduce(posted, cardEvent(cardInfo({
+    revision: 2, updatedAt: 5000,
+    card: spec("🚀 Fix ready: CYP profile 403", [{ customId: "deploy:go:1", label: "Deploy" }]),
+    history: [{ revision: 1, updatedAt: 1000, card: posted.cards[0]!.card }],
+  })))
+  expect(edited.cards).toHaveLength(1)
+  expect(edited.cards[0]!.revision).toBe(2)
+  expect(edited.cards[0]!.card.title).toBe("🚀 Fix ready: CYP profile 403")
+  // The anchor is immutable, so the card does not move in the transcript when it is edited.
+  expect(edited.cards[0]!.createdAt).toBe(1000)
+})
+
+test("an edited card keeps its position — it does not jump to the end", () => {
+  const state = reduce(
+    initialWorkspaceState,
+    cardEvent(cardInfo({ correlationId: "a", createdAt: 1000, updatedAt: 1000 })),
+    cardEvent(cardInfo({ correlationId: "b", createdAt: 2000, updatedAt: 2000 })),
+    cardEvent(cardInfo({ correlationId: "a", createdAt: 1000, updatedAt: 9000, revision: 2 })),
+  )
+  expect(state.cards.map(card => card.correlationId)).toEqual(["a", "b"])
+})
+
+test("a stale or redelivered revision is ignored, so dead buttons cannot come back", () => {
+  const current = reduce(
+    initialWorkspaceState,
+    cardEvent(cardInfo()),
+    cardEvent(cardInfo({ revision: 3, updatedAt: 5000, card: spec("✅ Deployed to live.") })),
+  )
+  const replayed = reduce(current, cardEvent(cardInfo({ revision: 1 })))
+  expect(replayed).toBe(current)
+  expect(replayed.cards[0]!.card.title).toBe("✅ Deployed to live.")
+  expect(replayed.cards[0]!.card.buttons).toEqual([])
+})
+
+test("hydration restores cards when no live event was ever seen", () => {
+  const state = workspaceReducer(initialWorkspaceState, { type: "cards/loaded", cards: [
+    cardInfo({ correlationId: "a", createdAt: 1000 }),
+    cardInfo({ correlationId: "b", createdAt: 2000 }),
+  ] })
+  expect(state.cards.map(card => card.correlationId)).toEqual(["a", "b"])
+})
+
+test("hydration merges with live cards by correlationId without duplicating", () => {
+  const live = reduce(initialWorkspaceState, cardEvent(cardInfo({ correlationId: "a", createdAt: 1000 })))
+  const merged = workspaceReducer(live, { type: "cards/loaded", cards: [
+    cardInfo({ correlationId: "a", createdAt: 1000 }),
+    cardInfo({ correlationId: "b", createdAt: 2000 }),
+  ] })
+  expect(merged.cards).toHaveLength(2)
+  expect(merged.cards.map(card => card.correlationId)).toEqual(["a", "b"])
+})
+
+test("the higher revision wins the hydrate/live race, whichever way round it lands", () => {
+  // Live edit arrives first, then a hydration snapshot taken BEFORE the edit.
+  const live = reduce(initialWorkspaceState, cardEvent(cardInfo({ revision: 4, card: spec("✅ Deployed to live.") })))
+  const staleHydration = workspaceReducer(live, { type: "cards/loaded", cards: [cardInfo({ revision: 1 })] })
+  expect(staleHydration.cards[0]!.revision).toBe(4)
+
+  // …and the other way: hydration carries a revision the stream has not delivered yet.
+  const early = reduce(initialWorkspaceState, cardEvent(cardInfo({ revision: 1 })))
+  const freshHydration = workspaceReducer(early, { type: "cards/loaded", cards: [cardInfo({ revision: 4, card: spec("✅ Deployed to live.") })] })
+  expect(freshHydration.cards[0]!.revision).toBe(4)
+  expect(freshHydration.cards).toHaveLength(1)
+})
+
+test("ordering is identical whether cards arrived live-first or hydrate-first", () => {
+  const one = cardInfo({ correlationId: "b", createdAt: 2000 })
+  const two = cardInfo({ correlationId: "a", createdAt: 1000 })
+  const liveFirst = workspaceReducer(reduce(initialWorkspaceState, cardEvent(one)), { type: "cards/loaded", cards: [two] })
+  const hydrateFirst = reduce(workspaceReducer(initialWorkspaceState, { type: "cards/loaded", cards: [two] }), cardEvent(one))
+  expect(liveFirst.cards.map(card => card.correlationId)).toEqual(["a", "b"])
+  expect(hydrateFirst.cards.map(card => card.correlationId)).toEqual(["a", "b"])
+})
+
+test("selecting another conversation clears the cards", () => {
+  const state = reduce(initialWorkspaceState, cardEvent(cardInfo()))
+  const switched = workspaceReducer(state, { type: "conversation/selected", conversationId: "c2" })
+  expect(switched.cards).toEqual([])
 })

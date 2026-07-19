@@ -15,13 +15,18 @@ import type {
   PostMessageInput,
   Session,
   TransportLink,
+  CardInfo,
+  CardInteractionResult,
   DocumentAttachment,
   DocumentSummary,
   UploadDocumentResult,
 } from "./types"
 
 export class ApiError extends Error {
-  constructor(readonly status: number, readonly code: string) {
+  /** `reason` is the hub's optional human-readable elaboration on `code` — card interactions
+   *  send one with `unroutable` and with every denial, and the card surfaces it verbatim so a
+   *  refused click says WHY rather than just failing. */
+  constructor(readonly status: number, readonly code: string, readonly reason?: string) {
     super(code)
     this.name = "ApiError"
   }
@@ -73,6 +78,20 @@ export class WorkspaceApi {
    *  events are live-only, so without this a remount loses every card already on screen. */
   listConversationDocuments(conversationId: string): Promise<DocumentAttachment[]> {
     return this.request(`/api/conversations/${encodeURIComponent(conversationId)}/documents`)
+  }
+
+  /** The transcript's interactive agent cards, for hydration on conversation load. `card`
+   *  events are live-only — exactly like `attachment` — so without this a remount loses every
+   *  card already on screen, buttons and all. */
+  listConversationCards(conversationId: string): Promise<CardInfo[]> {
+    return this.request(`/api/conversations/${encodeURIComponent(conversationId)}/cards`)
+  }
+
+  /** A card button click. Resolves to one of the three 200 shapes; every documented failure
+   *  (403 `unmapped_identity`/`not_allowlisted`/`forbidden_action`, 409 `unroutable`,
+   *  503 `web_cards_disabled`) arrives as a rejected `ApiError` carrying that code. */
+  submitCardInteraction(conversationId: string, input: { customId: string; fields?: Record<string, string> }): Promise<CardInteractionResult> {
+    return this.request(`/api/conversations/${encodeURIComponent(conversationId)}/interactions`, { method: "POST", json: input })
   }
 
   listLinks(conversationId: string): Promise<TransportLink[]> {
@@ -164,10 +183,10 @@ export class WorkspaceApi {
     const contentType = response.headers.get("content-type") ?? ""
     const value = contentType.includes("application/json") ? await response.json().catch(() => null) : null
     if (!response.ok) {
-      const code = value && typeof value === "object" && "error" in value && typeof value.error === "string"
-        ? value.error
-        : "request_failed"
-      throw new ApiError(response.status, code)
+      const body = value && typeof value === "object" ? value as { error?: unknown; reason?: unknown } : null
+      const code = typeof body?.error === "string" ? body.error : "request_failed"
+      const reason = typeof body?.reason === "string" ? body.reason : undefined
+      throw new ApiError(response.status, code, reason)
     }
     if (value === null) throw new ApiError(response.status, "invalid_response")
     return value as T

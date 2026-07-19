@@ -1,10 +1,11 @@
-import type { DocumentAttachment, Message } from "../types"
+import type { CardInfo, DocumentAttachment, Message } from "../types"
 import { Markdown } from "./Markdown"
 import { TranscriptAttachments, type AttachmentCardDeps } from "./TranscriptAttachments"
+import { TranscriptCards, type CardDeps } from "./TranscriptCards"
 
 const originLabel = { web: "Web", agent: "Agent", transport: "Transport", system: "System" } as const
 
-export function MessageItem({ message, grouped, parent, onReply, attachments = [], onOpenDocument, documentContentUrl }: {
+export function MessageItem({ message, grouped, parent, onReply, attachments = [], cards = [], onOpenDocument, documentContentUrl, onCardInteract }: {
   message: Message
   grouped: boolean
   parent?: Message
@@ -12,7 +13,10 @@ export function MessageItem({ message, grouped, parent, onReply, attachments = [
   /** Documents this message produced. Rendered INSIDE the article so they sit within the
    *  message's origin stripe and read as part of the agent's reply, not as a floating band. */
   attachments?: DocumentAttachment[]
-} & AttachmentCardDeps) {
+  /** Interactive cards this message's turn posted. Nested for the same reason as attachments:
+   *  a card is the agent's turn expressed as controls, and it belongs to that turn. */
+  cards?: CardInfo[]
+} & AttachmentCardDeps & CardDeps) {
   const label = `Message from ${message.author} (${originLabel[message.origin]})`
   return (
     <article className={`message-item message-origin-${message.origin}`} aria-label={label} data-grouped={String(grouped)}>
@@ -30,6 +34,7 @@ export function MessageItem({ message, grouped, parent, onReply, attachments = [
         {...(onOpenDocument ? { onOpenDocument } : {})}
         {...(documentContentUrl ? { documentContentUrl } : {})}
       />
+      <TranscriptCards cards={cards} nested {...(onCardInteract ? { onCardInteract } : {})} />
       <button type="button" className="message-reply-action" onClick={() => onReply(message)} aria-label={`Reply to message from ${message.author}`}>Reply</button>
     </article>
   )

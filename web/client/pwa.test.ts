@@ -31,7 +31,7 @@ const api: AppApi = {
   session: async () => ({
     identity: "ada@example.com",
     agents: [{ name: "architect", alive: true, busy: false }],
-    features: { agents: true, documents: false, turnSteps: false },
+    features: { agents: true, documents: false, turnSteps: false, cards: false },
     permissions: { agents: "operator" },
   }),
   listConversations: async () => [],

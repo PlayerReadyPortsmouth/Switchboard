@@ -15,7 +15,7 @@ afterEach(() => { cleanup(); history.replaceState(null, "", "/documents"); reset
 
 const session: Session = {
   identity: "ada@example.com",
-  features: { agents: true, documents: true, turnSteps: false },
+  features: { agents: true, documents: true, turnSteps: false, cards: false },
   permissions: { agents: "viewer" },
   agents: [],
 }

@@ -1,6 +1,7 @@
-import type { DocumentAttachment, Message } from "../types"
+import type { CardInfo, DocumentAttachment, Message } from "../types"
 import { MessageItem } from "./MessageItem"
 import { TranscriptAttachments, anchorAttachments, type AttachmentCardDeps } from "./TranscriptAttachments"
+import { TranscriptCards, anchorCards, type CardDeps } from "./TranscriptCards"
 
 const FIVE_MINUTES = 5 * 60 * 1000
 
@@ -10,21 +11,24 @@ export function canonicalMessages(messages: Message[]): Message[] {
   return [...unique.values()].sort((left, right) => left.sequence - right.sequence || left.id.localeCompare(right.id))
 }
 
-export function Transcript({ messages, onReply, attachments = [], onOpenDocument, documentContentUrl }: {
+export function Transcript({ messages, onReply, attachments = [], cards = [], onOpenDocument, documentContentUrl, onCardInteract }: {
   messages: Message[]
   onReply(message: Message): void
   attachments?: DocumentAttachment[]
-} & AttachmentCardDeps) {
+  cards?: CardInfo[]
+} & AttachmentCardDeps & CardDeps) {
   const canonical = canonicalMessages(messages)
   const byId = new Map(canonical.map(message => [message.id, message]))
   // Cards are anchored to the agent message that produced them and rendered inside it; only
   // the ones with no message to sit under yet fall through to the trailing group below.
   const { byMessage, trailing } = anchorAttachments(canonical, attachments)
+  const { byMessage: cardsByMessage, trailing: trailingCards } = anchorCards(canonical, cards)
   const cardDeps = {
     ...(onOpenDocument ? { onOpenDocument } : {}),
     ...(documentContentUrl ? { documentContentUrl } : {}),
   }
-  if (!canonical.length && !trailing.length) return <div className="transcript-record transcript-record-empty"><p>No messages yet. The canonical record will appear here after a message is accepted.</p></div>
+  const interactDeps = onCardInteract ? { onCardInteract } : {}
+  if (!canonical.length && !trailing.length && !trailingCards.length) return <div className="transcript-record transcript-record-empty"><p>No messages yet. The canonical record will appear here after a message is accepted.</p></div>
   return (
     <div className="transcript-record">
       {canonical.map((message, index) => {
@@ -38,10 +42,13 @@ export function Transcript({ messages, onReply, attachments = [], onOpenDocument
           parent={message.replyTo ? byId.get(message.replyTo) : undefined}
           onReply={onReply}
           attachments={byMessage.get(message.id) ?? []}
+          cards={cardsByMessage.get(message.id) ?? []}
           {...cardDeps}
+          {...interactDeps}
         />
       })}
       <TranscriptAttachments attachments={trailing} {...cardDeps} />
+      <TranscriptCards cards={trailingCards} {...interactDeps} />
     </div>
   )
 }
