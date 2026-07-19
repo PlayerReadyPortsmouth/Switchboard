@@ -1,12 +1,17 @@
-import "../testSetup"
-import { afterEach, expect, test } from "bun:test"
+import { DEFAULT_VIEWPORT_WIDTH, resetViewport, setViewport } from "../testSetup"
+import { afterEach, beforeEach, expect, test } from "bun:test"
 import { cleanup, render, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import type { DocumentSummary, Session, UploadDocumentResult } from "../types"
 import { DocumentsWorkspace, type DocumentsApi } from "./DocumentsWorkspace"
 
 const screen = within(document.body)
-afterEach(() => { cleanup(); history.replaceState(null, "", "/documents") })
+
+/** These cases assert the desktop three-pane layout, where the viewer sits beside the list.
+ *  Below 1200px the viewer is an overlay that stays `aria-hidden` until a row is picked, so the
+ *  width has to be pinned here rather than inherited from whichever file ran previously. */
+beforeEach(() => { setViewport(DEFAULT_VIEWPORT_WIDTH) })
+afterEach(() => { cleanup(); history.replaceState(null, "", "/documents"); resetViewport() })
 
 const session: Session = {
   identity: "ada@example.com",

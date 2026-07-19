@@ -1,4 +1,4 @@
-import "../testSetup"
+import { resetViewport, setViewport } from "../testSetup"
 import { afterEach, describe, expect, test } from "bun:test"
 import { act, cleanup, render, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
@@ -57,7 +57,7 @@ function fakeApi(options: { agents?: AgentSummary[]; detail?: AgentDetail; listE
 afterEach(() => {
   cleanup()
   history.replaceState(null, "", "/agents")
-  Object.defineProperty(window, "innerWidth", { configurable: true, value: 1280 })
+  resetViewport()
 })
 
 describe("AgentsWorkspace", () => {
@@ -132,7 +132,7 @@ describe("AgentsWorkspace", () => {
   })
 
   test("uses browser history on mobile back and restores focus to the selected row", async () => {
-    Object.defineProperty(window, "innerWidth", { configurable: true, value: 500 })
+    setViewport(500)
     const navigations: Array<string | null> = []
     const api = fakeApi()
     const view = render(<AgentsWorkspace api={api} session={session} routeAgent={null} connection="live" streamFactory={null} onNavigate={(_destination, agent) => navigations.push(agent ?? null)} onNewConversation={() => {}} />)
@@ -173,7 +173,7 @@ describe("AgentsWorkspace", () => {
   })
 
   test("uses a closed tablet detail drawer, moves focus into it, and restores focus on Escape", async () => {
-    Object.defineProperty(window, "innerWidth", { configurable: true, value: 900 })
+    setViewport(900)
     render(<AgentsWorkspace api={fakeApi()} session={session} routeAgent={null} connection="live" streamFactory={null} onNavigate={() => {}} onNewConversation={() => {}} />)
     const row = await screen.findByRole("button", { name: "Open qa" })
     const shell = document.querySelector(".agents-shell")!
