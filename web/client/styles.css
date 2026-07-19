@@ -129,7 +129,9 @@ button { color: inherit; }
 .message-item header { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
 .message-item header strong { font-size: .84rem; font-weight: 650; }
 .message-meta { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px 10px; color: var(--muted); font: .63rem/1.3 ui-monospace, SFMono-Regular, Consolas, monospace; text-transform: uppercase; letter-spacing: .055em; }
-.message-item > p { margin: 11px 0 0; color: var(--text); font-size: .93rem; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
+/* `min-width: 0` is what stops a wide code block or table from widening the message, and the
+   message from widening the page — without it the transcript scrolls sideways on a phone. */
+.message-body { margin: 11px 0 0; min-width: 0; color: var(--text); }
 .message-reply { margin: 13px 0 0; padding: 8px 11px; border-left: 1px solid var(--origin); color: var(--muted); font-size: .77rem; line-height: 1.45; }
 .message-reply-action { position: absolute; right: 0; bottom: 15px; min-width: 40px; min-height: 32px; padding: 0 5px; border: 0; background: transparent; color: var(--muted); font-size: .7rem; cursor: pointer; }
 .message-reply-action:hover { color: var(--text); }
@@ -530,11 +532,43 @@ dialog input, dialog select { min-height: 44px; width: 100%; padding: 0 11px; bo
 .markdown-body li::marker { color: var(--muted); }
 .markdown-body a { color: var(--accent); text-underline-offset: 3px; }
 .markdown-body code { padding: 1px 5px; border: 1px solid var(--line); background: var(--ink-1); font: .84em/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
-.markdown-body pre { margin: 0 0 18px; padding: 14px 16px; border: 1px solid var(--line); background: var(--ink-1); overflow-x: auto; }
+.markdown-code { margin: 0 0 18px; min-width: 0; }
+.markdown-body pre { margin: 0; padding: 14px 16px; border: 1px solid var(--line); background: var(--ink-1); overflow-x: auto; }
 .markdown-body pre code { padding: 0; border: 0; background: transparent; font-size: .8rem; line-height: 1.6; }
 .markdown-body blockquote { margin: 0 0 18px; padding: 2px 0 2px 15px; border-left: 1px solid var(--accent); color: var(--muted); }
 .markdown-body hr { margin: 26px 0; border: 0; border-top: 1px solid var(--line); }
 .markdown-body img { max-width: 100%; border: 1px solid var(--line); }
+
+/* Markdown at message scale. A transcript bubble is not a document page: it is narrow, it sits
+   in a stack of siblings, and it must never widen the page — so the rhythm is tighter, headings
+   are damped to emphasis rather than titles, and every wide child scrolls inside its own box. */
+.markdown-body[data-variant="chat"] { max-width: none; min-width: 0; font-size: .93rem; line-height: 1.65; }
+.markdown-body[data-variant="chat"] > :last-child { margin-bottom: 0; }
+.markdown-body[data-variant="chat"] p { margin: 0 0 8px; }
+/* Damped: a `#` in a message reads as emphasis, one step above body text, never at page scale. */
+.markdown-body[data-variant="chat"] h4,
+.markdown-body[data-variant="chat"] h5,
+.markdown-body[data-variant="chat"] h6 { margin: 12px 0 5px; padding: 0; border: 0; color: var(--text); line-height: 1.35; }
+.markdown-body[data-variant="chat"] h4 { font-size: 1rem; font-weight: 650; }
+.markdown-body[data-variant="chat"] h5 { font-size: .95rem; font-weight: 650; }
+.markdown-body[data-variant="chat"] h6 { font-size: .93rem; font-weight: 600; color: var(--muted); }
+.markdown-body[data-variant="chat"] ul,
+.markdown-body[data-variant="chat"] ol { margin: 0 0 8px; padding-left: 20px; }
+.markdown-body[data-variant="chat"] li { margin-bottom: 2px; }
+.markdown-body[data-variant="chat"] blockquote { margin: 0 0 8px; padding: 1px 0 1px 11px; border-left: 2px solid var(--line); }
+.markdown-body[data-variant="chat"] hr { margin: 12px 0; }
+.markdown-body[data-variant="chat"] .markdown-table-scroll { margin: 8px 0; }
+.markdown-body[data-variant="chat"] .markdown-table-scroll table { font-size: .78rem; }
+/* Cells stay on one line and the wrapper scrolls: at message width, wrapping every cell turns
+   a three-row table into a tall ragged block that reads as clutter. */
+.markdown-body[data-variant="chat"] .markdown-table-scroll th,
+.markdown-body[data-variant="chat"] .markdown-table-scroll td { padding: 6px 9px; white-space: nowrap; }
+/* A chip, not a box: lighter than a fenced block so inline code reads inside a sentence. */
+.markdown-body[data-variant="chat"] code { padding: .1em .35em; border: 0; border-radius: 3px; background: var(--ink-2); color: var(--text); font-size: .85em; }
+.markdown-body[data-variant="chat"] .markdown-code { margin: 0 0 8px; }
+.markdown-body[data-variant="chat"] pre { padding: 9px 11px; border-radius: 4px; }
+.markdown-body[data-variant="chat"] pre code { padding: 0; border-radius: 0; background: transparent; font-size: .78rem; line-height: 1.55; }
+.markdown-code-language { display: block; margin-bottom: 3px; color: var(--muted); font: 600 .6rem/1.3 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: .07em; text-transform: uppercase; }
 
 @media (max-width: 1199px) {
   .documents-shell[data-layout="tablet"] .document-viewer { position: fixed; z-index: 50; inset: 0 0 0 calc(var(--rail-width) + var(--list-width)); visibility: hidden; pointer-events: none; transform: translateX(100%); transition: transform 180ms ease, visibility 0s linear 180ms; box-shadow: -18px 0 45px rgba(0, 0, 0, .3); }

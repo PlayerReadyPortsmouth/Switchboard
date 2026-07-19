@@ -1,4 +1,5 @@
 import type { DocumentAttachment, Message } from "../types"
+import { Markdown } from "./Markdown"
 import { TranscriptAttachments, type AttachmentCardDeps } from "./TranscriptAttachments"
 
 const originLabel = { web: "Web", agent: "Agent", transport: "Transport", system: "System" } as const
@@ -20,7 +21,9 @@ export function MessageItem({ message, grouped, parent, onReply, attachments = [
         <span className="message-meta"><span>{originLabel[message.origin]}</span><time dateTime={new Date(message.createdAt).toISOString()}>{new Date(message.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time><span>{message.state}</span></span>
       </header>
       {parent ? <blockquote className="message-reply">Replying to {parent.author}: {parent.content}</blockquote> : null}
-      <p>{message.content}</p>
+      {/* Every origin renders markdown, including the reader's own messages — Discord makes no
+          distinction, and a user who types `**bold**` means bold there too. */}
+      <div className="message-body"><Markdown source={message.content} variant="chat" /></div>
       <TranscriptAttachments
         attachments={attachments}
         nested
