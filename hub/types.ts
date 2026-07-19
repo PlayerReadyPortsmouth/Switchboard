@@ -350,6 +350,7 @@ export interface HubConfig {
   memoryBrowse?: MemoryBrowseConfig  // operator memory browse & forget UI (default off)
   conversationMirror?: ConversationMirrorConfig  // two-way Discord↔web mirror for migrated channels (default off)
   receipts?: ReceiptsConfig      // outbound receipts for post_card/update_card/attach_file (default off)
+  cardPersistence?: CardPersistenceConfig  // card-button routing survives a hub restart (default off)
   federation?: FederationConfig  // inter-hub consult federation over a private network (default off)
 }
 
@@ -453,6 +454,34 @@ export interface ShareLinksConfig {
    *  share/viewer surface — all of which are meaningless without `shareLinks.enabled`.
    *  Off ⇒ `attach_file` is byte-identical to before: a native Discord attachment only. */
   mirrorAttachments?: boolean
+}
+
+/** Persist card-button routing state (CardRegistry / NotifyRouter / modal specs) to
+ *  SQLite so a hub restart doesn't kill every live card button in Discord.
+ *
+ *  Absent/disabled ⇒ those three registries are in-memory only and a restart drops
+ *  them, exactly as before: a post-restart click freezes on the disabled "Working"
+ *  row. Enabled ⇒ writes mirror through, boot restores what's still inside the TTL,
+ *  and an unroutable click reports an honest reason instead of freezing.
+ *
+ *  Deliberately does NOT cover ApprovalRegistry: pending approvals are dropped on
+ *  restart on purpose (fail-closed — a held effect never fires unattended). That is
+ *  a security property, not the same bug.
+ *
+ *  Note this is a hub-wide gate with no per-user canary, unlike ReadyApp's flags:
+ *  "which cards route" is a property of the hub's routing tables, not of the
+ *  clicker, so a per-user allowlist would be incoherent here. Matches how every
+ *  other Switchboard subsystem gate works. */
+export interface CardPersistenceConfig {
+  enabled?: boolean              // master switch (default off)
+  dbFile?: string                // default <stateDir>/cards.sqlite
+  /** How long after its last write a card/button stays restorable across a restart.
+   *  Default 168 (7 days) — long enough to survive a weekend of restarts, short
+   *  enough that a `deploy:go:<pr>` button can't fire months after it mattered.
+   *  Bounds resurrection only: within one hub lifetime nothing expires, which is
+   *  today's behaviour. */
+  ttlHours?: number
+  sweepIntervalMs?: number       // expired-row sweep cadence (default 3600000 = hourly)
 }
 
 /** One step of a workflow: run `agent` with a templated `prompt` ({{input}} and

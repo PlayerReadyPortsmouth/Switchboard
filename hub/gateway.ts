@@ -7,6 +7,14 @@ import { createHash } from "node:crypto"
 import type { AgentRegistry, InboundMessage, AgentReply, AgentConfig, HubConfig, CardSpec, CardModal } from "./types"
 import { chunk, formatOutbound } from "./format"
 import { buildModal } from "./modal"
+import type { CardStore, StoredModal } from "./cardStore"
+
+/** What a card-button / modal-submit handler reports back to the gateway.
+ *  `undefined` = routed (or deliberately swallowed) — the historic contract, so
+ *  every existing `return`/fallthrough keeps its exact meaning. A string is an
+ *  honest reason the click could NOT be routed, which the gateway surfaces to the
+ *  clicker instead of leaving the card frozen on the disabled "Working" row. */
+export type NotifyRouteFailure = string | void
 
 export type Control =
   | { cmd: "agents"; arg: undefined }
@@ -191,11 +199,12 @@ export class Gateway {
   readonly client: Client
   private onMessages = new InboundMultiplexer<InboundMessage>()
   private permButtonCb: (requestId: string, behavior: "allow" | "deny") => void = () => {}
-  private notifyButtonCb: (customId: string, userId: string) => void = () => {}
+  private notifyButtonCb: (customId: string, userId: string) => NotifyRouteFailure = () => {}
   private isAuthorized: (userId: string) => boolean = () => false
   private modalByCustomId = new Map<string, CardModal>()
+  private cardStore: CardStore | null = null
   private notifyGate: (customId: string, userId: string) => boolean = () => true
-  private modalSubmitCb: (customId: string, userId: string, fields: Record<string, string>) => void = () => {}
+  private modalSubmitCb: (customId: string, userId: string, fields: Record<string, string>) => NotifyRouteFailure = () => {}
   private reactionCb: (emojiName: string, userId: string, channelId: string, messageId: string) => void = () => {}
   onReaction(cb: typeof this.reactionCb): void { this.reactionCb = cb }
   private threadArchivedCb: (threadId: string) => void = () => {}
@@ -203,8 +212,23 @@ export class Gateway {
    *  for is archived or deleted, so the caller can hard-clean up its worktree. */
   onThreadArchived(cb: typeof this.threadArchivedCb): void { this.threadArchivedCb = cb }
 
-  registerModal(customId: string, spec: CardModal): void { this.modalByCustomId.set(customId, spec) }
-  unregisterModals(customIds: string[]): void { for (const id of customIds) this.modalByCustomId.delete(id) }
+  registerModal(customId: string, spec: CardModal): void {
+    this.modalByCustomId.set(customId, spec)
+    this.cardStore?.putModal(customId, spec)
+  }
+  unregisterModals(customIds: string[]): void {
+    for (const id of customIds) this.modalByCustomId.delete(id)
+    this.cardStore?.deleteModals(customIds)
+  }
+  /** Mirror modal specs through to the card store (cardPersistence flag on). Null
+   *  ⇒ modals are in-memory only, exactly as before. */
+  setCardStore(store: CardStore | null): void { this.cardStore = store }
+  /** Re-seat modal specs read back from the store at boot, so a button that opens
+   *  a modal still opens it after a restart. */
+  restoreModals(modals: StoredModal[]): number {
+    for (const m of modals) this.modalByCustomId.set(m.customId, m.modal)
+    return modals.length
+  }
   setNotifyButtonGate(fn: (customId: string, userId: string) => boolean): void { this.notifyGate = fn }
   onModalSubmit(cb: typeof this.modalSubmitCb): void { this.modalSubmitCb = cb }
 
@@ -227,7 +251,7 @@ export class Gateway {
   onPermissionButton(cb: (requestId: string, behavior: "allow" | "deny") => void): void {
     this.permButtonCb = cb
   }
-  onNotifyButton(cb: (customId: string, userId: string) => void): void { this.notifyButtonCb = cb }
+  onNotifyButton(cb: (customId: string, userId: string) => NotifyRouteFailure): void { this.notifyButtonCb = cb }
 
   /** DM each allowlisted user an Allow/Deny prompt for a tool-permission request. */
   async sendPermissionPrompt(
@@ -300,12 +324,14 @@ export class Gateway {
         for (const [key, comp] of interaction.fields.fields) fields[key] = (comp as any).value
         // Swap the originating card to a disabled "Working" button first (instant
         // feedback, no double-submit), then hand off. The agent's editCard wins later.
+        const priorRows = interaction.isFromMessage() ? interaction.message.components : undefined
         if (interaction.isFromMessage()) {
           await interaction.update({ components: [buildWorkingRow()] }).catch(() => {})
         } else {
           await interaction.deferUpdate().catch(() => {})
         }
-        this.modalSubmitCb(interaction.customId, interaction.user.id, fields)
+        const modalReason = this.modalSubmitCb(interaction.customId, interaction.user.id, fields)
+        if (modalReason) await this.reportUnrouted(interaction, modalReason, priorRows)
         return
       }
       if (!interaction.isButton()) return
@@ -343,8 +369,12 @@ export class Gateway {
       // Swap the card to a single disabled "Working" button first — instant
       // feedback that the action was taken and prevents a double-click — then route
       // to the agent. The agent's later editCard replaces the Working row.
+      // Keep the original row: if routing fails we must put the buttons back rather
+      // than strand the card on "Working" forever.
+      const priorRows = interaction.message.components
       await interaction.update({ components: [buildWorkingRow()] }).catch(() => {})
-      this.notifyButtonCb(interaction.customId, interaction.user.id)
+      const reason = this.notifyButtonCb(interaction.customId, interaction.user.id)
+      if (reason) await this.reportUnrouted(interaction, reason, priorRows)
     })
     this.client.on("messageReactionAdd", async (reaction, user) => {
       try {
@@ -356,6 +386,22 @@ export class Gateway {
       } catch (e) { process.stderr.write(`gateway: reaction handler: ${e}\n`) }
     })
     await this.client.login(token)
+  }
+
+  /** A click that could not be routed. The optimistic "Working" row has already
+   *  been swapped in, so undo it — put the original buttons back (the action never
+   *  ran, so it stays retryable) and tell the clicker why, ephemerally. Without
+   *  this the card sits on a disabled "⏳ Working" row forever with no explanation:
+   *  the frozen-button bug. Best-effort — never throws on the interaction path. */
+  private async reportUnrouted(
+    interaction: { editReply(o: any): Promise<unknown>; followUp(o: any): Promise<unknown> },
+    reason: string,
+    priorRows: unknown,
+  ): Promise<void> {
+    if (priorRows !== undefined) {
+      await interaction.editReply({ components: priorRows }).catch(() => {})
+    }
+    await interaction.followUp({ content: reason, ephemeral: true }).catch(() => {})
   }
 
   async stop(): Promise<void> {

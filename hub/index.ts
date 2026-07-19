@@ -30,6 +30,8 @@ import { startWebhookListener, type WebhookHandler } from "./webhookListener"
 import { startCron, CronState } from "./scheduler"
 import { drainApprovals } from "./approvals"
 import { CardRegistry } from "./cardRegistry"
+import { SqliteCardStore } from "./cardStore"
+import { routeCardInteraction } from "./cardRouting"
 import { CardLifecycle } from "./cardLifecycle"
 import { matchGatedAction, requiresApprover } from "./gatedActions"
 import { isDeployAuthorized } from "./deployGate"
@@ -232,7 +234,21 @@ const threadRegistry = new ThreadAgentRegistry(threadStateStore, {
 setInterval(() => { void threadRegistry.sweepIdle() }, 60_000).unref()
 
 const SHIM_PATH = join(import.meta.dir, "..", "shim", "server.ts")
-const notifyRouter = new NotifyRouter()
+
+// Card-button routing persistence (default off). On: the three card-routing registries
+// mirror through to SQLite and are restored at boot, so the buttons on cards already
+// posted to Discord keep working across a restart instead of freezing on "⏳ Working".
+// Its own DB file — the TTL sweep churns rows constantly and this is a pure cache
+// (safe to delete at any time), so it has no business sharing the conversation WAL.
+const cardPersistCfg = hub.cardPersistence
+const cardPersistOn = cardPersistCfg?.enabled === true
+const cardStore = cardPersistOn
+  ? (() => {
+      const db = new Database(cardPersistCfg?.dbFile ?? join(hub.stateDir, "cards.sqlite"), { create: true })
+      return new SqliteCardStore(db, (cardPersistCfg?.ttlHours ?? 168) * 3_600_000)
+    })()
+  : null
+const notifyRouter = new NotifyRouter(cardStore)
 
 // key → live transport (persistent agent name, or jobId for spawned workers).
 type ProcessAgentTransport = StreamJsonTransport | CodexAppServerTransport
@@ -343,7 +359,21 @@ async function runDistill(convId: string): Promise<void> {
   }
 }
 
-const cardRegistry = new CardRegistry()
+const cardRegistry = new CardRegistry(cardStore)
+
+// Card-routing restore: re-seat the surviving cards/buttons/modals so the buttons on
+// cards already live in Discord keep working across this restart instead of freezing on
+// "⏳ Working". Runs here — before any agent transport starts, so nothing can post a card
+// into an unmirrored gateway. Entries past the TTL are never returned by loadAll(), so a
+// stale card cannot revive; the timer then keeps the store bounded.
+if (cardStore) {
+  gateway.setCardStore(cardStore)
+  const { cards, buttons, modals } = cardStore.loadAll()
+  cardRegistry.restore(cards); notifyRouter.restore(buttons); gateway.restoreModals(modals)
+  process.stderr.write(`card-persistence: restored ${cards.length} cards, ${buttons.length} buttons, ${modals.length} modals\n`)
+  cardStore.sweep()
+  setInterval(() => { cardStore.sweep() }, cardPersistCfg?.sweepIntervalMs ?? 3_600_000).unref()
+}
 const cardLifecycle = new CardLifecycle(cardRegistry, {
   sendCard: (chatId, card) => {
     const target = resolveLegacyDiscordChatId(chatId)
@@ -1826,6 +1856,20 @@ async function handleMemButton(action: string, arg: { corrId: string; idx?: numb
   }
 }
 
+/** Why a card click could not be delivered, or undefined if it was. Only ever
+ *  non-undefined when card persistence is on, so with the flag off this is the
+ *  historic silent no-op and the gateway's recovery path stays unreachable.
+ *  `transports.get` deliberately, not the pool-first pattern used for dispatch:
+ *  `transports` always holds a persistent agent's primary under its name, and a
+ *  pool's sendInteraction just forwards to that same primary — keeping the lookup
+ *  identical is what makes the flag-off path byte-identical to before. */
+const routeInteraction = (customId: string, userId: string, fields?: Record<string, string>): string | void =>
+  routeCardInteraction(customId, userId, fields, {
+    agentFor: (id) => notifyRouter.agentFor(id),
+    transportFor: (key) => transports.get(key),
+    persistenceOn: cardPersistOn,
+  })
+
 // A card button was clicked → gated actions run hub-side; others relay to the agent.
 if (discordGateway) gateway.onNotifyButton((customId, userId) => {
   const ap = parseApprovalCustomId(customId)
@@ -1841,13 +1885,11 @@ if (discordGateway) gateway.onNotifyButton((customId, userId) => {
     void handleMemButton(mem.action, parseMemArg(mem.arg), userId)
     return
   }
-  const key = notifyRouter.agentFor(customId)
-  if (key) transports.get(key)?.sendInteraction(customId, userId)
+  return routeInteraction(customId, userId)
 })
 
 if (discordGateway) gateway.onModalSubmit((customId, userId, fields) => {
-  const key = notifyRouter.agentFor(customId)
-  if (key) transports.get(key)?.sendInteraction(customId, userId, fields)
+  return routeInteraction(customId, userId, fields)
 })
 
 if (discordGateway) gateway.onReaction((emojiName, userId, channelId /* , messageId */) => {

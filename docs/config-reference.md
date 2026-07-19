@@ -63,6 +63,7 @@ Source of truth: this file is a snapshot of the code as of 2026-07-02. Re-derive
 | `workflows[]` | array | `[]` | `{ id, description, steps:[{id,agent,prompt}] }` — declarative pipelines run via `!run`. |
 | `timezone` | string | `"Europe/London"` | Default IANA tz for `schedules[].cron`. |
 | `shareLinks` | object | **absent = off** | See §5 — present in the tracked `config/hub.config.json`. |
+| `cardPersistence` | object | **absent = off** | `{ enabled, dbFile?, ttlHours?, sweepIntervalMs? }` — mirrors the card-routing registries (`CardRegistry`, `NotifyRouter`, modal specs) to `<stateDir>/cards.sqlite` and restores them at boot, so card buttons already live in Discord keep working across a hub restart instead of freezing on a disabled "⏳ Working" row. `ttlHours` (default `168` = 7 days) bounds how long after its last write an entry stays *restorable* — nothing expires inside a running hub, so a stale `deploy:go:<pr>` button can't fire months late. `sweepIntervalMs` (default `3600000`) is the expired-row sweep cadence. Off ⇒ byte-identical to before, including the silent no-op on an unroutable click. Deliberately does **not** cover `ApprovalRegistry`, whose drop-on-restart is a fail-closed security property. Hub-wide, no per-user canary. |
 
 ### Canonical conversations
 
