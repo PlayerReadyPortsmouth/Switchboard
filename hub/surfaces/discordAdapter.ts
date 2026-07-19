@@ -1,3 +1,4 @@
+import { formatWebMirrorLine } from "../displayName"
 import type { InboundMessage } from "../types"
 import type { SurfaceAdapter } from "./adapter"
 import type { NormalizedSurfaceEvent, SurfaceDelivery, SurfaceDeliveryResult } from "./types"
@@ -42,11 +43,20 @@ export class DiscordAdapter implements SurfaceAdapter {
 
   stop(): Promise<void> { return this.gateway.stop() }
 
+  /** Web messages get a humanized author plus an origin marker so Discord-side
+   *  participants can tell them from an ordinary message; every other origin
+   *  (notably `agent`) keeps the plain `**author** · content` form. Formatting
+   *  is chosen from the canonical `origin`, never by sniffing the author. */
+  private line(message: SurfaceDelivery["message"]): string {
+    if (message.origin === "web") return formatWebMirrorLine(message.author, message.content)
+    return `**${message.author}** · ${message.content}`
+  }
+
   async send(delivery: SurfaceDelivery): Promise<SurfaceDeliveryResult> {
     try {
       const externalMessageId = await this.gateway.sendText(
         delivery.link.externalLocationId,
-        `**${delivery.message.author}** · ${delivery.message.content}`,
+        this.line(delivery.message),
         delivery.replyToExternalId,
         delivery.deliveryId,
       )
