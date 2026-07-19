@@ -7,7 +7,8 @@ import { AgentOperationsError, type AgentOperationsService } from "./operations/
 import type { AgentOperationsEvent } from "./operations/agentEvents"
 import type { WorkspaceRole } from "./operations/access"
 import type { Conversation, ConversationUpdate, Message, SyncMode, TransportLink } from "./conversations/types"
-import type { AttachmentInfo, ConversationEvent } from "./conversations/events"
+import type { AttachmentInfo, CardInfo, ConversationEvent } from "./conversations/events"
+import type { WebInteractionResult } from "./webInteraction"
 import { ConversationForbiddenError, ConversationValidationError, MAX_MESSAGES_PAGE_SIZE } from "./conversations/service"
 import { RepositoryConflictError, RepositoryNotFoundError, type AppendMessageResult } from "./conversations/repository"
 import { createBuiltWorkspaceAssets, type WorkspaceAssetHandler } from "./webAssets"
@@ -45,6 +46,20 @@ function documentContentResponse(row: DocumentRow, bytes: Buffer): Response {
       "cache-control": "private, no-store",
     },
   })
+}
+
+/** Map a card-interaction outcome onto HTTP. A denial is 403 with its legible reason; an
+ *  undeliverable click is 409 (the request was authorised, the target is gone) so the client
+ *  can tell "you may not" from "nobody is listening" and say so. */
+function cardInteractionResponse(result: WebInteractionResult): Response {
+  switch (result.status) {
+    case "ok": return json({ status: "ok" })
+    case "modal": return json({ status: "modal", modal: result.modal })
+    case "handled": return json({ status: "handled", action: result.action })
+    case "unroutable": return json({ error: "unroutable", reason: result.reason }, 409)
+    case "denied":
+      return json({ error: result.error, reason: result.reason }, result.error === "web_cards_disabled" ? 503 : 403)
+  }
 }
 
 export interface ChannelInfo { channelId: string; name?: string; agent: string }
@@ -90,6 +105,14 @@ export interface WebDeps {
   readDocumentContent?: (identity: string, token: string) => DocumentContentResult
   documentsUiEnabled?: () => boolean
   turnStepsEnabled?: () => boolean
+  /** Rehydrates the transcript's interactive cards on load. The live `card` events are
+   *  live-only (like `attachment`), so without this a reload loses every card — the exact
+   *  bug attachments shipped with. Enforces conversation membership. */
+  listConversationCards?: (identity: string, conversationId: string) => CardInfo[]
+  /** A web card click. Resolves the caller's identity to a Discord snowflake and runs the
+   *  SAME gates as the Discord path — see hub/webInteraction.ts. */
+  submitCardInteraction?: (identity: string, conversationId: string, input: { customId: string; fields?: Record<string, string> }) => WebInteractionResult
+  webCardsEnabled?: () => boolean
 }
 
 const json = (body: unknown, status = 200) =>
@@ -199,6 +222,8 @@ export async function handleWebRequest(
   const conversationEventsMatch = /^\/api\/conversations\/([^/]+)\/events$/.exec(path)
   const conversationLinksMatch = /^\/api\/conversations\/([^/]+)\/links$/.exec(path)
   const conversationDocumentsMatch = /^\/api\/conversations\/([^/]+)\/documents$/.exec(path)
+  const conversationCardsMatch = /^\/api\/conversations\/([^/]+)\/cards$/.exec(path)
+  const conversationInteractionsMatch = /^\/api\/conversations\/([^/]+)\/interactions$/.exec(path)
   const documentsMatch = path === "/api/documents"
   const documentItemMatch = /^\/api\/documents\/([^/]+)$/.exec(path)
   const documentContentMatch = /^\/api\/documents\/([^/]+)\/content$/.exec(path)
@@ -209,7 +234,8 @@ export async function handleWebRequest(
     operationsAgentActionPreviewMatch || operationsAgentActionConfirmMatch ||
     hubConfigMatch || hubConfigPreviewMatch || hubConfigConfirmMatch || sessionMatch || conversationsMatch ||
     conversationItemMatch || conversationMessagesMatch || conversationEventsMatch || conversationLinksMatch ||
-    conversationDocumentsMatch || documentsMatch || documentItemMatch || documentContentMatch
+    conversationDocumentsMatch || documentsMatch || documentItemMatch || documentContentMatch ||
+    conversationCardsMatch || conversationInteractionsMatch
 
   if (isGuardedRoute) {
     // Auth runs before method dispatch below, so a wrong-method request without
@@ -227,6 +253,10 @@ export async function handleWebRequest(
           agents: access.feature,
           documents: deps.documentsUiEnabled?.() ?? false,
           turnSteps: deps.turnStepsEnabled?.() ?? false,
+          // Lane D reads this to decide whether to render cards and offer their buttons.
+          // It is the web surface's `SurfaceCapabilities.cards`, reported honestly: true
+          // only when the hub can actually persist a card AND accept a click back.
+          cards: deps.webCardsEnabled?.() ?? false,
         },
         permissions: { agents: access.role },
       })
@@ -266,6 +296,46 @@ export async function handleWebRequest(
       let conversationId: string
       try { conversationId = decodeURIComponent(conversationDocumentsMatch[1]) } catch { return json({ error: "malformed_conversation_id" }, 400) }
       return json(deps.listConversationDocuments(email, conversationId))
+    }
+
+    // Transcript card hydration — the same contract as /documents above, and for the same
+    // reason: `card` events are live-only, so a reload would otherwise show an empty
+    // transcript where the interactive cards were. Membership is enforced inside
+    // `listConversationCards`, identical to every other conversation sub-resource.
+    if (conversationCardsMatch && method === "GET") {
+      if (!deps.listConversationCards || !(deps.webCardsEnabled?.() ?? false)) {
+        return json({ error: "web_cards_disabled" }, 503)
+      }
+      let conversationId: string
+      try { conversationId = decodeURIComponent(conversationCardsMatch[1]!) } catch { return json({ error: "malformed_conversation_id" }, 400) }
+      return json(deps.listConversationCards(email, conversationId))
+    }
+
+    // A web card click. Every authorisation decision lives in hub/webInteraction.ts, which
+    // reuses the Discord gates unchanged — this route only shapes the HTTP envelope.
+    if (conversationInteractionsMatch && method === "POST") {
+      if (!deps.submitCardInteraction || !(deps.webCardsEnabled?.() ?? false)) {
+        return json({ error: "web_cards_disabled" }, 503)
+      }
+      let conversationId: string
+      try { conversationId = decodeURIComponent(conversationInteractionsMatch[1]!) } catch { return json({ error: "malformed_conversation_id" }, 400) }
+      let body: { customId?: unknown; fields?: unknown }
+      try { body = await req.json() as typeof body } catch { return json({ error: "malformed_body" }, 400) }
+      const customId = typeof body.customId === "string" ? body.customId.trim() : ""
+      if (!customId) return json({ error: "custom_id_required" }, 400)
+      // Only a flat string→string map is a valid modal submission. Anything else is
+      // rejected rather than coerced — the frame is a text protocol and a nested object
+      // would serialise into it unpredictably.
+      let fields: Record<string, string> | undefined
+      if (body.fields !== undefined) {
+        if (typeof body.fields !== "object" || body.fields === null || Array.isArray(body.fields)) {
+          return json({ error: "malformed_fields" }, 400)
+        }
+        const entries = Object.entries(body.fields as Record<string, unknown>)
+        if (entries.some(([, v]) => typeof v !== "string")) return json({ error: "malformed_fields" }, 400)
+        fields = Object.fromEntries(entries) as Record<string, string>
+      }
+      return cardInteractionResponse(deps.submitCardInteraction(email, conversationId, { customId, fields }))
     }
 
     const documentAction = (documentsMatch && (method === "GET" || method === "POST")) ||

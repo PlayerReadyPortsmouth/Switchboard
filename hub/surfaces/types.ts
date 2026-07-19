@@ -38,6 +38,13 @@ export interface SurfaceDeliveryResult {
 export interface SurfaceCapabilities {
   text: boolean
   replies: boolean
+  /** Can this surface render a canonical card (hub/conversations/events.ts `CardInfo`) and
+   *  route a click back from it?
+   *
+   *  Stays `false` on DiscordAdapter: Discord shows cards, but not through this layer — they
+   *  go out on the legacy `cardLifecycle` path, which the surface router never sees. Claiming
+   *  `true` here would mean "hand me a canonical card and I will deliver it", which that
+   *  adapter cannot honour. The web surface reports `true` only when `hub.webCards` is on. */
   cards: boolean
   attachments: boolean
   edits: boolean

@@ -351,6 +351,7 @@ export interface HubConfig {
   conversationMirror?: ConversationMirrorConfig  // two-way Discord↔web mirror for migrated channels (default off)
   receipts?: ReceiptsConfig      // outbound receipts for post_card/update_card/attach_file (default off)
   cardPersistence?: CardPersistenceConfig  // card-button routing survives a hub restart (default off)
+  webCards?: WebCardsConfig      // canonical cards + web click→agent interactions (default off)
   federation?: FederationConfig  // inter-hub consult federation over a private network (default off)
 }
 
@@ -482,6 +483,32 @@ export interface CardPersistenceConfig {
    *  today's behaviour. */
   ttlHours?: number
   sweepIntervalMs?: number       // expired-row sweep cadence (default 3600000 = hourly)
+}
+
+/** Interactive cards on the web surface: a canonical card representation the web
+ *  transcript can render and rehydrate, plus an authenticated endpoint that lets a
+ *  web click reach the agent. Absent/disabled ⇒ no card events are published, the
+ *  card + interaction routes 503, and behaviour is byte-identical to today.
+ *
+ *  Discord delivery is NOT governed by this flag in either state — the emit is
+ *  strictly additive alongside the existing legacy card path.
+ *
+ *  NOTE on `identityMap`: every authorisation gate in the hub (base allowlist,
+ *  approvals, deploy approver, approverOnly gated actions) is keyed on a DISCORD
+ *  SNOWFLAKE, but a web caller presents an email (the trusted identity header). This
+ *  map is the ONLY bridge between the two, and it exists so the web path can reuse the
+ *  existing gate functions unchanged rather than growing a parallel rule set that
+ *  drifts. An email with no entry here is rejected outright — fail closed. */
+export interface WebCardsConfig {
+  enabled?: boolean              // master switch (default off)
+  dbFile?: string                // default <stateDir>/webcards.sqlite
+  /** Web identity (trusted-header value, normally an email) → Discord user id.
+   *  Keys are matched case-insensitively after trimming; values must be the exact
+   *  snowflake the Discord gates already use. Unmapped ⇒ rejected. */
+  identityMap?: Record<string, string>
+  /** How many prior revisions of a card to retain for the transcript's history
+   *  disclosure. Default 20; 0 keeps none (latest state only). */
+  maxHistory?: number
 }
 
 /** One step of a workflow: run `agent` with a templated `prompt` ({{input}} and
