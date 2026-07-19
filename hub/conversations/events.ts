@@ -1,4 +1,43 @@
+import type { CardSpec } from "../types"
 import type { Message, MessageState } from "./types"
+
+/** One superseded state of a card, kept so an edit never silently destroys what the card
+ *  said before. Rendered (if at all) as inert history — its buttons must NOT be clickable,
+ *  because only the current revision's buttons are live. */
+export interface CardRevision {
+  revision: number
+  card: CardSpec
+  updatedAt: number
+}
+
+/** A rich card an agent posted into a conversation, surfaced as an interactive card in the
+ *  web transcript.
+ *
+ *  Like AttachmentInfo, this shape is emitted on the LIVE event AND returned by the
+ *  card hydration route, so a card looks identical whether it arrived over SSE or was
+ *  rehydrated on load. Keep the two producers in step — a field added here must be filled
+ *  by both.
+ *
+ *  Unlike an attachment, a card MUTATES: `update_card` re-emits the same `correlationId`
+ *  with a higher `revision`. The transcript keeps ONE card per correlationId showing the
+ *  latest state, anchored at `createdAt` (its first appearance) so an edit never reorders
+ *  history. See the Lane C spec for why latest-in-place beats a message per edit — chiefly
+ *  that a stale revision's buttons would still look clickable. */
+export interface CardInfo {
+  correlationId: string
+  conversationId: string
+  agent: string
+  /** 1 on first post, +1 per edit. */
+  revision: number
+  /** Epoch ms of the FIRST post — the transcript anchor. Never changes across edits. */
+  createdAt: number
+  /** Epoch ms of THIS revision. */
+  updatedAt: number
+  /** Current state. Only these buttons are live. */
+  card: CardSpec
+  /** Prior states, oldest first. Absent when this card has never been edited. */
+  history?: CardRevision[]
+}
 
 /** A document published into a web conversation, surfaced as an inline card in the transcript.
  *
@@ -31,7 +70,7 @@ export interface ToolStepInfo {
 }
 
 export interface ConversationEvent {
-  kind: "message_committed" | "turn_state" | "activity" | "attachment" | "tool_step"
+  kind: "message_committed" | "turn_state" | "activity" | "attachment" | "tool_step" | "card"
   conversationId: string
   sequence: number
   ts: number
@@ -40,6 +79,7 @@ export interface ConversationEvent {
   detail?: Record<string, unknown>
   attachment?: AttachmentInfo
   tool?: ToolStepInfo
+  card?: CardInfo
 }
 
 /** Parse a document's `.sbmd`/mirror-row `createdAt` (ISO) into the epoch ms the transcript
@@ -64,6 +104,15 @@ export function buildAttachmentEvent(conversationId: string, info: AttachmentInf
  *  a tool step must not advance a subscriber's message replay high-water mark. */
 export function buildToolStepEvent(conversationId: string, step: ToolStepInfo, now: number): ConversationEvent {
   return { kind: "tool_step", conversationId, sequence: now, ts: now, tool: step }
+}
+
+/** Build a `card` event. Live-only in the same sense as `attachment` and `tool_step` — the
+ *  monotonic clock doubles as the sequence, `shouldDeliver` never gates on it, and it must
+ *  not advance a subscriber's message replay high-water mark. Reload is served by the card
+ *  hydration route, not by event replay, which is why cards are persisted rather than
+ *  reconstructed from the event stream. */
+export function buildCardEvent(info: CardInfo, now: number): ConversationEvent {
+  return { kind: "card", conversationId: info.conversationId, sequence: now, ts: now, card: info }
 }
 
 /** Longest argument summary we ship to a client — one spine line, ellipsised in CSS

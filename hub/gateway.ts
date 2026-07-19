@@ -216,6 +216,10 @@ export class Gateway {
     this.modalByCustomId.set(customId, spec)
     this.cardStore?.putModal(customId, spec)
   }
+  /** The modal a button opens, if any. Read-only view of the same map the Discord
+   *  `interactionCreate` handler consults, so the web interaction endpoint offers exactly
+   *  the modals Discord would show — one registry, not two. */
+  modalFor(customId: string): CardModal | undefined { return this.modalByCustomId.get(customId) }
   unregisterModals(customIds: string[]): void {
     for (const id of customIds) this.modalByCustomId.delete(id)
     this.cardStore?.deleteModals(customIds)

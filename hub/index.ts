@@ -33,8 +33,12 @@ import { CardRegistry } from "./cardRegistry"
 import { SqliteCardStore } from "./cardStore"
 import { routeCardInteraction } from "./cardRouting"
 import { CardLifecycle } from "./cardLifecycle"
-import { matchGatedAction, requiresApprover } from "./gatedActions"
-import { isDeployAuthorized } from "./deployGate"
+import { matchGatedAction } from "./gatedActions"
+import { cardGateAllows, type CardGatePolicy } from "./cardGate"
+import { SqliteWebCardStore } from "./webCardStore"
+import { buildIdentityMap } from "./webIdentity"
+import { handleWebInteraction } from "./webInteraction"
+import type { CardInfo } from "./conversations/events"
 import { clearReactionAgent, resolvePinnedAgent } from "./channelPin"
 import { MessageCache } from "./messageCache"
 import { enrich, foldQuote, foldAttachments, foldForward } from "./enrich"
@@ -89,7 +93,7 @@ import { DocumentsDb, publishDocument, uploadDocument, setVisibility, deleteDocu
 import { runDocumentsMigrations } from "./documentsMigrations"
 import { createHash, randomBytes, randomUUID } from "crypto"
 import { Database } from "bun:sqlite"
-import { ConversationEventStream, ConversationService, createDiscordConversationMigrator, inboundLinkRoute, LegacyDiscordCompatibilityRouter, ProductionIngressGate, SqliteConversationRepository, TurnCoordinator, buildAttachmentEvent, buildToolStepEvent, summariseToolInput, attachmentCreatedAt } from "./conversations"
+import { ConversationEventStream, ConversationService, createDiscordConversationMigrator, inboundLinkRoute, LegacyDiscordCompatibilityRouter, ProductionIngressGate, SqliteConversationRepository, TurnCoordinator, buildAttachmentEvent, buildToolStepEvent, buildCardEvent, summariseToolInput, attachmentCreatedAt } from "./conversations"
 import { DeliveryWorker, DiscordAdapter, SurfaceRouter } from "./surfaces"
 import { createAsyncShutdown } from "./shutdown"
 import { MemoryBrowse } from "./memoryBrowse"
@@ -190,6 +194,9 @@ let resolveLegacyDiscordChatId = (chatId: string): string | null => chatId
 // Two-way Discord↔web mirror (default off ⇒ both hooks are inert no-ops).
 const conversationMirrorEnabled = hub.conversationMirror?.enabled === true
 let mirrorRichReplyToWeb = (_reply: AgentReply, _card: CardSpec): void => {}
+// Lane C: persist a card canonically and publish its live `card` event. Assigned below once
+// the conversation subsystem exists; a no-op until then and whenever the flag is off.
+let publishCanonicalCard = (_reply: AgentReply, _card: CardSpec): void => {}
 /** Distinguish successive revisions of the same card so each edit mirrors as its own
  *  web message, while an identical re-send still dedupes on the canonical client key. */
 const cardRevision = (card: CardSpec): string =>
@@ -198,11 +205,15 @@ const deployApprover = hub.deployApproverUserId ?? ""
 // Approval buttons are pressable only by configured approvers (default: the
 // deploy approver); everything else keeps the existing deploy/gated-action gate.
 const approvalApprovers = hub.approvals?.approvers ?? (deployApprover ? [deployApprover] : [])
-if (discordGateway) gateway.setNotifyButtonGate((customId, userId) => {
-  if (customId.startsWith("approval:")) return approvalApprovers.includes(userId)
-  return isDeployAuthorized(customId, userId, deployApprover) &&
-    (requiresApprover(customId, hub.gatedActions ?? []) ? !!deployApprover && userId === deployApprover : true)
-})
+// The per-namespace ladder now lives in hub/cardGate.ts so the web interaction endpoint runs
+// the SAME function rather than a second copy of these rules. Behaviour here is unchanged.
+const cardGatePolicy: CardGatePolicy = {
+  deployApproverUserId: deployApprover,
+  approvalApprovers,
+  gatedActions: hub.gatedActions ?? [],
+}
+if (discordGateway) gateway.setNotifyButtonGate((customId, userId) =>
+  cardGateAllows(customId, userId, cardGatePolicy))
 const routerRunner = makeRouterRunner()
 const spawner = makeBunProcessSpawner()
 
@@ -249,6 +260,22 @@ const cardStore = cardPersistOn
     })()
   : null
 const notifyRouter = new NotifyRouter(cardStore)
+
+// Lane C — interactive cards on the web. A canonical, persisted card record so the web
+// transcript can render cards and they survive a reload, plus the identity map that lets a
+// web click run the EXISTING Discord gates. Off ⇒ no store is opened, no card event is ever
+// published, and the routes 503: byte-identical to today.
+// Its own DB file (not the cards.sqlite cache above) because that store is TTL-swept and
+// droppable at will, and transcript content cannot be.
+const webCardsCfg = hub.webCards
+const webCardsOn = webCardsCfg?.enabled === true
+const webCardStore = webCardsOn
+  ? (() => {
+      const db = new Database(webCardsCfg?.dbFile ?? join(hub.stateDir, "webcards.sqlite"), { create: true })
+      return new SqliteWebCardStore(db, webCardsCfg?.maxHistory ?? 20)
+    })()
+  : null
+const webIdentityMap = buildIdentityMap(webCardsOn ? webCardsCfg?.identityMap : undefined)
 
 // key → live transport (persistent agent name, or jobId for spawned workers).
 type ProcessAgentTransport = StreamJsonTransport | CodexAppServerTransport
@@ -1237,18 +1264,23 @@ async function onAgentReply(reply: AgentReply, key: string): Promise<void | Send
     audit.record({ kind: "event", actor: `agent:${reply.agent}`, action: "legacy_discord_rich_unroutable", chat: reply.chatId, outcome: "deny", detail: { kind: reply.kind } })
     // A card on a canonical conversation with no Discord link is otherwise dropped
     // outright; with the mirror on it still reaches the web surface.
-    if (canonicalReply.card) mirrorRichReplyToWeb(canonicalReply, canonicalReply.card)
+    if (canonicalReply.card) {
+      mirrorRichReplyToWeb(canonicalReply, canonicalReply.card)
+      publishCanonicalCard(canonicalReply, canonicalReply.card)
+    }
     return
   }
   if (legacyChatId !== reply.chatId) reply = { ...reply, chatId: legacyChatId }
   if (reply.kind === "card" && reply.card) {
     trace.record({ agent: reply.agent, chat: reply.chatId, kind: "card", text: cardTraceText(reply.card) })
     mirrorRichReplyToWeb(canonicalReply, reply.card)
+    publishCanonicalCard(canonicalReply, reply.card)
     return await cardLifecycle.onCard(reply, key)
   }
   if (reply.kind === "update" && reply.card && reply.correlationId) {
     trace.record({ agent: reply.agent, chat: reply.chatId, kind: "update", text: cardTraceText(reply.card) })
     mirrorRichReplyToWeb(canonicalReply, reply.card)
+    publishCanonicalCard(canonicalReply, reply.card)
     return await cardLifecycle.onUpdate(reply.correlationId, reply.chatId, reply.card, key)
   }
   if (reply.kind === "reply" && reply.text) {
@@ -2427,6 +2459,30 @@ mirrorRichReplyToWeb = (reply, card) => {
     }, [])
   } catch (error) { process.stderr.write(`conversation mirror: card persist failed: ${error}\n`) }
 }
+// Lane C: the canonical card path. Persist the card (so a reload can rehydrate it) and
+// publish the live `card` event. Strictly additive — it sits alongside the existing
+// mirror and the legacy Discord card path, neither of which it touches, so Discord
+// delivery is unchanged whether this runs or not.
+//
+// Keyed by correlationId: `update_card` re-emits the same id, and the store turns that into
+// revision N+1 of ONE card rather than a second card. A card with no correlationId cannot be
+// identified across edits, so it is skipped rather than stored under a synthetic id that a
+// later edit could never match.
+publishCanonicalCard = (reply, card) => {
+  if (!webCardStore) return
+  const correlationId = reply.correlationId
+  if (!correlationId) return
+  if (!conversationRepo.getConversation(reply.chatId)) return
+  try {
+    const info = webCardStore.record({
+      correlationId, conversationId: reply.chatId, agent: reply.agent, card,
+    })
+    if (info) conversationEvents.publish(buildCardEvent(info, Date.now()))
+  } catch (error) {
+    process.stderr.write(`web cards: publish failed: ${error}\n`)
+  }
+}
+
 turnCoordinator = new TurnCoordinator(
   conversationService,
   conversationRepo,
@@ -2655,6 +2711,34 @@ const webDeps: WebDeps = {
   // Phase 1 web-UI gate: the transcript's tool execution spine only receives (and
   // only renders) tool steps when tool observability + this sub-key are both on.
   turnStepsEnabled: () => turnStepsOn,
+  // Lane C. Both routes are inert unless the flag is on.
+  webCardsEnabled: () => webCardsOn,
+  ...(webCardStore ? {
+    // Reload path for the transcript's interactive cards. Membership is asserted through the
+    // conversation service (the same check /messages and /links apply) BEFORE any card row is
+    // read, so a non-participant cannot enumerate another conversation's cards.
+    listConversationCards: (identity: string, conversationId: string): CardInfo[] => {
+      conversationService.get(identity, conversationId)
+      return webCardStore.listByConversation(conversationId)
+    },
+    // A web card click. Membership first (you must be in the conversation at all), then
+    // hub/webInteraction.ts resolves identity → snowflake and runs the EXISTING gates.
+    submitCardInteraction: (identity: string, conversationId: string, input: { customId: string; fields?: Record<string, string> }) => {
+      conversationService.get(identity, conversationId)
+      return handleWebInteraction(identity, input.customId, input.fields, {
+        enabled: webCardsOn,
+        identityMap: webIdentityMap,
+        listAllowed: () => baseGate.listAllowed(),
+        policy: cardGatePolicy,
+        gatedActions: hub.gatedActions ?? [],
+        modalFor: (customId) => gateway.modalFor(customId),
+        resolveApproval: (id, decision, userId) => { void resolveApproval(id, decision, userId) },
+        parseApproval: (customId) => parseApprovalCustomId(customId),
+        runGated: (action, customId) => { void cardLifecycle.runGated(action, customId) },
+        route: (customId, userId, fields) => routeInteraction(customId, userId, fields),
+      })
+    },
+  } : {}),
 }
 const webServer = startWebServer(hub.webPort ?? 0, webDeps, hub.webHost)
 if (webServer) console.error(`switchboard hub: web dashboard on ${hub.webHost ?? "127.0.0.1"}:${hub.webPort}`)

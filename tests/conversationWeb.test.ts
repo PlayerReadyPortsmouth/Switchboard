@@ -5,6 +5,7 @@ import { ConversationForbiddenError, ConversationService, ConversationValidation
 import { SqliteConversationRepository } from "../hub/conversations/sqliteRepository"
 import { RepositoryConflictError, RepositoryNotFoundError } from "../hub/conversations/repository"
 import type { ConversationEvent } from "../hub/conversations/events"
+import type { WebInteractionResult } from "../hub/webInteraction"
 import type { Conversation, Message, TransportLink } from "../hub/conversations/types"
 import { AgentOperationsError } from "../hub/operations/agentService"
 
@@ -42,7 +43,7 @@ test("workspace session uses the configured trusted header and exposes status-sa
     ], overseers: [], routes: [], routeRate10m: 0, ephemerals: [] }, audit: { total: 0, byKind: {}, byOutcome: {}, costUsd: 0, actors: 0 }, recent: [], pendingApprovals: 0, pendingApprovalList: [] }),
   }))
   expect(response.status).toBe(200)
-  expect(await response.json()).toEqual({ identity: "ada@example.com", agents: [{ name: "qa", alive: true, busy: false }], features: { agents: true, documents: false, turnSteps: false }, permissions: { agents: "operator" } })
+  expect(await response.json()).toEqual({ identity: "ada@example.com", agents: [{ name: "qa", alive: true, busy: false }], features: { agents: true, documents: false, turnSteps: false, cards: false }, permissions: { agents: "operator" } })
   expect((await handleWebRequest(new Request("http://x/api/session"), deps())).status).toBe(400)
 })
 
@@ -52,9 +53,9 @@ test("workspace session reports the UI feature gates, defaulting both off when u
     return (await response.json() as { features: Record<string, boolean> }).features
   }
   // No gate dependency supplied at all ⇒ off, exactly as before the feature existed.
-  expect(await session()).toEqual({ agents: true, documents: false, turnSteps: false })
-  expect(await session({ turnStepsEnabled: () => false })).toEqual({ agents: true, documents: false, turnSteps: false })
-  expect(await session({ turnStepsEnabled: () => true })).toEqual({ agents: true, documents: false, turnSteps: true })
+  expect(await session()).toEqual({ agents: true, documents: false, turnSteps: false, cards: false })
+  expect(await session({ turnStepsEnabled: () => false })).toEqual({ agents: true, documents: false, turnSteps: false, cards: false })
+  expect(await session({ turnStepsEnabled: () => true })).toEqual({ agents: true, documents: false, turnSteps: true, cards: false })
 })
 
 test("PATCH conversation validates input and dispatches an owner update", async () => {
@@ -214,4 +215,98 @@ test("message HTTP replies are committed only within their conversation", async 
   expect(whitespace.status).toBe(400)
   expect(trimmed.status).toBe(201)
   expect((await trimmed.json()).replyTo).toBe(parent.id)
+})
+
+// ---------------------------------------------------------------------------
+// Lane C: canonical cards + the web interaction endpoint (hub.webCards).
+// ---------------------------------------------------------------------------
+
+const cardInfo = {
+  correlationId: "corr-1", conversationId: "c/1", agent: "triage", revision: 2,
+  createdAt: 10, updatedAt: 20,
+  card: { title: "Ticket 7", body: "✅ Deployed to live.", buttons: [] },
+  history: [{ revision: 1, card: { title: "Ticket 7", body: "🚀 Fix ready…", buttons: [{ customId: "deploy:go:7", label: "Deploy" }] }, updatedAt: 10 }],
+}
+
+test("card routes are inert with the flag off — byte-identical to before the feature", async () => {
+  // Wired but disabled, and unwired entirely: both must 503 and neither may call through.
+  let touched = 0
+  const disabled = deps({
+    webCardsEnabled: () => false,
+    listConversationCards: () => { touched++; return [] },
+    submitCardInteraction: () => { touched++; return { status: "ok" as const } },
+  })
+  expect((await handleWebRequest(req("/api/conversations/c%2F1/cards"), disabled)).status).toBe(503)
+  expect((await handleWebRequest(req("/api/conversations/c%2F1/interactions", "POST", { customId: "x:y:z" }), disabled)).status).toBe(503)
+  expect(touched).toBe(0)
+
+  const unwired = deps()
+  expect((await handleWebRequest(req("/api/conversations/c%2F1/cards"), unwired)).status).toBe(503)
+  expect((await handleWebRequest(req("/api/conversations/c%2F1/interactions", "POST", { customId: "x:y:z" }), unwired)).status).toBe(503)
+})
+
+test("card routes require the identity header", async () => {
+  const on = deps({ webCardsEnabled: () => true, listConversationCards: () => [cardInfo], submitCardInteraction: () => ({ status: "ok" }) })
+  expect((await handleWebRequest(new Request("http://x/api/conversations/c1/cards"), on)).status).toBe(400)
+  expect((await handleWebRequest(new Request("http://x/api/conversations/c1/interactions", { method: "POST" }), on)).status).toBe(400)
+})
+
+test("card hydration returns the stored cards for the caller's conversation", async () => {
+  const seen: string[] = []
+  const on = deps({
+    webCardsEnabled: () => true,
+    listConversationCards: (identity, conversationId) => { seen.push(identity, conversationId); return [cardInfo] },
+  })
+  const response = await handleWebRequest(req("/api/conversations/c%2F1/cards"), on)
+  expect(response.status).toBe(200)
+  expect(await response.json()).toEqual([cardInfo])
+  expect(seen).toEqual(["owner@example.com", "c/1"])
+})
+
+test("interaction results map onto the documented HTTP envelope", async () => {
+  const cases: [WebInteractionResult, number, unknown][] = [
+    [{ status: "ok" }, 200, { status: "ok" }],
+    [{ status: "handled", action: "approval" }, 200, { status: "handled", action: "approval" }],
+    [{ status: "modal", modal: { title: "Note", inputs: [] } }, 200, { status: "modal", modal: { title: "Note", inputs: [] } }],
+    [{ status: "unroutable", reason: "agent gone" }, 409, { error: "unroutable", reason: "agent gone" }],
+    [{ status: "denied", error: "unmapped_identity", reason: "no link" }, 403, { error: "unmapped_identity", reason: "no link" }],
+    [{ status: "denied", error: "not_allowlisted", reason: "nope" }, 403, { error: "not_allowlisted", reason: "nope" }],
+    [{ status: "denied", error: "forbidden_action", reason: "nope" }, 403, { error: "forbidden_action", reason: "nope" }],
+  ]
+  for (const [result, status, body] of cases) {
+    const response = await handleWebRequest(
+      req("/api/conversations/c1/interactions", "POST", { customId: "ticket:ack:7" }),
+      deps({ webCardsEnabled: () => true, submitCardInteraction: () => result }))
+    expect(response.status).toBe(status)
+    expect(await response.json()).toEqual(body)
+  }
+})
+
+test("interaction rejects a malformed body before any gate or agent is reached", async () => {
+  let calls = 0
+  const on = deps({ webCardsEnabled: () => true, submitCardInteraction: () => { calls++; return { status: "ok" } } })
+  const bad = [
+    {}, { customId: "" }, { customId: "   " }, { customId: 7 },
+    { customId: "a:b:c", fields: "no" }, { customId: "a:b:c", fields: [] },
+    { customId: "a:b:c", fields: { note: 7 } },       // non-string value would corrupt the frame
+    { customId: "a:b:c", fields: { note: { nested: 1 } } },
+  ]
+  for (const body of bad) {
+    expect((await handleWebRequest(req("/api/conversations/c1/interactions", "POST", body), on)).status).toBe(400)
+  }
+  expect(calls).toBe(0)
+  // …and a well-formed one passes its fields straight through.
+  const seen: unknown[] = []
+  const ok = deps({ webCardsEnabled: () => true, submitCardInteraction: (identity, id, input) => { seen.push(identity, id, input); return { status: "ok" } } })
+  expect((await handleWebRequest(req("/api/conversations/c1/interactions", "POST", { customId: " ticket:ack:7 ", fields: { note: "hi" } }), ok)).status).toBe(200)
+  expect(seen).toEqual(["owner@example.com", "c1", { customId: "ticket:ack:7", fields: { note: "hi" } }])
+})
+
+test("the session feature flag reports card capability honestly", async () => {
+  const features = async (enabled: boolean) => {
+    const response = await handleWebRequest(req("/api/session"), deps({ webCardsEnabled: () => enabled }))
+    return (await response.json() as { features: Record<string, boolean> }).features.cards
+  }
+  expect(await features(false)).toBe(false)
+  expect(await features(true)).toBe(true)
 })
