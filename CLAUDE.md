@@ -19,19 +19,31 @@ bun run scripts/pair.ts <code>        # approve a DM pairing code
 ```
 
 - No build step: TypeScript run directly by Bun, ESM (`"type": "module"`).
-- **Windows dev box gotcha:** `bun test` has exactly **1 known failure** here —
-  `tests/config.test.ts` "expandHome resolves a leading ~" assumes POSIX paths. 678 pass /
-  1 fail is the green baseline on Windows; fully green on Linux (where prod runs). Any other
-  failure is yours. Scary stderr lines like "qdrant down" / "disk full" are intentional
-  failure-injection tests, not problems.
+- **Windows dev box gotcha:** `bun test` has **5 known failures** here, all in
+  `hub/documents.test.ts` — that file's fake IO hardcodes `/` as the path separator, so its
+  simulated `rename` silently no-ops on Windows and later assertions read `undefined`. Proven
+  environment-only: the same commit runs that file 7/7 green on the Linux box. Those 5 are the
+  green baseline on Windows; fully green on Linux (where prod runs). Any other failure is yours.
+  (An older `tests/config.test.ts` "expandHome" failure was documented here for a long time
+  after it stopped occurring — it now passes. Don't hunt for it.)
+  Measure the baseline on a clean tree first and **diff failure sets by name**, not by count —
+  trusting the count is exactly how the stale entry above survived so long.
+  Scary stderr lines like "qdrant down" / "disk full" are intentional failure-injection tests,
+  not problems.
 - Production hub runs live as a Discord bot on a Linux VPS (Unix domain socket for the shim),
   so runtime behaviour must be Linux-correct; Windows is fine for tests/typecheck.
 
 ## Config & secrets
 
-- `config/hub.config.json` — tracked, the real hub config. `config/agents.json` — git-ignored
-  agent registry; copy from `config/agents.example.json` before first run or boot throws.
-  `SWITCHBOARD_CONFIG` env var overrides the config dir.
+- `config/hub.config.json` — tracked, the real hub config **locally**. `config/agents.json` —
+  git-ignored agent registry; copy from `config/agents.example.json` before first run or boot
+  throws. `SWITCHBOARD_CONFIG` env var overrides the config dir.
+- **In production that override is set, and it catches people out.** The live launcher
+  (`~/.switchboard/run-hub.sh`) sets `SWITCHBOARD_CONFIG=/srv/ready-switchboard/config`, so the
+  hub reads `/srv/ready-switchboard/config/hub.config.json` — a hand-managed, **non-git**
+  directory with dated `.bak-<label>-<date>` files. The `config/` inside the deployed repo at
+  `/srv/switchboard` is a template the running hub never loads: editing it changes nothing.
+  Edit the live file, snapshot it first, and validate the JSON parses before restarting.
 - Secrets never live in config — config holds **env-var names** (`secretEnv`, `botTokenEnv`);
   values go in `<stateDir>/.env` (default `~/.switchboard/.env`).
 - **Every key documented:** [`docs/config-reference.md`](docs/config-reference.md) — config
@@ -89,6 +101,19 @@ section before touching a subsystem.
 - Agents run `--dangerously-skip-permissions`; the safety model is config gates + audit +
   approvals, not tool permissions. Treat `consultableBy`/`peerableBy` as data-flow grants.
 - `hub/turnGate.ts` is a concurrency gate, not a permission gate.
+- **`bun run build:web` needs `SWITCHBOARD_WEB_BASE` in production, and fails silently without
+  it.** The SPA is served at `readyapp.player-ready.co.uk/switchboard/`, so it must be built as
+  `SWITCHBOARD_WEB_BASE=/switchboard bun run build:web`. Unset, the base defaults to `/` and
+  assets emit as `/chunk-*.js`; those fall through the reverse proxy's catch-all to **ReadyApp's**
+  bundle, and the page renders blank with no error anywhere. Verify after every build:
+  `grep -oE 'src="[^"]+"' dist/web/index.html` must show `/switchboard/chunk-*.js`, and the
+  manifest must carry `"scope": "/switchboard/"`. The launcher runs `hub/index.ts` directly and
+  does **not** build, so assets must be rebuilt explicitly after every code deploy.
+- Web-only changes need a rebuild but **not** a restart — `createBuiltWorkspaceAssets` reads from
+  disk per request, so no process bounce and no disruption to in-flight agent turns.
+- Probing the hub directly with the `/switchboard` prefix (e.g. `127.0.0.1:8080/switchboard/chunk-*.js`)
+  returns 503 `workspace_not_built`. That is **correct** — the proxy strips the prefix before
+  forwarding, so the hub serves assets unprefixed. Two separate deploys mistook this for a fault.
 
 ## How to work in this repo
 
@@ -102,8 +127,8 @@ Shared engineering practice lives in `~/Documents/Ready/ready-docs/engineering/`
 
 **Repo-specific:**
 
-- **Verification here:** `bun run typecheck` + `bun test` (expect only the one known Windows
-  failure — see Commands). For transport/shim changes also run
+- **Verification here:** `bun run typecheck` + `bun test` (expect only the 5 known Windows
+  failures — see Commands). For transport/shim changes also run
   `bun run scripts/smoke-streamjson.ts` against a real `claude` (hardcodes a `/tmp` Unix
   socket — run it on the Linux box, not Windows).
 - For Codex transport changes also run `bun run scripts/smoke-codex-app-server.ts`; it uses
