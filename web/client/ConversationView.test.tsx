@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, waitFor, within } from "@testing-libra
 import userEvent from "@testing-library/user-event"
 import { ConversationView, type ConversationViewApi } from "./App"
 import { DraftStore } from "./drafts"
-import type { Conversation, ConversationEvent, Message, Session, TransportLink } from "./types"
+import type { Conversation, ConversationEvent, DocumentAttachment, Message, Session, TransportLink } from "./types"
 
 const screen = within(document.body)
 const conversation: Conversation = {
@@ -329,5 +329,76 @@ describe("canonical conversation view", () => {
   test("does not group adjacent replies", () => {
     render(<ConversationView api={api()} conversation={conversation} messages={[message(), message({ id: "m2", sequence: 2, replyTo: "m1", createdAt: 1_700_000_001_000 })]} />)
     expect(screen.getAllByRole("article")[1].getAttribute("data-grouped")).toBe("false")
+  })
+})
+
+describe("transcript attachments", () => {
+  const attachment = (overrides: Partial<DocumentAttachment> = {}): DocumentAttachment => ({
+    token: "tok-1", title: "sprint-notes.md", contentType: "text/markdown", mode: "view", visibility: "org", ...overrides,
+  })
+
+  test("renders one labelled group holding a card per attachment", () => {
+    render(<ConversationView
+      api={api()}
+      conversation={conversation}
+      messages={[message()]}
+      attachments={[attachment(), attachment({ token: "tok-2", title: "budget.csv", contentType: "text/csv", visibility: "private" })]}
+    />)
+    const group = screen.getByRole("region", { name: "2 documents shared" })
+    const cards = within(group).getAllByRole("article")
+    expect(cards).toHaveLength(2)
+    expect(within(cards[0]).getByText("sprint-notes.md")).toBeTruthy()
+    expect(within(cards[0]).getByText("MD")).toBeTruthy()
+    expect(within(cards[1]).getByText("budget.csv")).toBeTruthy()
+    expect(within(cards[1]).getByText("CSV")).toBeTruthy()
+  })
+
+  test("labels a single attachment in the singular", () => {
+    render(<ConversationView api={api()} conversation={conversation} messages={[message()]} attachments={[attachment()]} />)
+    expect(screen.getByRole("region", { name: "1 document shared" })).toBeTruthy()
+  })
+
+  test("shows each attachment's visibility with the Documents workspace's vocabulary", () => {
+    render(<ConversationView
+      api={api()}
+      conversation={conversation}
+      messages={[message()]}
+      attachments={[attachment({ visibility: "org" }), attachment({ token: "tok-2", visibility: "private" })]}
+    />)
+    const chips = Array.from(document.querySelectorAll(".document-visibility"))
+    expect(chips.map(chip => chip.textContent)).toEqual(["org", "private"])
+    expect(chips.map(chip => chip.getAttribute("data-visibility"))).toEqual(["org", "private"])
+  })
+
+  test("clicking a card opens the document in page rather than navigating away", async () => {
+    const user = userEvent.setup()
+    const opened: string[] = []
+    render(<ConversationView
+      api={api()}
+      conversation={conversation}
+      messages={[message()]}
+      attachments={[attachment(), attachment({ token: "tok-2", title: "budget.csv" })]}
+      onOpenDocument={token => opened.push(token)}
+    />)
+    const group = screen.getByRole("region", { name: "2 documents shared" })
+    expect(within(group).queryByRole("link")).toBeNull()
+    await user.click(within(group).getByRole("button", { name: /budget\.csv/ }))
+    expect(opened).toEqual(["tok-2"])
+  })
+
+  test("without an in-page opener the cards degrade to /share links", () => {
+    render(<ConversationView api={api()} conversation={conversation} messages={[message()]} attachments={[attachment()]} />)
+    const group = screen.getByRole("region", { name: "1 document shared" })
+    expect((within(group).getByRole("link") as HTMLAnchorElement).getAttribute("href")).toBe("/share/tok-1")
+  })
+
+  test("an image attachment previews inline from the documents content endpoint", () => {
+    render(<ConversationView
+      api={api({ documentContentUrl: token => `/api/documents/${token}/content` })}
+      conversation={conversation}
+      messages={[message()]}
+      attachments={[attachment({ token: "tok-img", title: "screenshot.png", contentType: "image/png" })]}
+    />)
+    expect(document.querySelector("img.document-card-thumb")?.getAttribute("src")).toBe("/api/documents/tok-img/content")
   })
 })

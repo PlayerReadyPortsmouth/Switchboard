@@ -546,3 +546,51 @@ dialog input, dialog select { min-height: 44px; width: 100%; padding: 0 11px; bo
 .transcript-pane > .composer-shell { grid-row: 3; grid-column: 1; }
 .jump-to-latest { grid-row: 2; grid-column: 1; align-self: end; justify-self: center; z-index: 2; min-height: 36px; margin-bottom: 16px; padding: 0 14px; border: 1px solid var(--accent); background: var(--ink-1); color: var(--text); font-size: .74rem; cursor: pointer; }
 .jump-to-latest:hover { background: var(--ink-2); }
+
+/* --- Transcript attachment cards ----------------------------------------------
+   Documents published into a conversation, shown inline at the end of the record.
+   Unlike the turn-steps spine and the message stream — both deliberately flat —
+   an attachment is an artifact you pick up, so it gets a real surface: --ink-1
+   over the transcript's --ink-0, a hairline border and a small radius. The whole
+   card is the hit target (>=60px, comfortably past the 44px thumb minimum), and
+   the accent is spent only on the hover/focus edge and the org chip, so a stack
+   of them never out-shouts the conversation it belongs to.
+   Appended as its own block. */
+.transcript-attachments { margin: 26px 0 4px; }
+.transcript-attachments .eyebrow { margin-bottom: 9px; }
+.transcript-attachment-list { list-style: none; display: grid; grid-template-columns: repeat(auto-fill, minmax(268px, 1fr)); gap: 8px; margin: 0; padding: 0; }
+.transcript-attachment-list > li { min-width: 0; display: grid; }
+
+.document-card { border: 1px solid var(--line); border-radius: 8px; background: var(--ink-1); }
+.document-card-open {
+  display: grid; grid-template-columns: 38px minmax(0, 1fr) auto; align-items: center; gap: 12px;
+  width: 100%; min-height: 60px; padding: 11px 13px; border: 0; border-radius: 7px;
+  background: transparent; color: inherit; font: inherit; text-align: left; text-decoration: none;
+  cursor: pointer; transition: background 120ms ease;
+}
+.document-card:hover, .document-card:focus-within { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); }
+.document-card:hover .document-card-open, .document-card:focus-within .document-card-open { background: var(--ink-2); }
+
+.document-card-badge {
+  display: grid; place-items: center; width: 38px; height: 38px;
+  border: 1px solid var(--line); border-radius: 6px; background: var(--ink-2); color: var(--muted);
+  font: 600 .6rem/1 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: .06em;
+  transition: color 120ms ease, border-color 120ms ease;
+}
+.document-card:hover .document-card-badge, .document-card:focus-within .document-card-badge { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+.document-card-thumb { width: 38px; height: 38px; border: 1px solid var(--line); border-radius: 6px; background: var(--ink-2); object-fit: cover; }
+
+.document-card-copy { min-width: 0; display: grid; gap: 4px; }
+.document-card-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-size: .87rem; font-weight: 500; }
+.document-card-meta:empty { display: none; }
+.document-card-meta { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font: .64rem/1.3 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.document-card .document-visibility { align-self: center; }
+
+@media (max-width: 767px) {
+  .transcript-attachments { margin-top: 22px; }
+  .document-card-open { gap: 10px; padding: 10px 11px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .document-card-open, .document-card-badge { transition: none; }
+}

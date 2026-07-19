@@ -21,6 +21,25 @@ export const KIND_GLYPH: Record<DocumentKind, string> = {
   markdown: "▤", image: "▣", pdf: "▦", csv: "▥", text: "≡", binary: "◆",
 }
 
+/** Content types whose subtype makes a poor badge ("MARK", "PLAI", "OCTE"). Everything else
+ *  reads fine truncated, so only the offenders are listed. */
+const SUBTYPE_BADGE: Record<string, string> = {
+  markdown: "MD", plain: "TXT", jpeg: "JPG", "octet-stream": "BIN", javascript: "JS", typescript: "TS",
+}
+
+/** Short mono type badge — the file's extension when there is one, otherwise the content-type
+ *  subtype. Capped at four characters so the badge box never reflows between rows. Callers
+ *  without a real filename can pass the title: published documents are usually named for the
+ *  file they came from, so `notes.md` still resolves to `MD`. */
+export function documentBadge(contentType: string, filename: string): string {
+  // Must start with a letter, so a version-suffixed title like "plan v1.2" falls through to
+  // the content type rather than badging itself "2".
+  const extension = /\.([a-z][a-z0-9]{0,7})$/i.exec(filename.trim())?.[1]
+  if (extension) return extension.slice(0, 4).toUpperCase()
+  const subtype = contentType.toLowerCase().split(";")[0].split("/")[1]?.replace(/^x-/, "").replace(/\+.*$/, "") ?? ""
+  return (SUBTYPE_BADGE[subtype] ?? subtype.slice(0, 4) ?? "").toUpperCase() || "FILE"
+}
+
 export const formatSize = (bytes: number): string => {
   if (bytes < 1024) return `${bytes} B`
   const kb = bytes / 1024

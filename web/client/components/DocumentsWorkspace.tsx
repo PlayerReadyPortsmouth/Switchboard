@@ -41,6 +41,7 @@ export function DocumentsWorkspace({ api, session, routeToken, connection, insta
   const generation = useRef(0)
   const rows = useRef(new Map<string, HTMLButtonElement>())
   const restoreFocus = useRef<string | null>(null)
+  const scopeProbed = useRef<string | null>(null)
   const viewerCloseRef = useRef<HTMLButtonElement>(null)
 
   useEffect(() => { setActiveToken(routeToken ?? null) }, [routeToken])
@@ -116,6 +117,18 @@ export function DocumentsWorkspace({ api, session, routeToken, connection, insta
   useLayoutEffect(() => {
     if (layout !== "desktop" && activeToken) viewerCloseRef.current?.focus()
   }, [activeToken, layout])
+
+  // A deep link (from a transcript attachment card, or a pasted URL) can name a document that
+  // is not in the default "mine" scope — anything an agent published, or a colleague's org-wide
+  // file. Probe the org shelf once per token before giving up, so following an attachment lands
+  // on the document instead of an empty viewer.
+  useEffect(() => {
+    if (loading || loadError || !activeToken) return
+    if (documents.some(item => item.token === activeToken)) { scopeProbed.current = null; return }
+    if (scope === "org" || scopeProbed.current === activeToken) return
+    scopeProbed.current = activeToken
+    setScope("org")
+  }, [activeToken, documents, loadError, loading, scope])
 
   const selected = documents.find(item => item.token === activeToken) ?? null
   const changeScope = (next: Scope) => { if (next === scope) return; setScope(next); select(null) }

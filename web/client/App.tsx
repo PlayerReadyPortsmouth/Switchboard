@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState, type FormEvent, type Ref } from "react"
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useReducer, useRef, useState, type FormEvent, type Ref } from "react"
 import { ApiError, WorkspaceApi } from "./api"
 import { ConversationStream } from "./conversationStream"
 import { AgentStream } from "./agentStream"
@@ -48,6 +48,8 @@ export interface ConversationViewApi {
   postMessage?(conversationId: string, input: PostMessageInput): Promise<Message>
   updateConversation?(conversationId: string, input: ConversationUpdate): Promise<Conversation>
   listLinks?(conversationId: string): Promise<TransportLink[]>
+  /** Only used for the inline image previews on transcript attachment cards. */
+  documentContentUrl?(token: string): string
 }
 
 interface AppProps {
@@ -63,7 +65,7 @@ interface ConversationWorkspaceProps extends AppProps {
   session?: Session | null
   controllerState?: PwaState
   onSessionLoaded?(session: Session): void
-  onNavigateDestination?(destination: "conversations" | "agents" | "documents"): void
+  onNavigateDestination?(destination: "conversations" | "agents" | "documents", token?: string | null): void
 }
 
 type LoadState = "loading" | "ready" | "forbidden" | "unavailable"
@@ -103,7 +105,7 @@ export function createWorkspaceStream(api: AppApi): ConversationStream {
   }, webBase)
 }
 
-export function ConversationView({ api, conversation: suppliedConversation, messages, activity = [], attachments = [], toolSteps = [], drafts: suppliedDrafts, session: suppliedSession, links: suppliedLinks, inspectorOpen = true, composerRef, inspectorCloseRef, onOpenInspector, onCloseInspector = () => {}, onInspectorEscape, onArchive, onCanonicalMessage, onConversationUpdated }: {
+export function ConversationView({ api, conversation: suppliedConversation, messages, activity = [], attachments = [], toolSteps = [], drafts: suppliedDrafts, session: suppliedSession, links: suppliedLinks, inspectorOpen = true, composerRef, inspectorCloseRef, onOpenInspector, onCloseInspector = () => {}, onInspectorEscape, onArchive, onCanonicalMessage, onConversationUpdated, onOpenDocument }: {
   api: ConversationViewApi
   conversation: Conversation
   messages?: Message[]
@@ -122,6 +124,9 @@ export function ConversationView({ api, conversation: suppliedConversation, mess
   onArchive?(): void
   onCanonicalMessage?(message: Message): void
   onConversationUpdated?(conversation: Conversation): void
+  /** Opens an attachment in the Documents viewer without leaving the app. Absent (or the
+   *  documents feature off) leaves the cards as `/share` links. */
+  onOpenDocument?(token: string): void
 }) {
   const draftsRef = useRef<DraftStore | null>(null)
   if (draftsRef.current === null) draftsRef.current = suppliedDrafts ?? new DraftStore()
@@ -148,6 +153,7 @@ export function ConversationView({ api, conversation: suppliedConversation, mess
   }
   const links = suppliedLinks ?? loadedLinks
   const renderedSteps = session.features.turnSteps ? toolSteps : []
+  const attachmentsHeadingId = `attachments-${useId()}`
   // Everything rendered inside the scroll container, so late arrivals below the
   // messages (attachment cards, the turn-steps spine) also re-settle the bottom.
   const transcriptContentKey = `${renderedMessages.length}:${renderedMessages.at(-1)?.id ?? ""}:${attachments.length}:${renderedSteps.length}:${activity.length}`
@@ -255,7 +261,28 @@ export function ConversationView({ api, conversation: suppliedConversation, mess
       </header>
       <div className="transcript-body" ref={scrollRef} data-region="transcript-scroll">
         <Transcript messages={renderedMessages} onReply={setReplyTo} />
-        {attachments.length > 0 ? <ul className="transcript-attachments" aria-label="Shared documents">{attachments.map(attachment => <li key={attachment.token}><DocumentCard token={attachment.token} title={attachment.title} contentType={attachment.contentType} mode={attachment.mode} visibility={attachment.visibility === "org" ? "org" : "private"} viewerIsOwner={false} /></li>)}</ul> : null}
+        {attachments.length > 0 ? (
+          <section className="transcript-attachments" aria-labelledby={attachmentsHeadingId} data-region="transcript-attachments">
+            <p className="eyebrow" id={attachmentsHeadingId}>
+              {attachments.length === 1 ? "1 document shared" : `${attachments.length} documents shared`}
+            </p>
+            <ul className="transcript-attachment-list">
+              {attachments.map(attachment => (
+                <li key={attachment.token}>
+                  <DocumentCard
+                    token={attachment.token}
+                    title={attachment.title}
+                    contentType={attachment.contentType}
+                    mode={attachment.mode}
+                    visibility={attachment.visibility === "org" ? "org" : "private"}
+                    thumbnailUrl={api.documentContentUrl?.(attachment.token)}
+                    {...(onOpenDocument ? { onOpen: onOpenDocument } : {})}
+                  />
+                </li>
+              ))}
+            </ul>
+          </section>
+        ) : null}
         <TurnSteps steps={renderedSteps} events={activity} />
       </div>
       {pinned || !renderedMessages.length ? null : <button type="button" className="jump-to-latest" data-region="jump-to-latest" onClick={() => jumpToLatest()}>Jump to latest</button>}
@@ -524,6 +551,7 @@ export function ConversationWorkspace({ api: suppliedApi, drafts: suppliedDrafts
         onArchive={() => openDialog("archive")}
         onCanonicalMessage={message => dispatch({ type: "messages/received", messages: [message] })}
         onConversationUpdated={updated => dispatch({ type: "conversations/loaded", conversations: state.conversations.map(item => item.id === updated.id ? updated : item) })}
+        onOpenDocument={state.session.features.documents && onNavigateDestination ? token => onNavigateDestination("documents", token) : undefined}
       /> : <>
         <section className="transcript-pane" aria-label="Transcript" data-region="transcript" data-message-count="0"><div className="transcript-empty"><span className="signal-map" aria-hidden="true"><i /></span><h2>Select a conversation</h2><p>Choose a conversation from the list to open its workspace.</p></div></section>
         <Inspector conversation={null} session={state.session} open={false} onClose={closeInspector} />
@@ -645,7 +673,7 @@ export function App({ api: suppliedApi, drafts: suppliedDrafts, install, pwa, st
     </>
   }
 
-  return <ConversationWorkspace api={api} drafts={drafts} install={install} pwa={pwa} controllerState={pwaState} streamFactory={streamFactory} session={session} onSessionLoaded={rememberSession} onNavigateDestination={destination => navigate(destination)} />
+  return <ConversationWorkspace api={api} drafts={drafts} install={install} pwa={pwa} controllerState={pwaState} streamFactory={streamFactory} session={session} onSessionLoaded={rememberSession} onNavigateDestination={(destination, token) => navigate(destination, token ?? null)} />
 }
 
 function PwaIssueBanner({ issue }: { issue: PwaState["issue"] }) {
