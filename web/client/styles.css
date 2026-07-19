@@ -529,3 +529,20 @@ dialog input, dialog select { min-height: 44px; width: 100%; padding: 0 11px; bo
   .document-back { display: block; }
   .document-row-select { min-height: 60px; }
 }
+
+/* --- Jump to latest -----------------------------------------------------------
+   Shown only while the reader has scrolled away from the newest message, so a
+   message arriving mid-read offers a way back instead of yanking the viewport.
+   It shares the transcript body's grid row so it floats over the end of the
+   record without depending on the composer's height. Pinning every row of
+   .transcript-pane explicitly is what makes that safe: the button is a fourth
+   child, and an explicitly placed item is positioned before auto-placement runs,
+   which would otherwise push the body and composer down a row each. The column
+   has to be pinned as well, or the body — sharing row 2 with the button — gets
+   auto-placed into a second, implicit column instead of stacking.
+   Appended as its own block. */
+.transcript-pane > .transcript-header { grid-row: 1; grid-column: 1; }
+.transcript-pane > .transcript-body { grid-row: 2; grid-column: 1; }
+.transcript-pane > .composer-shell { grid-row: 3; grid-column: 1; }
+.jump-to-latest { grid-row: 2; grid-column: 1; align-self: end; justify-self: center; z-index: 2; min-height: 36px; margin-bottom: 16px; padding: 0 14px; border: 1px solid var(--accent); background: var(--ink-1); color: var(--text); font-size: .74rem; cursor: pointer; }
+.jump-to-latest:hover { background: var(--ink-2); }
