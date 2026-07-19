@@ -669,3 +669,117 @@ dialog input, dialog select { min-height: 44px; width: 100%; padding: 0 11px; bo
 @media (prefers-reduced-motion: reduce) {
   .document-card-open, .document-card-badge { transition: none; }
 }
+
+/* --- Interactive agent cards ---------------------------------------------------
+   A card is a CONTROL SURFACE, not a log line, so it reads as a distinct object the
+   same way an attachment card does: --ink-1 over the transcript's --ink-0, a hairline
+   border and an 8px radius. It nests inside the agent message that posted it, sharing
+   the attachment cards' origin-coloured rule, so it belongs to the turn rather than
+   floating between messages.
+
+   Mobile is the primary case, not a fallback: `triage` is almost entirely quick
+   actions and Aurora works it at ~390px. Hence buttons are 44px tall everywhere and
+   the action row WRAPS (flex-wrap) rather than scrolling — four buttons at 390px
+   land as two rows of two, and nothing ever pushes the page sideways.
+   Appended as its own block. */
+.transcript-cards { margin: 26px 0 4px; }
+.transcript-cards .eyebrow { margin-bottom: 9px; }
+.transcript-cards[data-nested="true"] {
+  margin: 12px 0 2px;
+  padding-left: 11px;
+  border-left: 1px solid color-mix(in srgb, var(--origin, var(--line)) 45%, transparent);
+}
+.transcript-cards[data-nested="true"] .eyebrow { margin-bottom: 7px; }
+.transcript-card-list { list-style: none; display: grid; gap: 10px; margin: 0; padding: 0; }
+.transcript-card-list > li { min-width: 0; display: grid; }
+
+.agent-card { min-width: 0; padding: 14px 15px; border: 1px solid var(--line); border-radius: 8px; background: var(--ink-1); }
+.agent-card-title { margin: 0; color: var(--text); font-size: .93rem; font-weight: 600; line-height: 1.35; }
+.agent-card-body { margin-top: 8px; }
+.agent-card-body .markdown-body > :first-child { margin-top: 0; }
+.agent-card-body .markdown-body > :last-child { margin-bottom: 0; }
+
+/* Fields are a definition list on a two-column grid at comfortable widths and a single
+   column below 560px. `inline` (Discord's "may share a row") spans one column; a
+   non-inline field spans the whole row — the same reading Discord gives it. */
+.agent-card-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 16px; margin: 12px 0 0; }
+.agent-card-field { min-width: 0; grid-column: span 2; }
+.agent-card-field[data-inline="true"] { grid-column: span 1; }
+.agent-card-field dt { color: var(--muted); font-size: .64rem; letter-spacing: .07em; text-transform: uppercase; }
+.agent-card-field dd { margin: 3px 0 0; min-width: 0; color: var(--text); font-size: .82rem; line-height: 1.45; overflow-wrap: anywhere; }
+.agent-card-field dd .markdown-body > :first-child { margin-top: 0; }
+.agent-card-field dd .markdown-body > :last-child { margin-bottom: 0; }
+.agent-card-footer { margin: 12px 0 0; color: var(--muted); font-size: .7rem; line-height: 1.45; }
+
+/* The control row. `success` earns the accent (it is the affirmative action), `danger`
+   the danger token, `primary` a brighter edge, `secondary` stays quiet — so a glance at
+   a triage card reads Fix now / Close as the two poles and the rest as options. */
+.agent-card-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.agent-card-action {
+  /* Hugs its label at comfortable widths — a control row reads as controls, not as four
+     stretched slabs. It only grows to share the row on narrow screens (see the 767px block). */
+  flex: 0 1 auto; min-width: 0; min-height: 44px; display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+  padding: 0 14px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--text);
+  font: inherit; font-size: .78rem; cursor: pointer; transition: background 120ms ease, border-color 120ms ease;
+}
+.agent-card-action-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-card-action-emoji { flex: none; font-size: .9rem; line-height: 1; }
+.agent-card-action:hover:not(:disabled) { background: var(--ink-2); }
+.agent-card-action[data-style="success"] { border-color: color-mix(in srgb, var(--accent) 60%, var(--line)); color: var(--accent); }
+.agent-card-action[data-style="danger"] { border-color: color-mix(in srgb, var(--danger) 60%, var(--line)); color: var(--danger); }
+.agent-card-action[data-style="primary"] { border-color: color-mix(in srgb, var(--accent-warm) 55%, var(--line)); color: var(--text); }
+.agent-card-action[data-style="secondary"] { color: var(--muted); }
+.agent-card-action:disabled { cursor: not-allowed; opacity: .55; }
+.agent-card-action[data-pending="true"] { opacity: 1; border-style: dashed; }
+
+.agent-card-notice { margin: 10px 0 0; font-size: .74rem; line-height: 1.45; }
+.agent-card-notice[data-tone="ok"] { color: var(--accent); }
+.agent-card-notice[data-tone="pending"] { color: var(--muted); }
+.agent-card-notice[data-tone="error"] { color: var(--danger); }
+
+/* Prior revisions: collapsed, quiet, and structurally unclickable — a superseded button
+   is a <span>, never a disabled <button>, so there is no control to activate. Styled to
+   look like a label rather than a control for the same reason. */
+.agent-card-history { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; }
+.agent-card-history > summary { min-height: 32px; display: flex; align-items: center; color: var(--muted); font-size: .68rem; letter-spacing: .06em; text-transform: uppercase; cursor: pointer; }
+.agent-card-history > summary:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+.agent-card-history-list { list-style: none; display: grid; gap: 12px; margin: 12px 0 0; padding: 0; }
+.agent-card-revision { padding-left: 11px; border-left: 1px solid var(--line); opacity: .78; }
+.agent-card-revision .eyebrow { display: flex; gap: 8px; margin-bottom: 5px; }
+.agent-card-revision .agent-card-title { font-size: .82rem; font-weight: 500; }
+.agent-card-inert-buttons { display: flex; flex-wrap: wrap; gap: 6px; margin: 9px 0 0; }
+.agent-card-inert-button {
+  display: inline-flex; align-items: center; padding: 4px 9px; border: 1px dashed var(--line); border-radius: 5px;
+  color: var(--muted); font-size: .68rem; text-decoration: line-through;
+}
+
+.card-modal { width: min(100%, 520px); }
+.card-modal textarea {
+  width: 100%; min-height: 96px; padding: 9px 11px; border: 1px solid var(--line);
+  background: var(--ink-0); color: var(--text); font: .82rem/1.5 Inter, system-ui, sans-serif; resize: vertical;
+}
+.card-modal-required { color: var(--accent-warm); }
+
+@media (max-width: 767px) {
+  .transcript-cards { margin-top: 22px; }
+  .agent-card { padding: 12px 12px; }
+  /* Two-up at 390px: a 44px-tall button with a real label needs about half the column,
+     and a `flex-basis` floor is what makes the row wrap into pairs instead of squeezing
+     four labels into one unreadable line. The padding and gap tighten here because at a
+     ~109px half-column every pixel spent on the box is a pixel the label loses — at 14px
+     padding, "Need info" ellipsised.
+     `min-width: max-content` makes the half-column a TARGET rather than a cap: a button whose
+     label will not fit at 50% takes a row of its own instead of ellipsising. A quick action
+     the reader cannot read is worse than one that costs a row — "Need i…" is not a button. */
+  .agent-card-action { flex: 1 1 calc(50% - 4px); min-width: max-content; gap: 6px; padding: 0 9px; }
+  .agent-card-fields { grid-template-columns: minmax(0, 1fr); }
+  .agent-card-field, .agent-card-field[data-inline="true"] { grid-column: span 1; }
+}
+
+@media (max-width: 559px) {
+  .agent-card-fields { grid-template-columns: minmax(0, 1fr); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-card-action { transition: none; }
+}

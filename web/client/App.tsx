@@ -15,7 +15,7 @@ import { TurnSteps } from "./components/TurnSteps"
 import { MobileNav, type MobilePane } from "./components/MobileNav"
 import { useModalDialog } from "./components/useModalDialog"
 import { initialWorkspaceState, workspaceReducer } from "./state"
-import type { ConnectionState, Conversation, ConversationEvent, ConversationInput, ConversationUpdate, DocumentAttachment, Message, PostMessageInput, Session, ToolStep, TransportLink } from "./types"
+import type { CardInfo, ConnectionState, Conversation, ConversationEvent, ConversationInput, ConversationUpdate, DocumentAttachment, Message, PostMessageInput, Session, ToolStep, TransportLink } from "./types"
 import type { PwaController, PwaState } from "./pwa"
 import { parseWorkspaceRoute, pathForAgent, pathForConversation, pathForDocument, type WorkspaceRoute } from "./routes"
 import { webBase } from "./base"
@@ -30,6 +30,8 @@ export interface AppApi {
   updateConversation?(conversationId: string, input: ConversationUpdate): Promise<Conversation>
   listLinks?(conversationId: string): Promise<TransportLink[]>
   listConversationDocuments?: WorkspaceApi["listConversationDocuments"]
+  listConversationCards?: WorkspaceApi["listConversationCards"]
+  submitCardInteraction?: WorkspaceApi["submitCardInteraction"]
   listAgents?: WorkspaceApi["listAgents"]
   getAgent?: WorkspaceApi["getAgent"]
   previewAgentConfig?: WorkspaceApi["previewAgentConfig"]
@@ -50,6 +52,8 @@ export interface ConversationViewApi {
   listLinks?(conversationId: string): Promise<TransportLink[]>
   /** Only used for the inline image previews on transcript attachment cards. */
   documentContentUrl?(token: string): string
+  /** A card button click. Absent — or `features.cards` off — renders cards read-only. */
+  submitCardInteraction?: WorkspaceApi["submitCardInteraction"]
 }
 
 interface AppProps {
@@ -105,12 +109,13 @@ export function createWorkspaceStream(api: AppApi): ConversationStream {
   }, webBase)
 }
 
-export function ConversationView({ api, conversation: suppliedConversation, messages, activity = [], attachments = [], toolSteps = [], drafts: suppliedDrafts, session: suppliedSession, links: suppliedLinks, inspectorOpen = true, composerRef, inspectorCloseRef, onOpenInspector, onCloseInspector = () => {}, onInspectorEscape, onArchive, onCanonicalMessage, onConversationUpdated, onOpenDocument }: {
+export function ConversationView({ api, conversation: suppliedConversation, messages, activity = [], attachments = [], cards = [], toolSteps = [], drafts: suppliedDrafts, session: suppliedSession, links: suppliedLinks, inspectorOpen = true, composerRef, inspectorCloseRef, onOpenInspector, onCloseInspector = () => {}, onInspectorEscape, onArchive, onCanonicalMessage, onConversationUpdated, onOpenDocument }: {
   api: ConversationViewApi
   conversation: Conversation
   messages?: Message[]
   activity?: ConversationEvent[]
   attachments?: DocumentAttachment[]
+  cards?: CardInfo[]
   toolSteps?: ToolStep[]
   drafts?: DraftStore
   session?: Session
@@ -148,14 +153,25 @@ export function ConversationView({ api, conversation: suppliedConversation, mess
   const session = suppliedSession ?? {
     identity: suppliedConversation.createdBy,
     agents: [{ name: conversation.primaryAgent, alive: true, busy: false }],
-    features: { agents: false, documents: false, turnSteps: false },
+    features: { agents: false, documents: false, turnSteps: false, cards: false },
     permissions: { agents: "hidden" as const },
   }
   const links = suppliedLinks ?? loadedLinks
   const renderedSteps = session.features.turnSteps ? toolSteps : []
+  // Gated exactly as `documents` and `turnSteps` are: the hub reports `features.cards` true
+  // only when it can both persist a card and accept a click back, so with the flag off there
+  // is nothing to render and — more importantly — no button offered that could not be honoured.
+  const renderedCards = session.features.cards ? cards : []
+  const onCardInteract = session.features.cards && api.submitCardInteraction
+    ? (customId: string, fields?: Record<string, string>) =>
+        api.submitCardInteraction!(suppliedConversation.id, fields ? { customId, fields } : { customId })
+    : undefined
   // Everything rendered inside the scroll container, so late arrivals below the
-  // messages (attachment cards, the turn-steps spine) also re-settle the bottom.
-  const transcriptContentKey = `${renderedMessages.length}:${renderedMessages.at(-1)?.id ?? ""}:${attachments.length}:${renderedSteps.length}:${activity.length}`
+  // messages (attachment cards, agent cards, the turn-steps spine) also re-settle the bottom.
+  // Cards contribute their revisions, not just their count: an edit-in-place changes a card's
+  // height without changing how many there are, and the bottom has to re-settle for that too.
+  const cardKey = renderedCards.map(card => `${card.correlationId}@${card.revision}`).join(",")
+  const transcriptContentKey = `${renderedMessages.length}:${renderedMessages.at(-1)?.id ?? ""}:${attachments.length}:${cardKey}:${renderedSteps.length}:${activity.length}`
   const { scrollRef, pinned, jumpToLatest } = useTranscriptAutoscroll(suppliedConversation.id, transcriptContentKey)
 
   useLayoutEffect(() => {
@@ -267,6 +283,8 @@ export function ConversationView({ api, conversation: suppliedConversation, mess
           messages={renderedMessages}
           onReply={setReplyTo}
           attachments={attachments}
+          cards={renderedCards}
+          {...(onCardInteract ? { onCardInteract } : {})}
           {...(onOpenDocument ? { onOpenDocument } : {})}
           {...(api.documentContentUrl ? { documentContentUrl: (token: string) => api.documentContentUrl!(token) } : {})}
         />
@@ -345,7 +363,7 @@ export function ConversationWorkspace({ api: suppliedApi, drafts: suppliedDrafts
         const now = Date.now()
         dispatch({
           type: "session/loaded",
-          session: { identity: "", agents: [], features: { agents: false, documents: false, turnSteps: false }, permissions: { agents: "hidden" } },
+          session: { identity: "", agents: [], features: { agents: false, documents: false, turnSteps: false, cards: false }, permissions: { agents: "hidden" } },
         })
         if (!current()) return
         dispatch({ type: "conversations/loaded", conversations: [{
@@ -410,6 +428,24 @@ export function ConversationWorkspace({ api: suppliedApi, drafts: suppliedDrafts
       .catch(() => {})
     return () => { active = false }
   }, [api, state.selectedConversationId])
+
+  // Rehydrate the transcript's interactive cards, for the same reason and by the same shape as
+  // the documents hydration above: `card` events are live-only and are never replayed from
+  // message history, so on a remount (navigate away and back) every card the reader had seen —
+  // buttons included — would otherwise vanish. That is precisely the bug attachments shipped
+  // with, and the merge is by `correlationId` so a card that also arrived live is not
+  // duplicated. Gated on `features.cards`: with the flag off the route answers 503, and asking
+  // would only log noise. Failure is silent and non-fatal — the transcript still renders, it
+  // just shows only the cards seen live this session.
+  useEffect(() => {
+    const conversationId = state.selectedConversationId
+    if (!conversationId || !api.listConversationCards || !state.session?.features.cards) return
+    let active = true
+    void api.listConversationCards(conversationId)
+      .then(cards => { if (active) dispatch({ type: "cards/loaded", cards }) })
+      .catch(() => {})
+    return () => { active = false }
+  }, [api, state.selectedConversationId, state.session?.features.cards])
 
   const selected = useMemo(() => state.conversations.find(item => item.id === state.selectedConversationId) ?? null, [state.conversations, state.selectedConversationId])
   useEffect(() => {
@@ -539,6 +575,7 @@ export function ConversationWorkspace({ api: suppliedApi, drafts: suppliedDrafts
         messages={state.messages}
         activity={state.activity}
         attachments={state.attachments}
+        cards={state.cards}
         toolSteps={state.toolSteps}
         drafts={drafts}
         session={state.session}

@@ -11,7 +11,7 @@ import { AgentsWorkspace, type AgentsApi } from "./AgentsWorkspace"
 const screen = within(document.body)
 const session: Session = {
   identity: "viewer@example.com",
-  features: { agents: true, documents: false, turnSteps: false },
+  features: { agents: true, documents: false, turnSteps: false, cards: false },
   permissions: { agents: "viewer" },
   agents: [{ name: "qa", alive: true, busy: true }],
 }

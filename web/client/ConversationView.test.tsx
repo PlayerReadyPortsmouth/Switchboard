@@ -13,7 +13,7 @@ const conversation: Conversation = {
 }
 const session: Session = {
   identity: "ada@example.com",
-  features: { agents: true, documents: false, turnSteps: false },
+  features: { agents: true, documents: false, turnSteps: false, cards: false },
   permissions: { agents: "operator" },
   agents: [{ name: "architect", alive: true, busy: false }, { name: "reviewer", alive: true, busy: false }, { name: "operator", alive: true, busy: false }],
 }

@@ -7,7 +7,7 @@ export interface SessionAgentSummary { name: string; alive: boolean; busy: boole
 export interface Session {
   identity: string
   agents: SessionAgentSummary[]
-  features: { agents: boolean; documents: boolean; turnSteps: boolean }
+  features: { agents: boolean; documents: boolean; turnSteps: boolean; cards: boolean }
   permissions: { agents: "hidden" | "viewer" | "operator" }
 }
 
@@ -197,8 +197,74 @@ export interface ToolStep {
   durationMs?: number
 }
 
+/** ---- Interactive agent cards -------------------------------------------------------------
+ *  Mirrors the hub's `CardInfo` / `CardSpec` (hub/conversations/events.ts, hub/types.ts).
+ *  Kept as a hand-written mirror rather than an import because the client bundle must not
+ *  pull in hub modules — the same arrangement `DocumentAttachment` and `ToolStep` already use. */
+
+export interface CardModalInput {
+  id: string
+  label: string
+  style: "short" | "paragraph"
+  placeholder?: string
+  required?: boolean
+}
+/** A form a button opens instead of firing immediately. At most five inputs (Discord's limit,
+ *  which the hub enforces — the client renders whatever it is handed). */
+export interface CardModal { title: string; inputs: CardModalInput[] }
+
+export type CardButtonStyle = "primary" | "secondary" | "success" | "danger"
+export interface CardButton {
+  customId: string
+  label: string
+  style?: CardButtonStyle
+  emoji?: string
+  /** Present ⇒ this button opens a form. The client still POSTs first: the hub gates the
+   *  OPEN as well as the submit, and the modal it returns is the authoritative spec. */
+  modal?: CardModal
+}
+export interface CardField { name: string; value: string; inline?: boolean }
+export interface CardSpec {
+  title: string
+  /** Markdown, rendered with the transcript's `chat` variant. */
+  body: string
+  fields?: CardField[]
+  /** Empty ⇒ terminal: the card is a record, not a control surface. */
+  buttons: CardButton[]
+  footer?: string
+}
+/** A superseded state of a card. Its buttons are INERT and are never rendered as `<button>`
+ *  elements — see `CardHistory` for why the element type, not a `disabled` attribute, is the
+ *  guarantee. */
+export interface CardRevision { revision: number; card: CardSpec; updatedAt: number }
+
+/** Arrives two ways — live over SSE (`kind: "card"`) or rehydrated from
+ *  `GET /api/conversations/:id/cards` on load — and the two shapes are identical on purpose,
+ *  so the reducer merges them by `correlationId` without knowing which came first.
+ *
+ *  A card MUTATES: an edit re-emits the same `correlationId` with a higher `revision`.
+ *  `createdAt` is the FIRST post and never changes, so an edit never reorders the transcript. */
+export interface CardInfo {
+  correlationId: string
+  conversationId: string
+  agent: string
+  revision: number
+  createdAt: number
+  updatedAt: number
+  card: CardSpec
+  history?: CardRevision[]
+}
+
+/** The 200-shaped replies from `POST /api/conversations/:id/interactions`. Every non-200 is
+ *  thrown as an `ApiError` carrying the documented `error` code (and `reason`, when the hub
+ *  sent one), which is what the card turns into a legible sentence. */
+export type CardInteractionResult =
+  | { status: "ok" }
+  | { status: "modal"; modal: CardModal }
+  | { status: "handled"; action: "approval" | "gated" }
+
 export interface ConversationEvent {
-  kind: "message_committed" | "turn_state" | "activity" | "attachment" | "tool_step"
+  kind: "message_committed" | "turn_state" | "activity" | "attachment" | "tool_step" | "card"
   conversationId: string
   sequence: number
   ts: number
@@ -207,4 +273,5 @@ export interface ConversationEvent {
   detail?: Record<string, unknown>
   attachment?: DocumentAttachment
   tool?: ToolStep
+  card?: CardInfo
 }
