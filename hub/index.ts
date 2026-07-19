@@ -620,7 +620,12 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): ProcessAgen
       // UUID makes the doc owned by that conversation's creator (email) and visible in their
       // library; anything else (a Discord channel) publishes ownerless → reconciles to the
       // org-visible "discord" bucket. Conversation lookup is by-id and unscoped here.
-      const chat = lastChatByAgent.get(name) ?? ""
+      //
+      // The chat id comes from THIS agent process's transport (`key`), which stamps
+      // `lastChatId` at turn-delivery time for every dispatch path — legacy Discord,
+      // canonical conversations (web + migrated Discord) and thread replicas alike.
+      // The socket is per-key, so the process publishing here is exactly transport `key`.
+      const chat = transports.get(key)?.getLastChatId() ?? ""
       const conversation = chat ? conversationRepo.getConversation(chat) : null
       const r = await publishDocument({
         ...a,
@@ -672,7 +677,11 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): ProcessAgen
       })
   t.onReply((reply) => onAgentReply(reply, key))
   t.onToolUse((tools) => {
-    const chat = lastChatByAgent.get(name) ?? ""
+    // Attribute to the turn this transport is actually serving. `lastChatId` is
+    // stamped by the turn gate at delivery time, so it is exact per agent process
+    // (and per replica) and correct for every dispatch path, not just the Discord
+    // orchestrator's.
+    const chat = t.getLastChatId()
     trace.record({ agent: name, chat, kind: "tool_use", tools })
     if (chat) channelStream.publish(chat, { kind: "tool_use", ts: Date.now(), agent: name, tools })
     if (toolObs) toolUsage.recordToolUse(name, tools)
@@ -692,7 +701,7 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): ProcessAgen
     }
   })
   t.onToolResult((results) => {
-    const chat = lastChatByAgent.get(name) ?? ""
+    const chat = t.getLastChatId()
     trace.record({ agent: name, chat, kind: "tool_result", results })
     if (chat) channelStream.publish(chat, { kind: "tool_result", ts: Date.now(), agent: name, results })
     if (turnStepsOn) {
@@ -788,8 +797,7 @@ const auditOptedOut = (agent?: string): boolean =>
 
 // Full-fidelity per-turn trace (message bodies), separate from the metadata-only
 // AuditLog. Default off; when on, appends JSONL to <stateDir>/trace.jsonl. A no-op
-// (never throws, nothing written) when disabled. Records the last chat per agent so
-// tool_use/tool_result hooks — which lack a chat id — can be attributed to a channel.
+// (never throws, nothing written) when disabled.
 const traceFile = hub.trace?.file ?? join(hub.stateDir, "trace.jsonl")
 const trace = new TurnTrace({
   append: (l) => { try { appendFileSync(traceFile, l) } catch {} },
@@ -797,7 +805,6 @@ const trace = new TurnTrace({
   now: () => Date.now(),
   enabled: hub.trace?.enabled === true,
 })
-const lastChatByAgent = new Map<string, string>()
 
 // Periodic trace sweep: drop records older than retentionDays, keeping trace.jsonl
 // bounded (readTail/full-read reads the whole file, so an unbounded file gets
@@ -1987,14 +1994,10 @@ const orchestrator = new Orchestrator(hub, agents, {
   dispatchThread: async (agentName, parentChannelId, inbound, threadWorktreeRepo) => {
     const r = await threadRegistry.ensureInstance(inbound.chatId, parentChannelId, agentName, agents[agentName]!, threadWorktreeRepo)
     if (!r.ok) return r
-    // Mirrors prepareDispatch's bookkeeping for the normal path: thread
-    // instances share the pinned agent's `name`, and makeTransport's
-    // onToolUse/onToolResult handlers resolve which Discord channel to
-    // publish tool-observability events to via this map. dispatchThread
-    // bypasses prepareDispatch entirely, so without this the thread's tool
-    // events would be attributed to whatever channel this agent name last
-    // held (likely the main channel, not the thread).
-    lastChatByAgent.set(agentName, inbound.chatId)
+    // No chat bookkeeping needed here: `deliver` runs the replica's own turn
+    // gate, which stamps that transport's `lastChatId` — the source the
+    // onToolUse/onToolResult handlers read. A thread instance shares the pinned
+    // agent's `name` but has its own transport, so attribution is per-thread.
     r.replica.deliver(inbound.chatId, inbound)
     return { ok: true }
   },
@@ -2002,9 +2005,9 @@ const orchestrator = new Orchestrator(hub, agents, {
   sendPlain: (chatId, text) => gateway.sendPlain(chatId, text),
   prepareDispatch: async ({ agent, inbound, isSwitch }) => {
     const rt = agents[agent]?.runtime
-    // Record inbound in the trace + remember this agent's live chat so its
-    // tool_use/tool_result records (which carry no chat id) can be attributed.
-    lastChatByAgent.set(agent, inbound.chatId)
+    // Record inbound in the trace. Attribution of this agent's tool_use/
+    // tool_result records (which carry no chat id) is handled by the transport's
+    // own `lastChatId`, stamped when the turn gate delivers the message.
     trace.record({ agent, chat: inbound.chatId, kind: "inbound", text: inbound.content })
     // A genuine user-initiated turn (re)sets the overseer goal for this agent.
     if (rt?.overseer?.enabled) overseer.begin(agent, inbound.chatId, inbound.content)
