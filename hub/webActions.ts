@@ -1,3 +1,4 @@
+import { formatWebMirrorLine } from "./displayName"
 import type { InboundMessage } from "./types"
 import type { PendingApproval } from "./approval"
 
@@ -35,7 +36,13 @@ export function buildWebInboundMessage(
 }
 
 /** The line posted to the real Discord channel when a web chat message is
- *  mirrored in, so Discord-side participants see who sent it and from where. */
+ *  mirrored in, so Discord-side participants see who sent it and from where.
+ *
+ *  This is the legacy channel-view mirror (`POST /api/channel/:id/message`).
+ *  The SPA no longer calls that route — it goes through conversations, whose
+ *  Discord copy is built in `surfaces/discordAdapter.ts` — but the route is
+ *  still mounted and reachable, so it shares the one formatter rather than
+ *  drifting into a second convention. */
 export function formatMirrorLine(email: string, text: string): string {
-  return `**${email} (web):** ${text}`
+  return formatWebMirrorLine(email, text)
 }

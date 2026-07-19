@@ -1,5 +1,6 @@
 import { test, expect } from "bun:test"
 import { pendingApprovalsToJson, buildWebInboundMessage, formatMirrorLine } from "./webActions"
+import { formatWebMirrorLine } from "./displayName"
 import type { PendingApproval } from "./approval"
 
 test("pendingApprovalsToJson projects the fields the panel needs, drops `fire`/`state`", () => {
@@ -21,8 +22,10 @@ test("buildWebInboundMessage tags the actor as web:<email> and isn't a DM", () =
   })
 })
 
-test("formatMirrorLine matches the Discord mirror convention", () => {
-  expect(formatMirrorLine("aurora@player-ready.co.uk", "hello")).toBe(
-    "**aurora@player-ready.co.uk (web):** hello",
-  )
+test("formatMirrorLine shares the one web-mirror convention with the surface adapter", () => {
+  expect(formatMirrorLine("aurora@player-ready.co.uk", "hello")).toBe("🌐 **Aurora** · hello")
+  expect(formatMirrorLine("Aurora.Nicholas@player-ready.co.uk", "hello")).toBe("🌐 **Aurora N.** · hello")
+  // Same output as the conversations path builds for the same author/content.
+  expect(formatMirrorLine("aurora.nicholas@player-ready.co.uk", "hello"))
+    .toBe(formatWebMirrorLine("aurora.nicholas@player-ready.co.uk", "hello"))
 })

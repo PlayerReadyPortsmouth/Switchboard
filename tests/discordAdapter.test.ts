@@ -3,14 +3,22 @@ import { DiscordAdapter, type DiscordGatewayPort } from "../hub/surfaces/discord
 import type { InboundMessage } from "../hub/types"
 import type { SurfaceDelivery } from "../hub/surfaces"
 
-function delivery(content = "hello", replyToExternalId?: string): SurfaceDelivery {
+function delivery(content = "hello", replyToExternalId?: string, message: Partial<SurfaceDelivery["message"]> = {}): SurfaceDelivery {
   return {
     deliveryId: "delivery-1",
     conversationId: "conversation-1",
     link: { id: "link-1", conversationId: "conversation-1", adapter: "discord", externalLocationId: "channel-1", label: null, syncMode: "two_way", enabled: true, createdAt: 1, updatedAt: 1 },
-    message: { id: "message-1", conversationId: "conversation-1", sequence: 1, author: "alice", origin: "web", content, replyTo: "canonical-parent", state: "committed", clientKey: null, createdAt: 1 },
+    message: { id: "message-1", conversationId: "conversation-1", sequence: 1, author: "alice", origin: "web", content, replyTo: "canonical-parent", state: "committed", clientKey: null, createdAt: 1, ...message },
     replyToExternalId,
   }
+}
+
+/** Capture the text the adapter hands the gateway for one delivery. */
+async function sentText(d: SurfaceDelivery): Promise<string> {
+  let text = ""
+  const adapter = new DiscordAdapter(port({ async sendText(_chat, value) { text = value; return "discord-9" } }), "token")
+  await adapter.send(d)
+  return text
 }
 
 function port(overrides: Partial<DiscordGatewayPort> = {}): DiscordGatewayPort {
@@ -42,8 +50,33 @@ describe("DiscordAdapter", () => {
     let args: unknown[] = []
     const adapter = new DiscordAdapter(port({ async sendText(...values) { args = values; return "discord-9" } }), "token")
     const result = await adapter.send(delivery("hello", "discord-parent"))
-    expect(args).toEqual(["channel-1", "**alice** · hello", "discord-parent", "delivery-1"])
+    expect(args).toEqual(["channel-1", "🌐 **alice** · hello", "discord-parent", "delivery-1"])
     expect(result).toEqual({ deliveryId: "delivery-1", adapter: "discord", ok: true, externalMessageId: "discord-9" })
+  })
+
+  test("marks web-origin messages and humanizes the email author", async () => {
+    expect(await sentText(delivery("Hey, quickly testing something", undefined, {
+      author: "Aurora.Nicholas@player-ready.co.uk", origin: "web",
+    }))).toBe("🌐 **Aurora N.** · Hey, quickly testing something")
+  })
+
+  test("agent replies keep the plain form — never decorated, never reformatted", async () => {
+    expect(await sentText(delivery("Sure — go ahead, I'm here.", undefined, {
+      author: "dev-agent", origin: "agent",
+    }))).toBe("**dev-agent** · Sure — go ahead, I'm here.")
+  })
+
+  test("transport and system origins keep the plain form too", async () => {
+    expect(await sentText(delivery("x", undefined, { author: "discord:186188409499418628", origin: "transport" })))
+      .toBe("**discord:186188409499418628** · x")
+    expect(await sentText(delivery("x", undefined, { author: "hub", origin: "system" })))
+      .toBe("**hub** · x")
+  })
+
+  test("web-message content is passed through verbatim", async () => {
+    const content = "look at **this** and `that`"
+    expect(await sentText(delivery(content, undefined, { author: "a.b@x.co", origin: "web" })))
+      .toBe(`🌐 **A B.** · ${content}`)
   })
 
   test("does not leak canonical reply ids when no external reply id was resolved", async () => {
