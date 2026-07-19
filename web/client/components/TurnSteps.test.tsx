@@ -1,7 +1,7 @@
-import "../testSetup"
+import { DEFAULT_VIEWPORT_WIDTH, resetViewport, setViewport } from "../testSetup"
 import { afterEach, expect, test } from "bun:test"
-import { cleanup, render, within } from "@testing-library/react"
-import { TurnSteps, formatDuration } from "./TurnSteps"
+import { act, cleanup, render, within } from "@testing-library/react"
+import { TurnSteps, formatDuration, summariseSteps } from "./TurnSteps"
 import type { ConversationEvent, ToolStep } from "../types"
 
 const screen = within(document.body)
@@ -67,4 +67,76 @@ test("formatDuration scales precision to the magnitude", () => {
   expect(formatDuration(1200)).toBe("1.2s")
   expect(formatDuration(59_900)).toBe("59.9s")
   expect(formatDuration(65_000)).toBe("1m 5s")
+})
+
+// --- Mobile collapse -------------------------------------------------------------------
+// On a ~390px screen the spine pushes the conversation off-screen, so there it collapses to a
+// summary line and opens on tap. Desktop keeps the bare spine and is asserted unchanged above.
+
+// happy-dom shares one window across the whole test process, so the width is handed back
+// after every test here — see the note in testSetup.ts.
+const setWidth = (width: number) => act(() => { setViewport(width) })
+const DESKTOP = DEFAULT_VIEWPORT_WIDTH
+const MOBILE = 390
+
+afterEach(() => { resetViewport(); sessionStorage.clear() })
+
+test("summariseSteps names the work without needing the spine open", () => {
+  expect(summariseSteps([])).toBe("No tool calls")
+  expect(summariseSteps([step({ id: "a", durationMs: 400 })])).toBe("1 step · 400ms")
+  expect(summariseSteps([step({ id: "a", durationMs: 400 }), step({ id: "b", durationMs: 1200 })])).toBe("2 steps · 1.6s")
+  // Still working ⇒ say so rather than reporting a partial total.
+  expect(summariseSteps([step({ id: "a", durationMs: 400 }), step({ id: "b", status: "running", durationMs: undefined })]))
+    .toBe("2 steps · running")
+  // A failure is an OUTCOME, not process — it must survive the collapse.
+  expect(summariseSteps([step({ id: "a" }), step({ id: "b", status: "error" })])).toBe("2 steps · 1 failed")
+})
+
+test("desktop renders the bare spine with no disclosure wrapper at all", () => {
+  setWidth(DESKTOP)
+  render(<TurnSteps steps={[step()]} />)
+  expect(document.querySelector("[data-region='turn-spine-disclosure']")).toBeNull()
+  expect(screen.getByRole("list", { name: "Turn activity" })).toBeTruthy()
+})
+
+test("mobile collapses the spine behind a summary, closed by default", () => {
+  setWidth(MOBILE)
+  render(<TurnSteps steps={[step({ id: "a", durationMs: 400 }), step({ id: "b", durationMs: 1200 })]} />)
+  const disclosure = document.querySelector("[data-region='turn-spine-disclosure']") as HTMLDetailsElement
+  expect(disclosure).toBeTruthy()
+  expect(disclosure.open).toBe(false)
+  // The summary carries the signal the collapse hides.
+  expect(screen.getByText("2 steps · 1.6s")).toBeTruthy()
+  // The spine is still in the DOM (native <details> hides it), so opening needs no refetch.
+  expect(within(disclosure).getByRole("list", { name: "Turn activity" })).toBeTruthy()
+})
+
+test("mobile: opening the disclosure is remembered for the next turn", () => {
+  setWidth(MOBILE)
+  const first = render(<TurnSteps steps={[step()]} />)
+  const disclosure = document.querySelector("[data-region='turn-spine-disclosure']") as HTMLDetailsElement
+  // Drive the native toggle exactly as a tap/Enter would.
+  act(() => {
+    disclosure.open = true
+    disclosure.dispatchEvent(new Event("toggle"))
+  })
+  expect(sessionStorage.getItem("switchboard:turn-spine-open")).toBe("true")
+  first.unmount()
+
+  // A later turn re-mounts the component; the deliberate choice survives.
+  render(<TurnSteps steps={[step({ id: "z" })]} />)
+  expect((document.querySelector("[data-region='turn-spine-disclosure']") as HTMLDetailsElement).open).toBe(true)
+})
+
+test("mobile: a stored collapsed choice is honoured too", () => {
+  setWidth(MOBILE)
+  sessionStorage.setItem("switchboard:turn-spine-open", "false")
+  render(<TurnSteps steps={[step()]} />)
+  expect((document.querySelector("[data-region='turn-spine-disclosure']") as HTMLDetailsElement).open).toBe(false)
+})
+
+test("nothing renders on either layout when there are no steps and no turn states", () => {
+  setWidth(MOBILE)
+  const { container } = render(<TurnSteps steps={[]} events={[]} />)
+  expect(container.textContent).toBe("")
 })

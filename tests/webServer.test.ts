@@ -607,3 +607,66 @@ test("the content route decodes its token and rejects a malformed one", async ()
 test("a non-GET method on the content route falls through to 405", async () => {
   expect((await handleWebRequest(del("/api/documents/tok1/content", AUTH), documentDeps())).status).toBe(405)
 })
+
+// ── Conversation-scoped documents (transcript attachment hydration) ───────────
+
+/** A hub-side listing that applies the REAL visibility contract, so the route test proves the
+ *  contract end to end rather than trusting a stub that returns everything. */
+const conversationDocumentDeps = (rows: { token: string; visibility: "private" | "org"; ownerId: string; conversationId: string }[]) =>
+  documentDeps({
+    listConversationDocuments: (identity, conversationId) => rows
+      .filter(row => row.conversationId === conversationId && (row.visibility === "org" || row.ownerId === identity))
+      .map(row => ({
+        token: row.token, title: `${row.token}.md`, contentType: "text/markdown",
+        mode: "view", visibility: row.visibility, sizeBytes: 64, createdAt: 1_700_000_000_000,
+      })),
+  })
+
+test("GET /api/conversations/:id/documents 400s without the identity header", async () => {
+  const res = await handleWebRequest(get("/api/conversations/conv-1/documents"), conversationDocumentDeps([]))
+  expect(res.status).toBe(400)
+  expect((await res.json()).error).toBe("missing_identity")
+})
+
+test("GET /api/conversations/:id/documents 503s when documents are unavailable", async () => {
+  const res = await handleWebRequest(get("/api/conversations/conv-1/documents", AUTH), fakeDeps())
+  expect(res.status).toBe(503)
+  expect((await res.json()).error).toBe("documents_unavailable")
+})
+
+test("GET /api/conversations/:id/documents enforces the visibility contract: another owner's private document is excluded", async () => {
+  const deps = conversationDocumentDeps([
+    { token: "shared", visibility: "org", ownerId: "bob@ready.co", conversationId: "conv-1" },
+    { token: "bobs-private", visibility: "private", ownerId: "bob@ready.co", conversationId: "conv-1" },
+    { token: "adas-private", visibility: "private", ownerId: "ada@ready.co", conversationId: "conv-1" },
+  ])
+  const res = await handleWebRequest(get("/api/conversations/conv-1/documents", AUTH), deps)
+  expect(res.status).toBe(200)
+  const body = await res.json() as { token: string }[]
+  // Ada (the AUTH identity) gets the org row and her own private row — never Bob's.
+  expect(body.map(row => row.token).sort()).toEqual(["adas-private", "shared"])
+})
+
+test("GET /api/conversations/:id/documents carries sizeBytes and createdAt through to the client", async () => {
+  const deps = conversationDocumentDeps([{ token: "t1", visibility: "org", ownerId: "bob@ready.co", conversationId: "conv-1" }])
+  const res = await handleWebRequest(get("/api/conversations/conv-1/documents", AUTH), deps)
+  const body = await res.json() as { sizeBytes: number; createdAt: number }[]
+  expect(body[0]!.sizeBytes).toBe(64)
+  expect(body[0]!.createdAt).toBe(1_700_000_000_000)
+})
+
+test("GET /api/conversations/:id/documents scopes to the requested conversation", async () => {
+  const deps = conversationDocumentDeps([
+    { token: "here", visibility: "org", ownerId: "bob@ready.co", conversationId: "conv-1" },
+    { token: "elsewhere", visibility: "org", ownerId: "bob@ready.co", conversationId: "conv-2" },
+  ])
+  const res = await handleWebRequest(get("/api/conversations/conv-1/documents", AUTH), deps)
+  expect((await res.json() as { token: string }[]).map(row => row.token)).toEqual(["here"])
+})
+
+test("a non-GET method on /api/conversations/:id/documents is 405, not 404", async () => {
+  const res = await handleWebRequest(
+    new Request("http://hub/api/conversations/conv-1/documents", { method: "DELETE", headers: AUTH }),
+    conversationDocumentDeps([]))
+  expect(res.status).toBe(405)
+})

@@ -17,6 +17,7 @@ export type WorkspaceAction =
   | { type: "conversation/selected"; conversationId: string | null }
   | { type: "messages/received"; messages: Message[] }
   | { type: "activity/received"; event: ConversationEvent }
+  | { type: "attachments/loaded"; attachments: DocumentAttachment[] }
   | { type: "connection/changed"; connection: ConnectionState }
 
 export const initialWorkspaceState: WorkspaceState = {
@@ -29,6 +30,13 @@ export const initialWorkspaceState: WorkspaceState = {
   toolSteps: [],
   connection: "connecting",
 }
+
+/** Attachments are ordered by publish time, tie-broken by token so the sort is total and
+ *  stable. Both entry points (live SSE, hydration on load) run through this, so the rendered
+ *  order can't depend on which of the two happened to arrive first — the race is real, since
+ *  the hydration fetch and the event stream are started by the same effect. */
+const orderAttachments = (attachments: DocumentAttachment[]): DocumentAttachment[] =>
+  [...attachments].sort((left, right) => left.createdAt - right.createdAt || left.token.localeCompare(right.token))
 
 export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction): WorkspaceState {
   switch (action.type) {
@@ -49,7 +57,7 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
       // them as inline document cards), never into the raw activity feed.
       if (event.kind === "attachment" && event.attachment) {
         if (state.attachments.some(existing => existing.token === event.attachment!.token)) return state
-        return { ...state, attachments: [...state.attachments, event.attachment] }
+        return { ...state, attachments: orderAttachments([...state.attachments, event.attachment]) }
       }
       // Tool steps land in their own id-keyed slice: a step first arrives `running`
       // and is later re-published with its terminal status, so the result UPDATES the
@@ -64,6 +72,16 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         return { ...state, toolSteps }
       }
       return { ...state, activity: [...state.activity, event] }
+    }
+    // Restores the cards a remount would otherwise lose. Live events WIN on conflict: a token
+    // already in the slice keeps the version it has, because the live emit and the mirror row
+    // describe the same document and re-seating it would only churn the render. Anything the
+    // stream delivered while this fetch was in flight therefore survives it.
+    case "attachments/loaded": {
+      const known = new Set(state.attachments.map(attachment => attachment.token))
+      const added = action.attachments.filter(attachment => !known.has(attachment.token))
+      if (!added.length) return state
+      return { ...state, attachments: orderAttachments([...state.attachments, ...added]) }
     }
     case "connection/changed": return { ...state, connection: action.connection }
   }

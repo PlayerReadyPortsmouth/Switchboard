@@ -7,7 +7,7 @@ import { ApiError } from "./api"
 import { App, createWorkspaceStream, type AppApi } from "./App"
 import type { ConversationStreamHandlers } from "./conversationStream"
 import { DraftStore } from "./drafts"
-import type { AgentDetail, AgentSummary, Conversation, ConversationInput, Message, Session } from "./types"
+import type { AgentDetail, AgentSummary, Conversation, ConversationInput, DocumentAttachment, Message, Session } from "./types"
 
 const screen = within(document.body)
 
@@ -661,4 +661,67 @@ describe("responsive workspace shell", () => {
       expect(location.pathname).toBe("/")
     })
   }
+})
+
+describe("transcript attachment hydration", () => {
+  /** Reproduces Aurora's report: cards seen live vanish after navigating away and back,
+   *  because `attachment` events are live-only and never replay from message history. */
+  const attachment = (token: string, createdAt = 1_000): DocumentAttachment => ({
+    token, title: `${token}.md`, contentType: "text/markdown", mode: "view", visibility: "org", createdAt,
+  })
+
+  const hydratingApi = (tokens: string[]) => {
+    const api = fakeApi()
+    const requested: string[] = []
+    api.listMessages = async () => []
+    api.listConversationDocuments = async (conversationId: string) => {
+      requested.push(conversationId)
+      return tokens.map(token => attachment(token))
+    }
+    return { api, requested }
+  }
+
+  test("opening a conversation hydrates its attachment cards with no live events", async () => {
+    const { api, requested } = hydratingApi(["tok-1", "tok-2"])
+    render(<App api={api} streamFactory={null} agentStreamFactory={null} />)
+    await userEvent.click(await screen.findByRole("button", { name: /Design review/ }))
+
+    // The card is on screen purely from the hydration fetch — no SSE involved.
+    await waitFor(() => expect(screen.getByRole("region", { name: "2 documents shared" })).toBeTruthy())
+    expect(requested).toEqual(["design/review"])
+    expect(screen.getByText("tok-1.md")).toBeTruthy()
+  })
+
+  test("a live event for an already-hydrated token does not double the card", async () => {
+    let handlers: ConversationStreamHandlers | undefined
+    const { api } = hydratingApi(["tok-1"])
+    const stream = {
+      start: async (_id: string, _after: number, next: ConversationStreamHandlers) => { handlers = next },
+      stop() {},
+    }
+    render(<App api={api} streamFactory={() => stream as ReturnType<typeof createWorkspaceStream>} agentStreamFactory={null} />)
+    await userEvent.click(await screen.findByRole("button", { name: /Design review/ }))
+    await waitFor(() => expect(screen.getByRole("region", { name: "1 document shared" })).toBeTruthy())
+    await waitFor(() => expect(handlers).toBeDefined())
+
+    act(() => handlers!.onEvent({
+      kind: "attachment", conversationId: "design/review", sequence: 2, ts: 2, attachment: attachment("tok-1"),
+    }))
+    // Still one card, and a genuinely new token still lands.
+    expect(screen.getByRole("region", { name: "1 document shared" })).toBeTruthy()
+    act(() => handlers!.onEvent({
+      kind: "attachment", conversationId: "design/review", sequence: 3, ts: 3, attachment: attachment("tok-9", 9_000),
+    }))
+    expect(screen.getByRole("region", { name: "2 documents shared" })).toBeTruthy()
+  })
+
+  test("a failing hydration fetch leaves the transcript usable", async () => {
+    const api = fakeApi()
+    api.listMessages = async () => []
+    api.listConversationDocuments = async () => { throw new Error("offline") }
+    render(<App api={api} streamFactory={null} agentStreamFactory={null} />)
+    await userEvent.click(await screen.findByRole("button", { name: /Design review/ }))
+    expect(await screen.findByRole("region", { name: "Transcript" })).toBeTruthy()
+    expect(screen.queryByRole("region", { name: /documents shared/ })).toBeNull()
+  })
 })

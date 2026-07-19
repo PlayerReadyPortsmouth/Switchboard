@@ -71,6 +71,17 @@ export class DocumentsDb {
     return rows.map(toRow)
   }
 
+  /** Documents published into one conversation, under the SAME visibility contract as
+   *  `readDocumentContent`: an "org" row is readable by any authenticated staff identity, a
+   *  "private" row only by its owner. The filter is applied in SQL rather than after the fact
+   *  so a private row belonging to someone else never leaves the database. */
+  listByConversation(conversationId: string, requesterId: string): DocumentRow[] {
+    return this.db.query<Snake, [string, string]>(
+      `SELECT * FROM documents
+       WHERE conversation_id = ? AND (visibility = 'org' OR owner_id = ?)
+       ORDER BY created_at ASC`).all(conversationId, requesterId).map(toRow)
+  }
+
   updateVisibility(token: string, visibility: "private" | "org"): void {
     this.db.query("UPDATE documents SET visibility = ? WHERE token = ?").run(visibility, token)
   }
@@ -180,6 +191,22 @@ export function listDocuments(
   filter: { requesterId: string; scope: "mine" | "org" }, opts: DocumentsOpts,
 ): DocumentRow[] {
   return opts.db.list(filter.requesterId, filter.scope)
+}
+
+/** The transcript's attachment cards, rehydrated on conversation load.
+ *
+ *  `attachment` events are LIVE-ONLY by design (see `buildAttachmentEvent`): they never
+ *  advance a subscriber's replay high-water mark and are not part of message history, so a
+ *  client that remounts refetches messages but loses every card it had seen. The rows are
+ *  already durable — `documentOwnership` stamps `conversation_id` on both publish paths —
+ *  so hydration reads them back rather than persisting a new event type.
+ *
+ *  Visibility is the listing's contract, unchanged and unweakened: org rows to any
+ *  authenticated staff identity, private rows to their owner only. */
+export function listConversationDocuments(
+  conversationId: string, requesterId: string, opts: { db: DocumentsDb },
+): DocumentRow[] {
+  return opts.db.listByConversation(conversationId, requesterId)
 }
 
 /** IO for the read path. Deliberately separate from `DocumentsIO` (whose `readFile` is utf8-only)

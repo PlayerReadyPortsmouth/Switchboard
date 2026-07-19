@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, within } from "@testing-library/react"
 import { ConversationView } from "../App"
 import { DraftStore } from "../drafts"
 import { isPinnedToBottom, PIN_THRESHOLD_PX } from "./useTranscriptAutoscroll"
-import type { Conversation, Message } from "../types"
+import type { Conversation, DocumentAttachment, Message } from "../types"
 
 const screen = within(document.body)
 
@@ -185,3 +185,38 @@ describe("transcript autoscroll", () => {
     expect(screen.queryByRole("button", { name: "Jump to latest" })).toBeNull()
   })
 })
+
+  // Attachment hydration lands AFTER first paint (it is a separate fetch), so it grows the
+  // transcript exactly like late-arriving content. It must obey the same rule as everything
+  // else: follow the bottom for a pinned reader, never yank someone who scrolled up.
+  describe("attachment hydration", () => {
+    const attachment = (token: string): DocumentAttachment => ({
+      token, title: `${token}.md`, contentType: "text/markdown", mode: "view", visibility: "org", createdAt: 1_000,
+    })
+
+    test("does not yank a scrolled-up reader when hydrated cards arrive", () => {
+      const { rerender } = render(view())
+      const element = scroller()
+      scrollTo(element, 100)
+      const before = element.scrollTop
+
+      // The hydration fetch resolves and cards appear.
+      act(() => {
+        rerender(<ConversationView api={{}} drafts={drafts()} conversation={conversation}
+          messages={messages(6)} attachments={[attachment("tok-1"), attachment("tok-2")]} />)
+      })
+      expect(element.scrollTop).toBe(before)
+    })
+
+    test("a pinned reader still settles at the bottom after hydration", () => {
+      const { rerender } = render(view())
+      const element = scroller()
+      expect(element.scrollTop).toBe(maxScrollTop(element))
+
+      act(() => {
+        rerender(<ConversationView api={{}} drafts={drafts()} conversation={conversation}
+          messages={messages(6)} attachments={[attachment("tok-1")]} />)
+      })
+      expect(element.scrollTop).toBe(maxScrollTop(element))
+    })
+  })
