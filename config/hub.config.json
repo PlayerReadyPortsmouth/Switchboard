@@ -164,6 +164,7 @@
   "shareLinks": {
     "enabled": true,
     "documentsUI": true,
+    "mirrorAttachments": false,
     "artifactsDir": "/srv/share-artifacts",
     "raHost": "readyapp.player-ready.co.uk"
   },

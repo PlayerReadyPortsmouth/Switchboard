@@ -184,6 +184,7 @@ Present in the tracked `config/hub.config.json`; the remaining keys below are op
 "shareLinks": {
   "enabled": true,
   "documentsUI": true,
+  "mirrorAttachments": false,
   "artifactsDir": "/srv/share-artifacts",
   "raHost": "readyapp.player-ready.co.uk",
   "defaultTtlDays": 30,
@@ -201,6 +202,7 @@ Present in the tracked `config/hub.config.json`; the remaining keys below are op
 | `maxBytes` | `26214400` (25 MB) | Size cap. |
 | `cleanupIntervalMs` | `86400000` (daily) | Sweep interval. |
 | `documentsUI` | `false` | Gates the web-client Documents section (`documentsUiEnabled`, `hub/index.ts:2478`). Requires `enabled: true`. Plain boolean — all-staff or nobody, no per-user canary. |
+| `mirrorAttachments` | `false` | Mirrors `attach_file` into the documents pipeline so a file attached during a **web** conversation also renders as an inline card in that transcript (`hub/attachMirror.ts`). Requires `enabled: true`. Off ⇒ `attach_file` is byte-identical to before (a native Discord attachment only). On, the Discord attachment is unchanged and posts exactly once; the mirror is additive and can never fail the attach. Discord-only chats are never mirrored. |
 
 ### 7.4 Tool wiring
 
