@@ -1,8 +1,17 @@
 import { test, expect } from "bun:test"
+import { Database } from "bun:sqlite"
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, renameSync, rmSync } from "fs"
+import { join } from "path"
+import { tmpdir } from "os"
 import {
   mirrorAttachment, chatTargetsConversation,
   type AttachMirrorDeps, type MirrorConversation, type MirrorConversationLookup,
 } from "./attachMirror"
+import { isHumanIdentity } from "./identity"
+import { runDocumentsMigrations } from "./documentsMigrations"
+import {
+  DocumentsDb, publishDocument, readDocumentContent, type DocumentsIO, type DocumentsOpts,
+} from "./documents"
 import { makeAttachHandler, type AttachDeps } from "./attachHandler"
 import type { PublishResult } from "./publishLink"
 import type { AttachmentInfo } from "./conversations/events"
@@ -172,6 +181,145 @@ test("a Discord-only chat records why it was skipped", async () => {
   const { deps, audits } = harness({ currentConversation: () => null })
   await mirrorAttachment({ chatId: "1496399854593904690", path: "test-file.md" }, deps)
   expect(audits).toEqual([{ ok: false, detail: { reason: "not_conversation", chat: "1496399854593904690" } }])
+})
+
+// ---- ownership: only a HUMAN conversation creator may be stamped as owner ----
+//
+// The prod bug. A Discord-migrated conversation is created by the synthetic identity
+// `system:discord-migration` (hub/conversations/channelMigration.ts). Stamping that as the
+// document's owner made `publishDocument` default it to "private", and since no human can ever
+// authenticate as that identity, `readDocumentContent` returned "forbidden" to EVERY caller,
+// permanently. Observed in prod on conversation 659bcc60-… ("#dev-agent"), documents
+// 6cegNmUOM756i78QsFFw7l and 32xJkLkepGToSg4hld6nha, both owner_id="system:discord-migration"
+// visibility="private": the card rendered in the transcript, clicking it returned "error forbidden".
+
+const MIGRATED: MirrorConversation = { id: "conv-discord", createdBy: "system:discord-migration" }
+
+/** A REAL documents pipeline over a temp dir. Deliberately real fs rather than the in-memory
+ *  fake in documents.test.ts: that fake hardcodes "/" as its path separator and so fails on
+ *  Windows, and the point of these two tests is the end-to-end read, which needs actual bytes
+ *  on disk anyway. */
+function documentsHarness(content = "MIRRORED") {
+  const db = new Database(":memory:")
+  runDocumentsMigrations(db)
+  const base = mkdtempSync(join(tmpdir(), "attach-mirror-"))
+  const artifactsDir = join(base, "artifacts")
+  const outboxBase = join(base, "outbox")
+  mkdirSync(artifactsDir, { recursive: true })
+  mkdirSync(join(outboxBase, "dev-agent"), { recursive: true })
+  writeFileSync(join(outboxBase, "dev-agent", "test-file.md"), content)
+
+  const io: DocumentsIO = {
+    mkdir: (d) => { mkdirSync(d, { recursive: true }) },
+    writeFile: (p, data) => { writeFileSync(p, data) },
+    rename: (from, to) => { renameSync(from, to) },
+    readFile: (p) => readFileSync(p, "utf8"),
+    rm: (d) => { rmSync(d, { recursive: true, force: true }) },
+  }
+  const documentsDb = new DocumentsDb(db)
+  const opts: DocumentsOpts = {
+    db: documentsDb, io, artifactsDir, raHost: "ra.example", agent: "dev-agent", outboxBase,
+    maxBytes: 1_000_000, defaultTtlDays: 30, now: new Date("2026-07-19T00:00:00Z"),
+    randomToken: (() => { let n = 0; return () => `TOK${(++n).toString().padStart(18, "0")}` })(),
+  }
+  const readOpts = { db: documentsDb, artifactsDir, io: { readBytes: (p: string) => readFileSync(p) } }
+  return { opts, readOpts }
+}
+
+test("a human-created web conversation still stamps ownership and stays private", async () => {
+  const { deps, stored, emitted } = harness()
+  expect(await mirrorAttachment(frame, deps)).toEqual({ mirrored: true, token: "tok1" })
+  expect(stored).toEqual([{
+    path: "test-file.md",
+    ownerId: "aurora@player-ready.co.uk", ownerName: "aurora@player-ready.co.uk",
+    conversationId: "conv-1",
+  }])
+  // publishDocument defaults an OWNED document to private — the creator's own library.
+  expect(emitted[0]!.info.visibility).toBe("private")
+})
+
+test("a system-created (Discord-migrated) conversation publishes OWNERLESS", async () => {
+  const { deps, stored } = harness({ currentConversation: () => MIGRATED })
+  expect(await mirrorAttachment({ chatId: "conv-discord", path: "test-file.md" }, deps))
+    .toEqual({ mirrored: true, token: "tok1" })
+  // No ownerId/ownerName at all — publishDocument leaves it visibility-less and rowFromSbmd
+  // reconciles it into the org-visible "discord" bucket. The transcript link is still stamped.
+  expect(stored).toEqual([{ path: "test-file.md", conversationId: "conv-discord" }])
+  expect(stored[0]).not.toHaveProperty("ownerId")
+  expect(stored[0]).not.toHaveProperty("ownerName")
+})
+
+test("a discord:<id> creator is synthetic too and is never stamped as owner", async () => {
+  const { deps, stored } = harness({
+    currentConversation: () => ({ id: "conv-1", createdBy: "discord:186188409499418628" }),
+  })
+  await mirrorAttachment(frame, deps)
+  expect(stored[0]).not.toHaveProperty("ownerId")
+})
+
+test("isHumanIdentity: emails are human, synthetic scheme:value identities are not", () => {
+  for (const human of [
+    "Aurora.Nicholas@player-ready.co.uk", "aurora@player-ready.co.uk", "a@b",
+  ]) expect(isHumanIdentity(human)).toBe(true)
+
+  for (const synthetic of [
+    "system:discord-migration", "discord:186188409499418628", "agent:dev-agent",
+    "discord", "upload", "", "  ", "no-at-sign",
+    "two@at@signs.co", "@nolocalpart.co", "nodomain@",
+  ]) expect(isHumanIdentity(synthetic)).toBe(false)
+})
+
+// The property that actually matters, end to end through the REAL documents pipeline: the
+// org-visible row a system-created conversation produces is genuinely openable by an unrelated
+// staff identity. A test that only asserts "ownerId is absent" would still pass if the
+// visibility reconciliation downstream were wrong.
+test("the ownerless mirror is readable by an unrelated staff identity", async () => {
+  const { opts, readOpts } = documentsHarness()
+
+  const stored: Record<string, unknown>[] = []
+  const deps: AttachMirrorDeps = {
+    enabled: true,
+    currentConversation: () => MIGRATED,
+    targetsConversation: () => true,
+    store: async (a) => { stored.push(a); return publishDocument(a, opts) },
+    emit: () => {},
+  }
+
+  const r = await mirrorAttachment({ chatId: "conv-discord", path: "test-file.md" }, deps)
+  expect(r.mirrored).toBe(true)
+  if (!r.mirrored) return
+
+  // The property that matters, asserted first: somebody with no relationship to the
+  // conversation at all can actually open it. Against the unfixed code this is
+  // { ok: false, reason: "forbidden" } — the exact prod symptom.
+  const read = readDocumentContent(r.token, "someone.else@player-ready.co.uk", readOpts)
+  expect(read).toMatchObject({ ok: true })
+  if (!read.ok) return
+  expect(read.bytes.toString()).toBe("MIRRORED")
+
+  // …and the reason it is openable: reconciled into the org-visible "discord" bucket.
+  const row = opts.db.get(r.token)!
+  expect(row.visibility).toBe("org")
+  expect(row.ownerId).toBe("discord")
+})
+
+test("a human-owned mirror is still private to its owner", async () => {
+  const { opts, readOpts } = documentsHarness("PRIVATE")
+  const deps: AttachMirrorDeps = {
+    enabled: true,
+    currentConversation: () => CONVERSATION,
+    targetsConversation: () => true,
+    store: async (a) => publishDocument(a, opts),
+    emit: () => {},
+  }
+  const r = await mirrorAttachment(frame, deps)
+  expect(r.mirrored).toBe(true)
+  if (!r.mirrored) return
+
+  expect(opts.db.get(r.token)!.visibility).toBe("private")
+  expect(readDocumentContent(r.token, "someone.else@player-ready.co.uk", readOpts))
+    .toEqual({ ok: false, reason: "forbidden" })
+  expect(readDocumentContent(r.token, CONVERSATION.createdBy, readOpts).ok).toBe(true)
 })
 
 // ---- composition with the Discord send: the mirror must never change the attach outcome ----
