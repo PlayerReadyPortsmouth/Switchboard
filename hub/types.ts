@@ -446,6 +446,13 @@ export interface ShareLinksConfig {
   maxBytes?: number              // default 26214400 (25 MB)
   cleanupIntervalMs?: number     // default 86400000 (daily)
   documentsUI?: boolean          // web-client Documents section gate (default off; requires enabled)
+  /** Mirror `attach_file` into the documents pipeline so a file attached during a web
+   *  conversation also renders as an inline card in that transcript (default off; requires
+   *  enabled). Lives here rather than under `outboundAttachments` because what it turns on
+   *  is a second consumer of THIS pipeline — an artifact, a token, a mirror row and the
+   *  share/viewer surface — all of which are meaningless without `shareLinks.enabled`.
+   *  Off ⇒ `attach_file` is byte-identical to before: a native Discord attachment only. */
+  mirrorAttachments?: boolean
 }
 
 /** One step of a workflow: run `agent` with a templated `prompt` ({{input}} and

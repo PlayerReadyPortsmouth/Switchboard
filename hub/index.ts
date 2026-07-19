@@ -79,7 +79,8 @@ import { resolveFederation, isRemoteTarget, consultRemote, startFederationListen
 import { MissionRegistry, findWorkflow, renderStepPrompt, renderMissionCard, type MissionRun } from "./workflow"
 import type { AgentConfig, AgentReply, InboundMessage, SpawnTrigger, SpawnCardUpdate, CardSpec, DirectCommand, OutboundRoute, HubConfig, AgentRegistry, SendOutcome } from "./types"
 import { resolveOutboxFile } from "./outboxAttach"
-import { makeAttachHandler } from "./attachHandler"
+import { makeAttachHandler, type AttachFrame } from "./attachHandler"
+import { mirrorAttachment } from "./attachMirror"
 import { selectExpired, reconcileDocuments } from "./publishCleanup"
 import { DocumentsDb, publishDocument, uploadDocument, setVisibility, deleteDocument, listDocuments, readDocumentContent, type DocumentsIO, type DocumentsOpts } from "./documents"
 import { runDocumentsMigrations } from "./documentsMigrations"
@@ -610,8 +611,39 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): ProcessAgen
       })
     },
   })
+  // Web mirror for attachments. Gated by `shareLinks.mirrorAttachments` (default off) on top
+  // of the documents pipeline being live; off ⇒ the original expression runs untouched and
+  // attach_file stays Discord-only. On, the native Discord send still happens first and
+  // exactly once — the mirror is a strictly additive follow-up that cannot fail the attach.
+  const attachMirrorOn = shareLinksOn && !!documentsDb && hub.shareLinks?.mirrorAttachments === true
+  const runAttach = attachMirrorOn
+    ? async (frame: AttachFrame): Promise<SendOutcome> => {
+        const outcome = await attachHandler(frame)
+        if (!outcome.ok) return outcome
+        await mirrorAttachment(frame, {
+          enabled: true,
+          currentConversation: () => {
+            const chat = transports.get(key)?.getLastChatId() ?? ""
+            const conversation = chat ? conversationRepo.getConversation(chat) : null
+            return conversation ? { id: conversation.id, createdBy: conversation.createdBy } : null
+          },
+          targetsConversation: (chatId, conversationId) =>
+            chatId === conversationId || conversationRepo.getConversation(chatId)?.id === conversationId,
+          store: (a) => publishDocument(a, makeDocumentsOpts(name)),
+          emit: (conversationId, info) =>
+            conversationEvents.publish(buildAttachmentEvent(conversationId, info, Date.now())),
+          audit: (ok, detail) => {
+            if (!auditOptedOut(name)) audit.record({
+              kind: "event", actor: `agent:${name}`, action: "attach_mirror",
+              chat: frame.chatId, outcome: ok ? "ok" : "deny", detail,
+            })
+          },
+        })
+        return outcome
+      }
+    : attachHandler
   socket.onAttach(frame => {
-    const admitted = conversationIngress.tryRun(() => attachHandler(frame))
+    const admitted = conversationIngress.tryRun(() => runAttach(frame))
     return admitted.accepted ? admitted.value : { ok: false, error: "Hub is shutting down" }
   })
   if (shareLinksOn && documentsDb) {
