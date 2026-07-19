@@ -220,3 +220,39 @@ describe("transcript autoscroll", () => {
       expect(element.scrollTop).toBe(maxScrollTop(element))
     })
   })
+
+  // Rendering markdown changes how tall a message is, which is the input autoscroll reacts to.
+  // The scroll rules must be indifferent to what a message contains.
+  describe("markdown message content", () => {
+    const rich = (count: number): Message[] => messages(count).map(message => ({
+      ...message,
+      content: `## Heading\n\n**bold** and \`code\`\n\n- one\n- two\n\n\`\`\`ts\nconst a = 1\n\`\`\``,
+    }))
+
+    test("opens at the newest message when every message renders markdown", () => {
+      render(view({ messages: rich(6) }))
+      const element = scroller()
+      expect(element.scrollTop).toBe(maxScrollTop(element))
+    })
+
+    test("does not yank a scrolled-up reader when a markdown message arrives", () => {
+      const { rerender } = render(view({ messages: rich(6) }))
+      const element = scroller()
+      scrollTo(element, 100)
+      const before = element.scrollTop
+
+      act(() => {
+        rerender(<ConversationView api={{}} drafts={drafts()} conversation={conversation} messages={rich(7)} />)
+      })
+      expect(element.scrollTop).toBe(before)
+    })
+
+    test("a pinned reader follows a new markdown message to the bottom", () => {
+      const { rerender } = render(view({ messages: rich(6) }))
+      const element = scroller()
+      act(() => {
+        rerender(<ConversationView api={{}} drafts={drafts()} conversation={conversation} messages={rich(7)} />)
+      })
+      expect(element.scrollTop).toBe(maxScrollTop(element))
+    })
+  })
