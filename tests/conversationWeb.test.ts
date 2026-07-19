@@ -302,6 +302,67 @@ test("interaction rejects a malformed body before any gate or agent is reached",
   expect(seen).toEqual(["owner@example.com", "c1", { customId: "ticket:ack:7", fields: { note: "hi" } }])
 })
 
+// Both card routes assert conversation membership through `ConversationService.get`
+// before they touch a card row, so both can surface the same domain errors every other
+// conversation route already maps. They were added outside the shared try/catch, so a
+// non-participant click escaped the handler and Bun answered with an HTML 500 whose body
+// carried real source lines from hub/conversations/service.ts. Regression test for that.
+test("card routes map conversation domain errors onto the shared JSON envelope", async () => {
+  const cases: [unknown, number][] = [
+    [new ConversationForbiddenError("Identity nobody@x cannot access conversation c1"), 403],
+    [new RepositoryNotFoundError("Conversation c1 not found"), 404],
+    [new RepositoryConflictError("conflict"), 409],
+    [new ConversationValidationError("bad"), 400],
+  ]
+  for (const [error, status] of cases) {
+    const thrower = () => { throw error }
+    const on = deps({ webCardsEnabled: () => true, listConversationCards: thrower, submitCardInteraction: thrower })
+    for (const request of [
+      req("/api/conversations/c1/cards"),
+      req("/api/conversations/c1/interactions", "POST", { customId: "ticket:ack:7" }),
+    ]) {
+      const response = await handleWebRequest(request, on)
+      expect(response.status).toBe(status)
+      expect(response.headers.get("content-type")).toContain("application/json")
+      expect(await response.json()).toEqual({ error: (error as Error).message })
+    }
+  }
+})
+
+// A URI-decode failure is a client error on both routes, never a 500.
+test("card routes reject an undecodable conversation id", async () => {
+  const on = deps({ webCardsEnabled: () => true, listConversationCards: () => [cardInfo], submitCardInteraction: () => ({ status: "ok" }) })
+  const bad = "/api/conversations/%E0%A4%A/"
+  for (const request of [req(`${bad}cards`), req(`${bad}interactions`, "POST", { customId: "a:b:c" })]) {
+    const response = await handleWebRequest(request, on)
+    expect(response.status).toBe(400)
+    expect(await response.json()).toEqual({ error: "malformed_conversation_id" })
+  }
+})
+
+// A body that is not JSON at all (not merely the wrong shape) — the browser can send one.
+test("interaction rejects a body that is not JSON", async () => {
+  const on = deps({ webCardsEnabled: () => true, submitCardInteraction: () => ({ status: "ok" }) })
+  const response = await handleWebRequest(new Request("http://x/api/conversations/c1/interactions", {
+    method: "POST", headers: { ...auth, "content-type": "application/json" }, body: "{not json",
+  }), on)
+  expect(response.status).toBe(400)
+  expect(await response.json()).toEqual({ error: "malformed_body" })
+})
+
+// The two cases that were already correct on the live hub. Pinned byte-for-byte so the
+// forbidden fix cannot quietly reshape them.
+test("card interaction keeps its already-correct unroutable and missing-identity answers", async () => {
+  const on = deps({ webCardsEnabled: () => true, submitCardInteraction: () => ({ status: "unroutable", reason: "no card 7" }) })
+  const routed = await handleWebRequest(req("/api/conversations/c1/interactions", "POST", { customId: "ticket:ack:7" }), on)
+  expect(routed.status).toBe(409)
+  expect(await routed.text()).toBe(JSON.stringify({ error: "unroutable", reason: "no card 7" }))
+
+  const anonymous = await handleWebRequest(new Request("http://x/api/conversations/c1/interactions", { method: "POST" }), on)
+  expect(anonymous.status).toBe(400)
+  expect(await anonymous.text()).toBe(JSON.stringify({ error: "missing_identity" }))
+})
+
 test("the session feature flag reports card capability honestly", async () => {
   const features = async (enabled: boolean) => {
     const response = await handleWebRequest(req("/api/session"), deps({ webCardsEnabled: () => enabled }))

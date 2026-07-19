@@ -51,6 +51,17 @@ function documentContentResponse(row: DocumentRow, bytes: Buffer): Response {
 /** Map a card-interaction outcome onto HTTP. A denial is 403 with its legible reason; an
  *  undeliverable click is 409 (the request was authorised, the target is gone) so the client
  *  can tell "you may not" from "nobody is listening" and say so. */
+/** The one mapping from a conversation-domain throw onto HTTP, shared by every conversation
+ *  route so none of them can drift. Returns null for anything it does not recognise — the
+ *  caller rethrows, which is the existing contract for a genuinely unexpected error. */
+function conversationErrorResponse(error: unknown): Response | null {
+  if (error instanceof ConversationForbiddenError) return json({ error: error.message }, 403)
+  if (error instanceof RepositoryNotFoundError) return json({ error: error.message }, 404)
+  if (error instanceof RepositoryConflictError) return json({ error: error.message }, 409)
+  if (error instanceof ConversationValidationError || error instanceof URIError) return json({ error: error.message }, 400)
+  return null
+}
+
 function cardInteractionResponse(result: WebInteractionResult): Response {
   switch (result.status) {
     case "ok": return json({ status: "ok" })
@@ -308,7 +319,15 @@ export async function handleWebRequest(
       }
       let conversationId: string
       try { conversationId = decodeURIComponent(conversationCardsMatch[1]!) } catch { return json({ error: "malformed_conversation_id" }, 400) }
-      return json(deps.listConversationCards(email, conversationId))
+      // `listConversationCards` asserts membership via ConversationService.get, so it throws
+      // the same domain errors as /messages and /links and must answer them the same way.
+      try {
+        return json(deps.listConversationCards(email, conversationId))
+      } catch (error) {
+        const mapped = conversationErrorResponse(error)
+        if (mapped) return mapped
+        throw error
+      }
     }
 
     // A web card click. Every authorisation decision lives in hub/webInteraction.ts, which
@@ -335,7 +354,16 @@ export async function handleWebRequest(
         if (entries.some(([, v]) => typeof v !== "string")) return json({ error: "malformed_fields" }, 400)
         fields = Object.fromEntries(entries) as Record<string, string>
       }
-      return cardInteractionResponse(deps.submitCardInteraction(email, conversationId, { customId, fields }))
+      // Same membership assertion as /cards above, plus whatever the gate path raises: a card
+      // click is a browser-triggered request, so no throw may reach Bun's default HTML 500
+      // (which renders hub source lines into the response body).
+      try {
+        return cardInteractionResponse(deps.submitCardInteraction(email, conversationId, { customId, fields }))
+      } catch (error) {
+        const mapped = conversationErrorResponse(error)
+        if (mapped) return mapped
+        throw error
+      }
     }
 
     const documentAction = (documentsMatch && (method === "GET" || method === "POST")) ||
@@ -443,10 +471,8 @@ export async function handleWebRequest(
         return conversationSseResponse(cb => deps.subscribeConversation!(email, decodeId(conversationEventsMatch), after, cb))
       }
     } catch (error) {
-      if (error instanceof ConversationForbiddenError) return json({ error: error.message }, 403)
-      if (error instanceof RepositoryNotFoundError) return json({ error: error.message }, 404)
-      if (error instanceof RepositoryConflictError) return json({ error: error.message }, 409)
-      if (error instanceof ConversationValidationError || error instanceof URIError) return json({ error: error.message }, 400)
+      const mapped = conversationErrorResponse(error)
+      if (mapped) return mapped
       throw error
     }
 
