@@ -36,6 +36,13 @@ CREATE TABLE IF NOT EXISTS web_card_revisions (
 );
 `
 
+// v2: the transient "a click is running" marker. A column on `web_cards`, NOT a revision —
+// see CardInFlight in conversations/events.ts for why. It lives on the row rather than only on
+// the live event so a reload cannot re-offer a button whose action is already in progress.
+const migrationTwo = `
+ALTER TABLE web_cards ADD COLUMN in_flight_json TEXT;
+`
+
 /** Create/upgrade the web-card schema. Idempotent — safe to run on every start. */
 export function runWebCardMigrations(db: Database): void {
   db.exec("PRAGMA busy_timeout = 5000")
@@ -52,6 +59,12 @@ export function runWebCardMigrations(db: Database): void {
       db.exec(migrationOne)
       db.query("INSERT INTO web_card_schema_migrations(version, applied_at) VALUES (?, ?)").run(1, Date.now())
     }
-    db.exec("PRAGMA user_version = 1")
+    const v2 = db.query<{ version: number }, [number]>(
+      "SELECT version FROM web_card_schema_migrations WHERE version = ?").get(2)
+    if (!v2) {
+      db.exec(migrationTwo)
+      db.query("INSERT INTO web_card_schema_migrations(version, applied_at) VALUES (?, ?)").run(2, Date.now())
+    }
+    db.exec("PRAGMA user_version = 2")
   })()
 }

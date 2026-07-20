@@ -38,6 +38,10 @@ export interface CardButton {
   style?: "primary" | "secondary" | "success" | "danger";
   emoji?: string;
   modal?: CardModal;         // if set, clicking opens this modal instead of relaying
+  /** Rendered but not pressable. The one CardSpec-level way to say "this control is not
+   *  available right now", so the in-flight ⏳ Working row is the SAME spec on Discord and on
+   *  the web instead of two hand-rolled renderings that can drift. */
+  disabled?: boolean;
 }
 export interface CardSpec {
   title: string;
@@ -509,6 +513,10 @@ export interface WebCardsConfig {
   /** How many prior revisions of a card to retain for the transcript's history
    *  disclosure. Default 20; 0 keeps none (latest state only). */
   maxHistory?: number
+  /** How long one card's in-flight claim survives without an outcome, in ms (default 5 min).
+   *  The claim is what stops a Discord click and a web click running the same action twice;
+   *  the TTL is what stops a click whose action never reports back wedging the card forever. */
+  claimTtlMs?: number
 }
 
 /** One step of a workflow: run `agent` with a templated `prompt` ({{input}} and

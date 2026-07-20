@@ -302,3 +302,48 @@ test("a hub reason is sentence-cased and punctuated rather than run on lowercase
   expect(interactionFailureMessage(new ApiError(409, "unroutable", "Agent gone.")))
     .toMatch(/Agent gone\.$/)
 })
+
+// --- A click running on the other surface ---------------------------------------------------
+// `info.inFlight` is the hub saying "an action on this card is already running" — most often
+// because someone pressed the button in Discord. Every screen showing the card must render it
+// as unavailable, or the same action gets fired twice from two places.
+test("a card the hub reports as in-flight offers no pressable button", async () => {
+  const calls: string[] = []
+  render(<AgentCard
+    info={card({ inFlight: { surface: "discord", customId: "triage:fix:481", at: 1_700_000_000_500 } })}
+    onInteract={async (customId) => { calls.push(customId); return { status: "ok" } as CardInteractionResult }}
+  />)
+  const buttons = within(actionRow()).getAllByRole("button")
+  expect(buttons).toHaveLength(4)
+  expect(buttons.every(button => (button as HTMLButtonElement).disabled)).toBe(true)
+  await userEvent.click(buttons[0]!)
+  expect(calls).toEqual([])
+})
+
+test("an in-flight card says WHERE the action came from, so it does not read as broken", () => {
+  render(<AgentCard
+    info={card({ inFlight: { surface: "discord", customId: "triage:fix:481", at: 1 } })}
+    onInteract={async () => ({ status: "ok" }) as CardInteractionResult}
+  />)
+  const notice = document.querySelector('[data-region="card-notice"]')!
+  expect(notice.textContent).toContain("Discord")
+  expect(notice.getAttribute("data-tone")).toBe("pending")
+  expect(document.querySelector('[data-region="agent-card"]')!.getAttribute("data-in-flight")).toBe("discord")
+})
+
+test("a spec-level disabled button is not pressable even when the card is otherwise free", async () => {
+  const calls: string[] = []
+  render(<AgentCard
+    info={card({ card: { title: "Deploying", body: "…", buttons: [{ customId: "working:noop", label: "Working", emoji: "⏳", disabled: true }] } })}
+    onInteract={async (customId) => { calls.push(customId); return { status: "ok" } as CardInteractionResult }}
+  />)
+  const button = within(actionRow()).getByRole("button") as HTMLButtonElement
+  expect(button.disabled).toBe(true)
+  await userEvent.click(button)
+  expect(calls).toEqual([])
+})
+
+test("a busy refusal is explained as a race, not as a permission problem", () => {
+  expect(interactionFailureMessage(new ApiError(409, "card_busy", "This card is already handling an action.")))
+    .toContain("already running")
+})

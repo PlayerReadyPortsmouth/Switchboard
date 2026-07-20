@@ -143,3 +143,62 @@ describe("durability", () => {
     expect(s.listByConversation("conv").map(c => c.correlationId)).toEqual(["ok"])
   })
 })
+
+// The in-flight marker: a click that has been accepted and is still running. It is the one
+// piece of card state that is deliberately NOT a revision — see CardInFlight for why — but it
+// still has to survive a reload, or the reload re-offers a button whose action is running.
+describe("in-flight marker", () => {
+  const flight = { surface: "discord" as const, customId: "deploy:go:7", at: 5_000 }
+
+  test("marking a card in flight does not advance its revision", () => {
+    const { store: s } = store()
+    s.record({ correlationId: "c1", conversationId: "conv", agent: "a", card: card("T", "B") })
+    const marked = s.setInFlight("c1", flight)
+    expect(marked).toMatchObject({ revision: 1, inFlight: flight })
+    // No revision burnt, and nothing added to the history trail the transcript discloses.
+    expect(s.listByConversation("conv")[0]).toMatchObject({ revision: 1, inFlight: flight })
+    expect(s.listByConversation("conv")[0]!.history).toBeUndefined()
+  })
+
+  test("the marker survives a reload — a hydrated card cannot re-offer a running action", () => {
+    const db = new Database(":memory:")
+    const first = new SqliteWebCardStore(db, 20, () => 1_000)
+    first.record({ correlationId: "c1", conversationId: "conv", agent: "a", card: card("T", "B", [{ customId: "deploy:go:7", label: "Deploy" }]) })
+    first.setInFlight("c1", flight)
+    const second = new SqliteWebCardStore(db, 20, () => 2_000)
+    expect(second.listByConversation("conv")[0]!.inFlight).toEqual(flight)
+  })
+
+  test("the next real revision clears the marker — the edit IS the outcome", () => {
+    const { store: s, clock } = store()
+    s.record({ correlationId: "c1", conversationId: "conv", agent: "a", card: card("T", "pending…") })
+    s.setInFlight("c1", flight)
+    clock.t = 2_000
+    const after = s.record({ correlationId: "c1", conversationId: "conv", agent: "a", card: card("T", "✅ done") })
+    expect(after).toMatchObject({ revision: 2 })
+    expect(after!.inFlight).toBeUndefined()
+    expect(s.get("c1")!.inFlight).toBeUndefined()
+  })
+
+  test("an unchanged repost is a delivery retry and leaves the marker alone", () => {
+    const { store: s } = store()
+    s.record({ correlationId: "c1", conversationId: "conv", agent: "a", card: card("T", "B") })
+    s.setInFlight("c1", flight)
+    const again = s.record({ correlationId: "c1", conversationId: "conv", agent: "a", card: card("T", "B") })
+    expect(again).toMatchObject({ revision: 1, inFlight: flight })
+  })
+
+  test("clearing the marker leaves the revision where it was", () => {
+    const { store: s } = store()
+    s.record({ correlationId: "c1", conversationId: "conv", agent: "a", card: card("T", "B") })
+    s.setInFlight("c1", flight)
+    expect(s.setInFlight("c1", null)).toMatchObject({ revision: 1 })
+    expect(s.get("c1")!.inFlight).toBeUndefined()
+  })
+
+  test("marking a card the store has never seen is a no-op, not an error", () => {
+    const { store: s } = store()
+    expect(s.setInFlight("ghost", flight)).toBeNull()
+    expect(s.get("ghost")).toBeNull()
+  })
+})

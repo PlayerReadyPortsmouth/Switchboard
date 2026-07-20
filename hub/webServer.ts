@@ -68,6 +68,9 @@ function cardInteractionResponse(result: WebInteractionResult): Response {
     case "modal": return json({ status: "modal", modal: result.modal })
     case "handled": return json({ status: "handled", action: result.action })
     case "unroutable": return json({ error: "unroutable", reason: result.reason }, 409)
+    // 409 as well: like `unroutable` this is a conflict with the resource's current state,
+    // not a permission problem — retrying later can legitimately succeed.
+    case "busy": return json({ error: "card_busy", reason: result.reason }, 409)
     case "denied":
       return json({ error: result.error, reason: result.reason }, result.error === "web_cards_disabled" ? 503 : 403)
   }

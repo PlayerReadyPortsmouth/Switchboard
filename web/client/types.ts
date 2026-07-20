@@ -222,6 +222,9 @@ export interface CardButton {
   /** Present ⇒ this button opens a form. The client still POSTs first: the hub gates the
    *  OPEN as well as the submit, and the modal it returns is the authoritative spec. */
   modal?: CardModal
+  /** Rendered, not pressable. How a spec says "this control is unavailable right now" — the
+   *  hub sends the same flag to Discord, which renders a disabled button. */
+  disabled?: boolean
 }
 export interface CardField { name: string; value: string; inline?: boolean }
 export interface CardSpec {
@@ -244,6 +247,10 @@ export interface CardRevision { revision: number; card: CardSpec; updatedAt: num
  *
  *  A card MUTATES: an edit re-emits the same `correlationId` with a higher `revision`.
  *  `createdAt` is the FIRST post and never changes, so an edit never reorders the transcript. */
+/** A click on this card that has been accepted and is still running — possibly from Discord.
+ *  Transient: it carries no content, so it does NOT advance `revision`. */
+export interface CardInFlight { surface: "discord" | "web"; customId: string; at: number }
+
 export interface CardInfo {
   correlationId: string
   conversationId: string
@@ -253,6 +260,9 @@ export interface CardInfo {
   updatedAt: number
   card: CardSpec
   history?: CardRevision[]
+  /** Present ⇒ an action on this card is running (on either surface) and its controls must
+   *  not be offered again. Cleared by the next revision, which is the action's outcome. */
+  inFlight?: CardInFlight
 }
 
 /** The 200-shaped replies from `POST /api/conversations/:id/interactions`. Every non-200 is
