@@ -48,6 +48,21 @@ const orderAttachments = (attachments: DocumentAttachment[]): DocumentAttachment
 const orderCards = (cards: CardInfo[]): CardInfo[] =>
   [...cards].sort((left, right) => left.createdAt - right.createdAt || left.correlationId.localeCompare(right.correlationId))
 
+/** Does `incoming` say something new about the in-flight marker at the SAME revision?
+ *
+ *  Two markers compare by `at`, so replaying an older claim over a newer one is refused for
+ *  the same reason an older revision is. Marked-vs-unmarked has no `at` to compare on either
+ *  side, so it falls back to `updatedAt` — which the hub bumps when it sets OR clears the
+ *  marker, precisely so these two can be ordered. A dead tie favours the MARKED copy: a card
+ *  wrongly shown as busy corrects itself on the next revision (the action's outcome), whereas
+ *  one wrongly shown as clickable is the double-fire this whole change exists to stop. */
+const advancesInFlight = (current: CardInfo, incoming: CardInfo): boolean => {
+  const a = current.inFlight, b = incoming.inFlight
+  if (!a && !b) return false
+  if (a && b) return b.at > a.at
+  return b ? incoming.updatedAt >= current.updatedAt : incoming.updatedAt > current.updatedAt
+}
+
 export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction): WorkspaceState {
   switch (action.type) {
     case "session/loaded": return { ...state, session: action.session }
@@ -79,7 +94,14 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
         if (index === -1) return { ...state, cards: orderCards([...state.cards, incoming]) }
         // Revisions only move forward. A re-delivered or out-of-order older revision is
         // dropped rather than applied, so a redelivery can never resurrect dead buttons.
-        if (state.cards[index]!.revision >= incoming.revision) return state
+        const current = state.cards[index]!
+        if (current.revision > incoming.revision) return state
+        // Equal revision is NOT automatically a no-op any more: the in-flight marker is
+        // published without minting a revision (a ⏳ Working state is not something the card
+        // ever SAID, so it does not belong in the revision trail). Such an event is applied
+        // only when it actually changes that marker, and `at` orders two markers at the same
+        // revision so a late-arriving stale one cannot overwrite a fresher claim.
+        if (current.revision === incoming.revision && !advancesInFlight(current, incoming)) return state
         const cards = [...state.cards]
         cards[index] = incoming
         // No re-sort: `createdAt` is immutable across revisions, so the position is unchanged.
@@ -113,12 +135,18 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
     // that also arrived live is not duplicated, and resolved by REVISION rather than by
     // arrival order: the hydration fetch and the event stream start from the same effect, so
     // either can carry the newer state and only the revision number says which. Highest
-    // revision wins; a tie keeps the live copy, which is already mounted.
+    // revision wins; a tie keeps the live copy, which is already mounted — UNLESS the
+    // hydrated copy carries a newer in-flight marker, which by design shares its revision
+    // with the state it marks. Without that exception a reload racing a click could mount the
+    // pre-click card and re-offer a button whose action is already running.
     case "cards/loaded": {
       const merged = new Map(action.cards.map(card => [card.correlationId, card]))
       for (const live of state.cards) {
         const hydrated = merged.get(live.correlationId)
-        if (!hydrated || live.revision >= hydrated.revision) merged.set(live.correlationId, live)
+        if (!hydrated || live.revision > hydrated.revision
+          || (live.revision === hydrated.revision && !advancesInFlight(live, hydrated))) {
+          merged.set(live.correlationId, live)
+        }
       }
       return { ...state, cards: orderCards([...merged.values()]) }
     }

@@ -31,6 +31,9 @@ export function interactionFailureMessage(error: unknown): string {
     case "not_allowlisted": return "You’re not on this Switchboard’s allowlist, so this button is read-only for you."
     case "forbidden_action": return `You’re not authorised to run this action.${reason}`
     case "unroutable": return `Nothing is listening for this card any more, so the click wasn’t delivered.${reason}`
+    // Not a permission failure: the click was allowed and simply lost a race with another
+    // surface (usually Discord). Saying so is what stops the reader pressing it again.
+    case "card_busy": return "Something is already running on this card — most likely it was pressed in Discord. Wait for it to finish."
     case "web_cards_disabled": return "Card actions are switched off on this hub."
     default: return "This action didn’t reach Switchboard. Check the connection, then try again."
   }
@@ -171,9 +174,15 @@ export function AgentCard({ info, onInteract }: { info: CardInfo; onInteract?: C
     }
   }
 
+  // An action on this card is already running — started here, in another browser, or in
+  // Discord. The hub says so on the card itself, so the answer is the same on every screen
+  // showing it: the controls are rendered, and none of them can be pressed. Local `pending`
+  // covers only this tab; `info.inFlight` is what carries a Discord click across.
+  const inFlight = info.inFlight
+  const locked = pending !== null || Boolean(inFlight)
   const buttons = info.card.buttons
   return (
-    <article className="agent-card" aria-labelledby={headingId} data-region="agent-card" data-revision={info.revision} data-correlation-id={info.correlationId}>
+    <article className="agent-card" aria-labelledby={headingId} data-region="agent-card" data-revision={info.revision} data-correlation-id={info.correlationId} data-in-flight={inFlight ? inFlight.surface : undefined}>
       <CardSurface spec={info.card} headingId={headingId} />
       {/* `buttons: []` is terminal: the card renders as a record with no control row at all,
           rather than as an empty toolbar implying something is missing. */}
@@ -184,7 +193,9 @@ export function AgentCard({ info, onInteract }: { info: CardInfo; onInteract?: C
               key={`${button.customId}.${index}`}
               button={button}
               pending={pending === button.customId}
-              disabled={pending !== null}
+              // `button.disabled` is the spec's own say-so (the hub's ⏳ Working row uses it);
+              // `locked` is this card having an action in flight anywhere.
+              disabled={locked || button.disabled === true}
               onClick={() => { void send(button.customId) }}
             />
           ))}
@@ -193,14 +204,20 @@ export function AgentCard({ info, onInteract }: { info: CardInfo; onInteract?: C
       {/* One line carries both states. It is a live region rather than text inside the button
           because the pending button is `disabled`, and a disabled control's changing label is
           not reliably announced — so "sending" and its outcome are announced from here. */}
-      {pending !== null || notice ? (
+      {pending !== null || inFlight || notice ? (
         <p
           className="agent-card-notice"
           data-region="card-notice"
-          data-tone={pending !== null ? "pending" : notice!.tone}
-          role={notice?.tone === "error" && pending === null ? "alert" : "status"}
-          aria-live={notice?.tone === "error" && pending === null ? undefined : "polite"}
-        >{pending !== null ? "Sending…" : notice!.text}</p>
+          data-tone={locked ? "pending" : notice!.tone}
+          role={notice?.tone === "error" && !locked ? "alert" : "status"}
+          aria-live={notice?.tone === "error" && !locked ? undefined : "polite"}
+        >{pending !== null
+          ? "Sending…"
+          // Naming the surface matters: "someone pressed this in Discord" is the difference
+          // between a card that looks broken and a card that is simply busy.
+          : inFlight
+            ? (inFlight.surface === "discord" ? "⏳ Working — started from Discord." : "⏳ Working…")
+            : notice!.text}</p>
       ) : null}
       {/* History last, BELOW the live controls: expanded, a revision trail is tall, and the
           buttons that still work must never be pushed away from the card they belong to. */}

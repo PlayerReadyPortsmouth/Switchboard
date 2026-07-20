@@ -12,6 +12,13 @@ export interface CardLifecycleDeps {
   ownerOf(customId: string): string | undefined
   closeTransport(key: string): void
   runCommand(cmd: string): Promise<number>
+  /** Publish a card's new state canonically, so the web store gets revision N+1.
+   *
+   *  `runGated` is the reason this exists: a `deploy:*` button runs entirely hub-side and
+   *  never produces an agent reply, so its pending → success/failure edits went to Discord
+   *  and nowhere else. The web card kept its original text and its original buttons.
+   *  Optional so the flag-off hub (and every existing test) behaves exactly as before. */
+  publishCard?(correlationId: string, chatId: string, card: CardSpec): void
 }
 
 /** The reply/gated-action core, decoupled from discord.js + the transport map
@@ -68,6 +75,10 @@ export class CardLifecycle {
       const next: CardSpec = { ...loc.card, body: interpolateCommand(text, arg), buttons: [] }
       this.registry.set(correlationId, loc.chatId, loc.messageId, next)
       await this.deps.editCard(loc.chatId, loc.messageId, next)
+      // Discord first, then canonical: the operator watching Discord is the one waiting, and a
+      // canonical-store failure must never break the Discord path (it degrades, it does not
+      // throw — see webCardStore's fail-closed contract).
+      this.deps.publishCard?.(correlationId, loc.chatId, next)
     }
     await editBody(action.pendingText)
     const code = await this.deps.runCommand(interpolateCommand(action.command, arg))

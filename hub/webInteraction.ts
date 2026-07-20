@@ -11,6 +11,7 @@
 // `sendInteraction`, which writes the identical `[interaction] custom_id=… user_id=… fields=…`
 // frame. Note the frame carries the resolved SNOWFLAKE, not the email — an agent that
 // pattern-matches on user_id must see the same value from either surface.
+import { BUSY_REASON } from "./cardSync"
 import { cardGateDenial, type CardGatePolicy } from "./cardGate"
 import { matchGatedAction } from "./gatedActions"
 import { resolveDiscordId } from "./webIdentity"
@@ -27,6 +28,9 @@ export type WebInteractionResult =
   | { status: "denied"; error: WebInteractionDenial; reason: string }
   /** Accepted but undeliverable — no owning agent, or the agent is gone. */
   | { status: "unroutable"; reason: string }
+  /** Refused because a click on this same card is already running (possibly from Discord).
+   *  NOT an authorisation failure — the clicker was allowed; someone got there first. */
+  | { status: "busy"; reason: string }
 
 export type WebInteractionDenial =
   | "web_cards_disabled"
@@ -57,6 +61,14 @@ export interface WebInteractionDeps {
   /** Deliver to the owning agent. Returns a reason when it could not be routed. This is
    *  the SAME `routeCardInteraction`-backed function the Discord path calls. */
   route: (customId: string, userId: string, fields?: Record<string, string>) => string | void
+  /** Take the card's single in-flight claim (hub/cardSync.ts). False ⇒ a click on this card is
+   *  already running — on this surface or on Discord — so this one must not be dispatched.
+   *  Absent ⇒ no claim is taken, which is the pre-web-cards behaviour. */
+  claim?: (customId: string) => boolean
+  /** Reflect the accepted click onto Discord (the Working row) and onto the web card. */
+  markInFlight?: (customId: string) => void
+  /** Give the card back: the action never ran, so its buttons must return on both surfaces. */
+  release?: (customId: string) => void
 }
 
 const DENIAL_REASONS: Record<WebInteractionDenial, string> = {
@@ -101,21 +113,35 @@ export function handleWebInteraction(
     if (modal) return { status: "modal", modal }
   }
 
-  // 5. Hub-side interception, in the Discord order: approvals, then gated actions. These
+  // 5. The card's in-flight claim, taken AFTER every authorisation check and immediately
+  //    before anything can execute. Two surfaces now share one card, and the "⏳ Working"
+  //    row is only a picture of exclusivity — Discord removing its buttons cannot stop a web
+  //    click, and vice versa. This is the part that actually stops the action running twice.
+  if (deps.claim && !deps.claim(customId)) return { status: "busy", reason: BUSY_REASON }
+  // Anything past this point owns the claim and must either mark it in flight or release it.
+  const accept = <T extends WebInteractionResult>(result: T): T => { deps.markInFlight?.(customId); return result }
+  const giveBack = <T extends WebInteractionResult>(result: T): T => { deps.release?.(customId); return result }
+
+  // 6. Hub-side interception, in the Discord order: approvals, then gated actions. These
   //    never reach an agent on either surface.
   const approval = deps.parseApproval(customId)
   if (approval) {
+    // Marked in flight BEFORE the effect runs: `resolveApproval` edits the card to its
+    // terminal state, and that edit is what clears the marker. Marking afterwards would
+    // reinstate a Working row on a card that has already finished.
+    const result = accept({ status: "handled", action: "approval" } as const)
     deps.resolveApproval(approval.id, approval.decision, userId)
-    return { status: "handled", action: "approval" }
+    return result
   }
   const action = matchGatedAction(customId, deps.gatedActions)
   if (action) {
+    const result = accept({ status: "handled", action: "gated" } as const)
     deps.runGated(action, customId)
-    return { status: "handled", action: "gated" }
+    return result
   }
 
-  // 6. Everything else is a card button owned by an agent. Same call, same frame.
+  // 7. Everything else is a card button owned by an agent. Same call, same frame.
   const reason = deps.route(customId, userId, fields)
-  if (reason) return { status: "unroutable", reason }
-  return { status: "ok" }
+  if (reason) return giveBack({ status: "unroutable", reason } as const)
+  return accept({ status: "ok" } as const)
 }

@@ -226,3 +226,92 @@ describe("flag", () => {
     expect(h.gated).toEqual([])
   })
 })
+
+// Two surfaces, one card. Everything below is about the second clicker.
+describe("two-surface concurrency", () => {
+  const withClaims = (overrides: Partial<WebInteractionDeps> = {}) => {
+    const marked: string[] = []
+    const released: string[] = []
+    let claimed: string | null = null
+    const h = harness({
+      claim: (customId) => { if (claimed) return false; claimed = customId; return true },
+      markInFlight: (customId) => { marked.push(customId) },
+      release: (customId) => { released.push(customId); claimed = null },
+      ...overrides,
+    })
+    return { ...h, marked, released, takeClaim: () => { claimed = "someone-else" } }
+  }
+
+  test("a click that loses the race is refused as busy, and never dispatched", () => {
+    const h = withClaims()
+    h.takeClaim()                                   // e.g. a Discord click already running
+    const r = handleWebInteraction("member@example.test", "ticket:ack:7", undefined, h.deps)
+    expect(r.status).toBe("busy")
+    expect(h.routed).toEqual([])
+    expect(h.marked).toEqual([])
+  })
+
+  test("busy is not an authorisation verdict — the gates still run FIRST", () => {
+    // A stranger must be refused for who they are, not told the card is busy: a busy answer
+    // to an unauthorised click would leak that the card exists and is being acted on.
+    const h = withClaims()
+    h.takeClaim()
+    expect(handleWebInteraction("stranger@example.test", "ticket:ack:7", undefined, h.deps))
+      .toMatchObject({ status: "denied", error: "not_allowlisted" })
+    expect(handleWebInteraction("member@example.test", "ops:restart:1", undefined, h.deps))
+      .toMatchObject({ status: "denied", error: "forbidden_action" })
+  })
+
+  test("an accepted web click marks the card in flight (which is what reaches Discord)", () => {
+    const h = withClaims()
+    expect(handleWebInteraction("member@example.test", "ticket:ack:7", undefined, h.deps))
+      .toMatchObject({ status: "ok" })
+    expect(h.marked).toEqual(["ticket:ack:7"])
+    expect(h.released).toEqual([])
+  })
+
+  test("a web modal SUBMIT claims and marks, exactly as a plain click does", () => {
+    const h = withClaims({ modalFor: () => ({ title: "Why?", inputs: [] }) as CardModal })
+    // The open offers the form and fires nothing…
+    expect(handleWebInteraction("member@example.test", "ticket:ack:7", undefined, h.deps).status).toBe("modal")
+    expect(h.marked).toEqual([])
+    // …the submit is the dispatch, so that is what takes the claim.
+    expect(handleWebInteraction("member@example.test", "ticket:ack:7", { why: "dupe" }, h.deps).status).toBe("ok")
+    expect(h.marked).toEqual(["ticket:ack:7"])
+  })
+
+  test("a hub-side gated action marks in flight BEFORE it runs", () => {
+    const order: string[] = []
+    const h = withClaims({ runGated: () => order.push("ran") })
+    h.deps.markInFlight = (customId) => { order.push(`marked:${customId}`) }
+    expect(handleWebInteraction("approver@example.test", "ops:restart:1", undefined, h.deps))
+      .toMatchObject({ status: "handled", action: "gated" })
+    // Marking after the run would repaint a Working row onto a card that already finished.
+    expect(order).toEqual(["marked:ops:restart:1", "ran"])
+  })
+
+  test("an approval click marks in flight before resolving", () => {
+    const h = withClaims()
+    expect(handleWebInteraction("approver@example.test", "approval:grant:a1", undefined, h.deps))
+      .toMatchObject({ status: "handled", action: "approval" })
+    expect(h.marked).toEqual(["approval:grant:a1"])
+    expect(h.approvals).toHaveLength(1)
+  })
+
+  test("an unroutable click gives the card back instead of stranding it on Working", () => {
+    const h = withClaims({ route: () => "the agent that owns this button is no longer running" })
+    expect(handleWebInteraction("member@example.test", "ticket:ack:7", undefined, h.deps))
+      .toMatchObject({ status: "unroutable" })
+    expect(h.released).toEqual(["ticket:ack:7"])
+    expect(h.marked).toEqual([])
+    // …and the card is genuinely clickable again afterwards.
+    expect(handleWebInteraction("member@example.test", "ticket:ack:7", undefined, h.deps).status).toBe("unroutable")
+  })
+
+  test("with no claim wired at all the path behaves exactly as before", () => {
+    const h = harness()
+    expect(handleWebInteraction("member@example.test", "ticket:ack:7", undefined, h.deps).status).toBe("ok")
+    expect(handleWebInteraction("member@example.test", "ticket:ack:7", undefined, h.deps).status).toBe("ok")
+    expect(h.routed).toHaveLength(2)
+  })
+})

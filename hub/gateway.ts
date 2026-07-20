@@ -7,6 +7,7 @@ import { createHash } from "node:crypto"
 import type { AgentRegistry, InboundMessage, AgentReply, AgentConfig, HubConfig, CardSpec, CardModal } from "./types"
 import { chunk, formatOutbound } from "./format"
 import { buildModal } from "./modal"
+import { WORKING_BUTTON } from "./cardSync"
 import type { CardStore, StoredModal } from "./cardStore"
 
 /** What a card-button / modal-submit handler reports back to the gateway.
@@ -55,6 +56,9 @@ export function buildCardComponents(card: CardSpec): {
       const btn = new ButtonBuilder().setCustomId(clip(b.customId, 100)).setLabel(clip(b.label, 80))
         .setStyle(STYLE[b.style ?? "secondary"])
       if (b.emoji) btn.setEmoji(b.emoji)
+      // A disabled button is how a CardSpec expresses "in flight" — the same spec the web
+      // renders as unavailable. Discord never delivers an interaction for one.
+      if (b.disabled) btn.setDisabled(true)
       return btn
     })
   const row = btns.length
@@ -91,16 +95,18 @@ export function renderAgentList(reg: AgentRegistry, permitted: string[], current
 /** A single disabled "Working" button row. Swapped in when a user clicks a card
  *  button (or submits a card modal) so the card immediately reflects "handed off,
  *  in progress" and can't be double-clicked. The agent's later editCard replaces
- *  it with the final state; if the agent never edits, the card simply rests here. */
+ *  it with the final state; if the agent never edits, the card simply rests here.
+ *
+ *  Built from the shared `WORKING_BUTTON` spec (hub/cardSync.ts) — the same one the web
+ *  surface and `workingCard()` use — so a click looks identical wherever it is shown. */
 export function buildWorkingRow(): ActionRowBuilder<ButtonBuilder> {
-  return new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder()
-      .setCustomId("working:noop")
-      .setLabel("Working")
-      .setEmoji("⏳")
-      .setStyle(ButtonStyle.Secondary)
-      .setDisabled(true),
-  )
+  const btn = new ButtonBuilder()
+    .setCustomId(WORKING_BUTTON.customId)
+    .setLabel(WORKING_BUTTON.label)
+    .setStyle(STYLE[WORKING_BUTTON.style ?? "secondary"]!)
+    .setDisabled(true)
+  if (WORKING_BUTTON.emoji) btn.setEmoji(WORKING_BUTTON.emoji)
+  return new ActionRowBuilder<ButtonBuilder>().addComponents(btn)
 }
 
 /** A forwarded message snapshot, normalised. Discord delivers forwards in

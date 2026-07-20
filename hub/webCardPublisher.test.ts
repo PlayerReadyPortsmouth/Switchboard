@@ -134,7 +134,10 @@ describe("updating a card", () => {
 test("a store error is swallowed and reported, never thrown at the agent", () => {
   const errors: unknown[] = []
   const { deps, published } = harness({
-    store: { record: () => { throw new Error("db gone") }, listByConversation: () => [] },
+    store: {
+      record: () => { throw new Error("db gone") },
+      listByConversation: () => [], setInFlight: () => null, get: () => null,
+    },
     onError: e => { errors.push(e) },
   })
 

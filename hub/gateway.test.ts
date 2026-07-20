@@ -117,6 +117,7 @@ gt("buildModal integrates for a feedback button (smoke)", () => {
 })
 
 import { buildWorkingRow } from "./gateway"
+import { workingCard } from "./cardSync"
 
 test("buildWorkingRow is a single disabled Working button", () => {
   const row = buildWorkingRow()
@@ -125,6 +126,28 @@ test("buildWorkingRow is a single disabled Working button", () => {
   expect(b.label).toBe("Working")
   expect(b.disabled).toBe(true)
   expect(b.custom_id).toBe("working:noop")
+})
+
+// A web click has to produce the SAME Working treatment on the Discord card, and it gets there
+// by editing the card with `workingCard(spec)` rather than by an interaction row. The two
+// renderings must therefore agree, or the surfaces drift.
+test("workingCard renders through buildCardComponents identically to buildWorkingRow", () => {
+  const { row } = buildCardComponents(workingCard({
+    title: "Ticket 41", body: "Duplicate invoice",
+    buttons: [{ customId: "t:fixnow:41", label: "Fix now", style: "success" }],
+  }))
+  expect(row).toBeDefined()
+  expect(row!.components.length).toBe(1)
+  expect(row!.components[0].data).toEqual(buildWorkingRow().components[0].data)
+})
+
+test("buildCardComponents honours a spec-level disabled button", () => {
+  const { row } = buildCardComponents({
+    title: "T", body: "B",
+    buttons: [{ customId: "a:b:c", label: "Live" }, { customId: "d:e:f", label: "Held", disabled: true }],
+  })
+  expect((row!.components[0].data as any).disabled).toBeUndefined()
+  expect((row!.components[1].data as any).disabled).toBe(true)
 })
 
 import { buildAttachmentFiles } from "./gateway"

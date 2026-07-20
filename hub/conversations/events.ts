@@ -10,6 +10,23 @@ export interface CardRevision {
   updatedAt: number
 }
 
+/** A click that has been accepted and is still running.
+ *
+ *  Deliberately NOT a revision. The "⏳ Working" state is ephemeral — it is superseded seconds
+ *  later by the agent's (or the gated action's) real edit — and minting a revision for every
+ *  click would fill `web_card_revisions` and the card's disclosed history with noise that says
+ *  nothing about what the card ever CONTAINED. It is still persisted on the card row, because
+ *  a reload that re-offered a button whose action is already running would be the same
+ *  double-fire bug on a slower path. Cleared automatically by the next real revision. */
+export interface CardInFlight {
+  /** Which surface accepted the click. Provenance for the reader, never authorisation. */
+  surface: "discord" | "web"
+  /** The button that was clicked. */
+  customId: string
+  /** Epoch ms the claim was taken. Breaks ties between two same-revision markers. */
+  at: number
+}
+
 /** A rich card an agent posted into a conversation, surfaced as an interactive card in the
  *  web transcript.
  *
@@ -37,6 +54,9 @@ export interface CardInfo {
   card: CardSpec
   /** Prior states, oldest first. Absent when this card has never been edited. */
   history?: CardRevision[]
+  /** Set while a click on this card is running on EITHER surface. The client renders the
+   *  card's controls as unavailable; it does not change `revision`. */
+  inFlight?: CardInFlight
 }
 
 /** A document published into a web conversation, surfaced as an inline card in the transcript.

@@ -209,3 +209,66 @@ test("selecting another conversation clears the cards", () => {
   const switched = workspaceReducer(state, { type: "conversation/selected", conversationId: "c2" })
   expect(switched.cards).toEqual([])
 })
+
+// --- In-flight (a click running on the OTHER surface) ---------------------------------------
+// The marker shares its card's revision by design: a transient "⏳ Working" is not something
+// the card ever SAID, so it must not mint a revision and pad the history trail. That makes the
+// equal-revision case meaningful for the first time, and these tests pin both halves of it —
+// the marker must get through, and a stale replay still must not.
+const inFlight = (at: number, surface: "discord" | "web" = "discord") =>
+  ({ surface, customId: "triage:fix:1", at })
+
+test("a Discord click reaches the web card as in-flight at the SAME revision", () => {
+  const posted = reduce(initialWorkspaceState, cardEvent(cardInfo()))
+  const marked = reduce(posted, cardEvent(cardInfo({ updatedAt: 2000, inFlight: inFlight(2000) })))
+  expect(marked.cards[0]!.revision).toBe(1)
+  expect(marked.cards[0]!.inFlight).toEqual(inFlight(2000))
+  // The buttons are untouched in the data — it is the marker, not an edit, that makes the
+  // card unavailable, so the card still says what it said.
+  expect(marked.cards[0]!.card.buttons).toHaveLength(1)
+})
+
+test("clearing the marker at the same revision gets through too", () => {
+  const marked = reduce(initialWorkspaceState, cardEvent(cardInfo()), cardEvent(cardInfo({ updatedAt: 2000, inFlight: inFlight(2000) })))
+  const cleared = reduce(marked, cardEvent(cardInfo({ updatedAt: 3000 })))
+  expect(cleared.cards[0]!.inFlight).toBeUndefined()
+})
+
+test("a redelivered event that changes nothing is still dropped", () => {
+  const marked = reduce(initialWorkspaceState, cardEvent(cardInfo()), cardEvent(cardInfo({ updatedAt: 2000, inFlight: inFlight(2000) })))
+  const replayed = reduce(marked, cardEvent(cardInfo({ updatedAt: 2000, inFlight: inFlight(2000) })))
+  expect(replayed).toBe(marked)
+})
+
+test("a stale marker never overwrites a fresher one at the same revision", () => {
+  const marked = reduce(initialWorkspaceState, cardEvent(cardInfo()), cardEvent(cardInfo({ updatedAt: 5000, inFlight: inFlight(5000, "web") })))
+  const stale = reduce(marked, cardEvent(cardInfo({ updatedAt: 6000, inFlight: inFlight(2000, "discord") })))
+  expect(stale.cards[0]!.inFlight).toEqual(inFlight(5000, "web"))
+})
+
+test("revisions still never go backwards, marker or no marker", () => {
+  const current = reduce(
+    initialWorkspaceState,
+    cardEvent(cardInfo()),
+    cardEvent(cardInfo({ revision: 3, card: spec("✅ Deployed to live.") })),
+  )
+  // An older revision carrying a marker is exactly the interleaving to worry about: a Discord
+  // click's in-flight publish arriving after the agent's real update. It must lose.
+  const late = reduce(current, cardEvent(cardInfo({ revision: 1, inFlight: inFlight(9000) })))
+  expect(late).toBe(current)
+  expect(late.cards[0]!.revision).toBe(3)
+  expect(late.cards[0]!.inFlight).toBeUndefined()
+})
+
+test("a reload mid-click hydrates the marker rather than re-offering the button", () => {
+  // The live copy is the pre-click card; the hydration snapshot was taken after the click.
+  const live = reduce(initialWorkspaceState, cardEvent(cardInfo()))
+  const merged = workspaceReducer(live, { type: "cards/loaded", cards: [cardInfo({ updatedAt: 2000, inFlight: inFlight(2000) })] })
+  expect(merged.cards[0]!.inFlight).toEqual(inFlight(2000))
+})
+
+test("hydration does not resurrect a marker the live stream has already cleared", () => {
+  const live = reduce(initialWorkspaceState, cardEvent(cardInfo()), cardEvent(cardInfo({ updatedAt: 5000, inFlight: inFlight(5000) })), cardEvent(cardInfo({ updatedAt: 6000 })))
+  const merged = workspaceReducer(live, { type: "cards/loaded", cards: [cardInfo({ updatedAt: 2000, inFlight: inFlight(2000) })] })
+  expect(merged.cards[0]!.inFlight).toBeUndefined()
+})

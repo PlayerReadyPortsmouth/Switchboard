@@ -33,12 +33,13 @@ import { CardRegistry } from "./cardRegistry"
 import { SqliteCardStore } from "./cardStore"
 import { routeCardInteraction } from "./cardRouting"
 import { CardLifecycle } from "./cardLifecycle"
+import { BUSY_REASON, CardSync } from "./cardSync"
 import { matchGatedAction } from "./gatedActions"
 import { cardGateAllows, type CardGatePolicy } from "./cardGate"
 import { SqliteWebCardStore } from "./webCardStore"
 import { buildIdentityMap } from "./webIdentity"
 import { handleWebInteraction } from "./webInteraction"
-import type { CardInfo } from "./conversations/events"
+import type { CardInFlight, CardInfo } from "./conversations/events"
 import { clearReactionAgent, resolvePinnedAgent } from "./channelPin"
 import { MessageCache } from "./messageCache"
 import { enrich, foldQuote, foldAttachments, foldForward } from "./enrich"
@@ -198,6 +199,12 @@ let mirrorRichReplyToWeb = (_reply: AgentReply, _card: CardSpec): void => {}
 // Lane C: persist a card canonically and publish its live `card` event. Assigned below once
 // the conversation subsystem exists; a no-op until then and whenever the flag is off.
 let publishCanonicalCard = (_reply: AgentReply, _card: CardSpec): void => {}
+// The same publish, addressed by correlationId rather than by an agent reply — every hub-side
+// card mutation (gated actions, approvals, missions) has a correlationId and a chat but no
+// AgentReply to hand. Assigned alongside publishCanonicalCard; a no-op until then.
+let publishCanonicalCardById = (_correlationId: string, _chatId: string, _card: CardSpec, _agent: string): void => {}
+// Set/clear the transient in-flight marker and publish the result. Never mints a revision.
+let publishCardInFlight = (_correlationId: string, _inFlight: CardInFlight | null): void => {}
 /** Distinguish successive revisions of the same card so each edit mirrors as its own
  *  web message, while an identical re-send still dedupes on the canonical client key. */
 const cardRevision = (card: CardSpec): string =>
@@ -418,7 +425,32 @@ const cardLifecycle = new CardLifecycle(cardRegistry, {
   ownerOf: (customId) => notifyRouter.agentFor(customId),
   closeTransport: (key) => { void transports.get(key)?.close() },
   runCommand: (cmd) => Bun.spawn(["sh", "-c", cmd], { stdout: "inherit", stderr: "inherit" }).exited,
+  // A gated action's pending/success/failure edits are a real content change, so they mint a
+  // revision exactly as an agent's update_card does. Before this they existed only on Discord.
+  publishCard: (correlationId, chatId, card) => cardSync.publishState(correlationId, chatId, card),
 })
+
+// The one chokepoint every card mutation passes through. See hub/cardSync.ts for why the
+// transient "Working" state is published WITHOUT a revision while content edits mint one.
+// Inert when hub.webCards is off: no claims, no publishes, no Discord edits.
+const cardSync = new CardSync({
+  enabled: webCardsOn,
+  now: () => Date.now(),
+  ...(webCardsCfg?.claimTtlMs !== undefined ? { claimTtlMs: webCardsCfg.claimTtlMs } : {}),
+  publish: (correlationId, chatId, card) =>
+    publishCanonicalCardById(correlationId, chatId, card, "hub"),
+  publishInFlight: (correlationId, inFlight) => publishCardInFlight(correlationId, inFlight),
+  currentCard: (correlationId) => cardRegistry.get(correlationId)?.card,
+  editDiscord: async (correlationId, card) => {
+    const loc = cardRegistry.get(correlationId)
+    if (!loc) return
+    // gateway.editCard already swallows its own failures; the card simply stays as it was on
+    // Discord and the web still shows the click as in flight.
+    await gateway.editCard(loc.chatId, loc.messageId, card)
+  },
+})
+/** The correlationId a clicked button belongs to, if the hub still knows the card. */
+const correlationForButton = (customId: string): string | undefined => cardRegistry.correlationFor(customId)
 
 // Virtual consult channels currently in the retry loop — their overflow events are
 // suppressed so the retry loop owns the settle lifecycle.
@@ -1103,7 +1135,15 @@ async function runWorkflow(workflowId: string, input: string, chatId: string, ac
   audit.record({ kind: "mission", actor, action: "start", target: workflowId, chat: chatId, outcome: "ok", corr: runId, detail: { steps: wf.steps.length } })
   const msgId = await gateway.sendCard(chatId, renderMissionCard(run))
   if (msgId) missionCards.set(runId, { chatId, messageId: msgId })
-  const editCard = () => { const loc = missionCards.get(runId); if (loc) void gateway.editCard(loc.chatId, loc.messageId, renderMissionCard(run)) }
+  // Same shape as the approval card: hub-owned, re-rendered on every step, and previously
+  // visible only on Discord. `runId` is already unique per run, so it is the correlation.
+  cardSync.publishState(runId, chatId, renderMissionCard(run))
+  const editCard = () => {
+    const loc = missionCards.get(runId)
+    const card = renderMissionCard(run)
+    if (loc) void gateway.editCard(loc.chatId, loc.messageId, card)
+    cardSync.publishState(runId, chatId, card)
+  }
 
   // try/finally guarantees the card entry is reclaimed on every exit path —
   // success, an aborted step, or an unexpected throw (the call is fire-and-forget).
@@ -1140,9 +1180,21 @@ async function requestApproval(req: ApprovalRequest, fire: ApprovalFire): Promis
   })
   const channel = hub.approvals?.channelId ?? req.chat
   if (!channel) { process.stderr.write(`approval ${e.id}: no channel to post to\n`); return }
-  const messageId = await gateway.sendCard(channel, renderApprovalCard(e))
-  if (messageId) approvalCards.set(e.id, { chatId: channel, messageId })
+  const card = renderApprovalCard(e)
+  const messageId = await gateway.sendCard(channel, card)
+  if (messageId) {
+    approvalCards.set(e.id, { chatId: channel, messageId })
+    // Register it like any other card so its correlation, buttons and location are known —
+    // without this the approval card exists ONLY on Discord and a web click on it could
+    // never be tied back to a message to edit.
+    cardRegistry.set(approvalCorrelationId(e.id), channel, messageId, card)
+  }
+  cardSync.publishState(approvalCorrelationId(e.id), channel, card)
 }
+/** Approval cards are hub-owned and carry no agent correlationId, so they get a derived one.
+ *  Stable across the request and its resolution, which is what makes the resolved card
+ *  revision 2 of the same card rather than a second card. */
+function approvalCorrelationId(id: string): string { return `approval:${id}` }
 /** Resolve an approval from a button click: audit the decision, edit the card to
  *  its terminal state, and (on grant) fire the held effect exactly once. */
 async function resolveApproval(id: string, decision: ApprovalDecision, userId: string): Promise<void> {
@@ -1153,7 +1205,13 @@ async function resolveApproval(id: string, decision: ApprovalDecision, userId: s
     target: e.target, chat: e.chat, outcome: decision === "grant" ? "ok" : "deny", corr: e.id,
   })
   const loc = approvalCards.get(e.id); approvalCards.delete(e.id)
-  if (loc) await gateway.editCard(loc.chatId, loc.messageId, renderApprovalCard(e))
+  const resolved = renderApprovalCard(e)
+  if (loc) {
+    await gateway.editCard(loc.chatId, loc.messageId, resolved)
+    // Discord first, then canonical — the resolved card (no buttons) becomes revision 2 on
+    // the web, which is also what clears its in-flight marker.
+    cardSync.publishState(approvalCorrelationId(e.id), loc.chatId, resolved)
+  }
   if (decision === "grant") {
     try { await e.fire(e.id) } catch (err) { process.stderr.write(`approval ${e.id} fire failed: ${err}\n`) }
   }
@@ -1290,6 +1348,10 @@ async function onAgentReply(reply: AgentReply, key: string): Promise<void | Send
   if (reply.kind === "update" && reply.card && reply.correlationId) {
     trace.record({ agent: reply.agent, chat: reply.chatId, kind: "update", text: cardTraceText(reply.card) })
     mirrorRichReplyToWeb(canonicalReply, reply.card)
+    // The agent's edit is the outcome of whatever click was in flight, so the claim is done.
+    // (The store clears the persisted marker itself as part of minting the new revision; this
+    // releases the in-memory claim so the card's NEXT click is not refused as busy.)
+    cardSync.settle(reply.correlationId)
     publishCanonicalCard(canonicalReply, reply.card)
     return await cardLifecycle.onUpdate(reply.correlationId, reply.chatId, reply.card, key)
   }
@@ -1912,8 +1974,31 @@ const routeInteraction = (customId: string, userId: string, fields?: Record<stri
     persistenceOn: cardPersistOn,
   })
 
+/** Shared by the Discord button and modal-submit handlers.
+ *
+ *  Runs AFTER the gateway has already acknowledged the interaction with its optimistic
+ *  "⏳ Working" swap, so nothing here sits between the clicker and Discord's three-second
+ *  deadline. It takes the card's claim (so a simultaneous web click cannot run the same action
+ *  again) and mirrors the in-flight state onto the web card, which otherwise kept showing live
+ *  buttons for an action that was already running.
+ *
+ *  Returns a reason string when the click must NOT be dispatched — the gateway's existing
+ *  `NotifyRouteFailure` contract, which puts the original buttons back and tells the clicker. */
+const beginDiscordClick = (customId: string): string | undefined => {
+  const correlationId = correlationForButton(customId)
+  if (!cardSync.begin(correlationId, "discord", customId)) return BUSY_REASON
+  cardSync.markInFlight(correlationId, "discord", customId)
+  return undefined
+}
+/** The click never reached anything, so hand the card back on both surfaces: the gateway
+ *  restores the Discord row from the interaction, and this clears the web marker and the claim
+ *  so the card is not left permanently unclickable everywhere else. */
+const abandonDiscordClick = (customId: string): void => cardSync.release(correlationForButton(customId))
+
 // A card button was clicked → gated actions run hub-side; others relay to the agent.
 if (discordGateway) gateway.onNotifyButton((customId, userId) => {
+  const busy = beginDiscordClick(customId)
+  if (busy) return busy
   const ap = parseApprovalCustomId(customId)
   if (ap) { void resolveApproval(ap.id, ap.decision, userId); return }
   const action = matchGatedAction(customId, hub.gatedActions ?? [])
@@ -1922,16 +2007,23 @@ if (discordGateway) gateway.onNotifyButton((customId, userId) => {
   if (memBrowseOn && mem?.ns === "mem") {
     if (!isMemOperator(userId)) {
       audit.record({ kind: "event", actor: `user:${userId}`, action: "memory_deny", outcome: "deny", detail: { via: "button" } })
+      abandonDiscordClick(customId)
       return
     }
     void handleMemButton(mem.action, parseMemArg(mem.arg), userId)
     return
   }
-  return routeInteraction(customId, userId)
+  const reason = routeInteraction(customId, userId)
+  if (reason) abandonDiscordClick(customId)
+  return reason
 })
 
 if (discordGateway) gateway.onModalSubmit((customId, userId, fields) => {
-  return routeInteraction(customId, userId, fields)
+  const busy = beginDiscordClick(customId)
+  if (busy) return busy
+  const reason = routeInteraction(customId, userId, fields)
+  if (reason) abandonDiscordClick(customId)
+  return reason
 })
 
 if (discordGateway) gateway.onReaction((emojiName, userId, channelId /* , messageId */) => {
@@ -2492,6 +2584,28 @@ publishCanonicalCard = (reply, card) => {
     onError: error => process.stderr.write(`web cards: publish failed: ${error}\n`),
   })
 }
+// The same path, entered by correlationId instead of by an agent reply. Hub-side mutations
+// (gated actions, approval resolution, mission progress) have no AgentReply — before this they
+// edited Discord and told the web nothing, so a web card kept stale text and live buttons.
+// An existing row's stored `agent` wins over the caller's fallback: re-labelling a triage
+// agent's card as "hub" because the hub edited it would be a lie about who owns it.
+publishCanonicalCardById = (correlationId, chatId, card, agent) => {
+  publishCardToWeb({ chatId, agent: webCardStore?.get(correlationId)?.agent ?? agent, correlationId }, card, {
+    store: webCardStore,
+    resolveConversation: id => resolveConversationId(conversationRepo, id),
+    publish: info => conversationEvents.publish(buildCardEvent(info, Date.now())),
+    onError: error => process.stderr.write(`web cards: publish failed: ${error}\n`),
+  })
+}
+// The transient marker. Deliberately not routed through publishCardToWeb: it mints no
+// revision, so it needs neither conversation resolution nor the record() path — the row it
+// updates already knows its conversation. Fail-closed like every other card write.
+publishCardInFlight = (correlationId, inFlight) => {
+  try {
+    const info = webCardStore?.setInFlight(correlationId, inFlight)
+    if (info) conversationEvents.publish(buildCardEvent(info, Date.now()))
+  } catch (error) { process.stderr.write(`web cards: in-flight publish failed: ${error}\n`) }
+}
 
 turnCoordinator = new TurnCoordinator(
   conversationService,
@@ -2558,7 +2672,11 @@ const webDeps: WebDeps = {
       target: e.target, chat: e.chat, outcome: decision === "grant" ? "ok" : "deny", corr: e.id,
     })
     const loc = approvalCards.get(e.id); approvalCards.delete(e.id)
-    if (loc) await gateway.editCard(loc.chatId, loc.messageId, renderApprovalCard(e))
+    const resolved = renderApprovalCard(e)
+    if (loc) {
+      await gateway.editCard(loc.chatId, loc.messageId, resolved)
+      cardSync.publishState(approvalCorrelationId(e.id), loc.chatId, resolved)
+    }
     if (decision === "grant") {
       try { await e.fire(e.id) } catch (err) { process.stderr.write(`approval ${e.id} fire failed: ${err}\n`) }
     }
@@ -2746,6 +2864,13 @@ const webDeps: WebDeps = {
         parseApproval: (customId) => parseApprovalCustomId(customId),
         runGated: (action, customId) => { void cardLifecycle.runGated(action, customId) },
         route: (customId, userId, fields) => routeInteraction(customId, userId, fields),
+        // The other half of the fix. A web click used to leave the Discord card showing live
+        // buttons for an action that was already running — so the same action could be fired
+        // again from Discord. `claim` serialises the two surfaces; `markInFlight` paints the
+        // Discord card with the same ⏳ Working row a Discord click would have produced.
+        claim: (customId) => cardSync.begin(correlationForButton(customId), "web", customId),
+        markInFlight: (customId) => cardSync.markInFlight(correlationForButton(customId), "web", customId),
+        release: (customId) => cardSync.release(correlationForButton(customId)),
       })
     },
   } : {}),
@@ -2782,7 +2907,14 @@ if (approvalsEnabled) {
     for (const e of approvalRegistry.sweepExpired()) {
       audit.record({ kind: "approval", actor: "hub", action: "expire", target: e.target, chat: e.chat, outcome: "deny", corr: e.id })
       const loc = approvalCards.get(e.id); approvalCards.delete(e.id)
-      if (loc) void gateway.editCard(loc.chatId, loc.messageId, renderApprovalCard(e))
+      const expired = renderApprovalCard(e)
+      if (loc) {
+        void gateway.editCard(loc.chatId, loc.messageId, expired)
+        // Expiry is a real state change (the card loses its buttons and says so), so the web
+        // gets it as a revision like any other — otherwise it keeps offering Approve/Deny on
+        // an approval that can no longer be granted.
+        cardSync.publishState(approvalCorrelationId(e.id), loc.chatId, expired)
+      }
     }
   }, 60_000).unref()
 }

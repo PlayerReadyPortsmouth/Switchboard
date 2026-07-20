@@ -14,14 +14,24 @@
 // errors. A broken card DB degrades to "the web shows no cards"; it never takes an agent
 // reply, or the hub, down with it.
 import type { Database } from "bun:sqlite"
-import type { CardInfo, CardRevision } from "./conversations/events"
+import type { CardInFlight, CardInfo, CardRevision } from "./conversations/events"
 import type { CardSpec } from "./types"
 import { runWebCardMigrations } from "./webCardMigrations"
 
 export interface WebCardStore {
   /** Persist a post or an edit, returning the card's new canonical state — or `null` when
-   *  nothing was stored (storage error), so the caller publishes no event. */
+   *  nothing was stored (storage error), so the caller publishes no event.
+   *
+   *  A real content change also clears any in-flight marker: the edit IS the answer to the
+   *  click that set it, so nothing has to remember to release it. */
   record(input: { correlationId: string; conversationId: string; agent: string; card: CardSpec }): CardInfo | null
+  /** Set or clear the transient "a click is running" marker WITHOUT minting a revision.
+   *  Returns the card's state so the caller can publish it, or null when the card is unknown
+   *  (nothing to mark) or storage failed. */
+  setInFlight(correlationId: string, inFlight: CardInFlight | null): CardInfo | null
+  /** One card's current state, or null. Used to reuse a card's stored `agent` when the hub
+   *  edits it without an owning agent reply to hand. */
+  get(correlationId: string): CardInfo | null
   /** Every card in a conversation, oldest first by anchor. The hydration path. */
   listByConversation(conversationId: string): CardInfo[]
 }
@@ -42,8 +52,8 @@ export class SqliteWebCardStore implements WebCardStore {
     try {
       let result: CardInfo | null = null
       this.db.transaction(() => {
-        const existing = this.db.query<{ revision: number; card_json: string; created_at: number }, [string]>(
-          "SELECT revision, card_json, created_at FROM web_cards WHERE correlation_id = ?").get(correlationId)
+        const existing = this.db.query<{ revision: number; card_json: string; created_at: number; in_flight_json: string | null }, [string]>(
+          "SELECT revision, card_json, created_at, in_flight_json FROM web_cards WHERE correlation_id = ?").get(correlationId)
 
         if (!existing) {
           this.db.query(
@@ -54,12 +64,13 @@ export class SqliteWebCardStore implements WebCardStore {
         }
 
         // An unchanged repost is not an edit. Return the current state untouched so the
-        // revision counter tracks real state changes, not delivery retries.
+        // revision counter tracks real state changes, not delivery retries — including any
+        // in-flight marker, which a redelivery has not answered either.
         if (existing.card_json === cardJson) {
           result = this.hydrate({
             correlation_id: correlationId, conversation_id: conversationId, agent,
             revision: existing.revision, card_json: existing.card_json,
-            created_at: existing.created_at, updated_at: t,
+            created_at: existing.created_at, updated_at: t, in_flight_json: existing.in_flight_json,
           })
           return
         }
@@ -71,8 +82,10 @@ export class SqliteWebCardStore implements WebCardStore {
         ).run(correlationId, existing.revision, existing.card_json, t)
 
         const revision = existing.revision + 1
+        // in_flight_json is cleared here, unconditionally: this new content IS the outcome of
+        // whatever click was running, so the marker has nothing left to guard against.
         this.db.query(
-          `UPDATE web_cards SET conversation_id=?, agent=?, revision=?, card_json=?, updated_at=?
+          `UPDATE web_cards SET conversation_id=?, agent=?, revision=?, card_json=?, updated_at=?, in_flight_json=NULL
            WHERE correlation_id=?`).run(conversationId, agent, revision, cardJson, t, correlationId)
 
         // Bound the trail. Oldest revisions go first; `maxHistory` 0 keeps none.
@@ -85,16 +98,46 @@ export class SqliteWebCardStore implements WebCardStore {
         result = this.hydrate({
           correlation_id: correlationId, conversation_id: conversationId, agent,
           revision, card_json: cardJson, created_at: existing.created_at, updated_at: t,
+          in_flight_json: null,
         })
       })()
       return result
     } catch (e) { this.warn("record", e); return null }
   }
 
+  /** Set/clear the in-flight marker in place. `revision` is deliberately untouched — the
+   *  client accepts an equal-revision event only when this field changed, so the marker
+   *  propagates without ever letting a transient state impersonate a content edit.
+   *
+   *  `updated_at` IS bumped: the row genuinely changed, and it is the only thing that lets the
+   *  client order a "cleared" state against a "marked" one when they share a revision. Without
+   *  it a stale hydration snapshot could reinstate a marker the live stream had already
+   *  cleared, freezing the card as busy. */
+  setInFlight(correlationId: string, inFlight: CardInFlight | null): CardInfo | null {
+    try {
+      const json = inFlight ? JSON.stringify(inFlight) : null
+      const changed = this.db.query(
+        "UPDATE web_cards SET in_flight_json = ?, updated_at = ? WHERE correlation_id = ?")
+        .run(json, this.now(), correlationId)
+      // An unknown correlation is not an error: hub-owned cards, cards posted before the flag
+      // went on, and Discord-only channels all have no row. Nothing to mark, nothing to publish.
+      if (!changed.changes) return null
+      return this.get(correlationId)
+    } catch (e) { this.warn("setInFlight", e); return null }
+  }
+
+  get(correlationId: string): CardInfo | null {
+    try {
+      const row = this.db.query<CardRow, [string]>(
+        `SELECT ${CARD_COLUMNS} FROM web_cards WHERE correlation_id = ?`).get(correlationId)
+      return row ? this.hydrate(row) : null
+    } catch (e) { this.warn("get", e); return null }
+  }
+
   listByConversation(conversationId: string): CardInfo[] {
     try {
       return this.db.query<CardRow, [string]>(
-        `SELECT correlation_id, conversation_id, agent, revision, card_json, created_at, updated_at
+        `SELECT ${CARD_COLUMNS}
          FROM web_cards WHERE conversation_id = ? ORDER BY created_at, correlation_id`,
       ).all(conversationId).map(row => this.hydrate(row)).filter((c): c is CardInfo => c !== null)
     } catch (e) { this.warn("listByConversation", e); return [] }
@@ -117,6 +160,11 @@ export class SqliteWebCardStore implements WebCardStore {
     }
     const history = this.historyFor(row.correlation_id)
     if (history.length) info.history = history
+    // A marker whose JSON no longer parses is dropped, not surfaced: the failure mode of a
+    // missing marker (a button offered once too often) is milder than a card frozen as
+    // "working" by a corrupt row nobody can clear.
+    const inFlight = row.in_flight_json ? parse<CardInFlight>(row.in_flight_json) : null
+    if (inFlight && inFlight.surface && typeof inFlight.at === "number") info.inFlight = inFlight
     return info
   }
 
@@ -139,6 +187,8 @@ export class SqliteWebCardStore implements WebCardStore {
   }
 }
 
+const CARD_COLUMNS = "correlation_id, conversation_id, agent, revision, card_json, created_at, updated_at, in_flight_json"
+
 interface CardRow {
   correlation_id: string
   conversation_id: string
@@ -147,6 +197,7 @@ interface CardRow {
   card_json: string
   created_at: number
   updated_at: number
+  in_flight_json: string | null
 }
 
 function parse<T>(json: string): T | null {
