@@ -1,17 +1,24 @@
 import { describe, expect, it } from "bun:test";
 import {
   chmodSync,
+  constants,
+  copyFileSync,
+  existsSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  type PreparerIo,
   prepareAgentsConfig,
+  prepareConfigDirectory,
   prepareHubConfig,
 } from "./prepare-readyapp-glitchtip-autofix";
 
@@ -149,6 +156,67 @@ describe("prepareAgentsConfig", () => {
       );
     }
   });
+
+  it("rejects partial and duplicate prompt contracts for every target agent", () => {
+    const contracts = [
+      {
+        id: "prod-sentinel",
+        marker: "## GlitchTip auto-fix handoff",
+        suffix: PROD_SENTINEL_SUFFIX,
+      },
+      {
+        id: "triage",
+        marker: "## GlitchTip candidate consults",
+        suffix: TRIAGE_SUFFIX,
+      },
+      { id: "fix", marker: "## Monitoring-card mode", suffix: FIX_SUFFIX },
+      {
+        id: "fix-quick",
+        marker: "## Monitoring-card mode",
+        suffix: FIX_SUFFIX,
+      },
+    ];
+
+    for (const { id, marker, suffix } of contracts) {
+      const partial = structuredClone(agentFixture) as Record<string, any>;
+      partial[id].runtime.appendSystemPrompt = `existing\n\n${marker}\nSTALE`;
+      expect(() => prepareAgentsConfig(partial)).toThrow(
+        `prompt for ${id} has a partial or duplicate ${marker} contract`,
+      );
+
+      const duplicate = structuredClone(agentFixture) as Record<string, any>;
+      duplicate[id].runtime.appendSystemPrompt = `existing\n\n${suffix}\n\n${suffix}`;
+      expect(() => prepareAgentsConfig(duplicate)).toThrow(
+        `prompt for ${id} has a partial or duplicate ${marker} contract`,
+      );
+    }
+  });
+
+  it("rejects malformed agent containers and prompt fields", () => {
+    const malformedAccess = structuredClone(agentFixture) as Record<string, any>;
+    malformedAccess.triage.access = [];
+    expect(() => prepareAgentsConfig(malformedAccess)).toThrow(
+      "agent triage access must be an object",
+    );
+
+    const malformedRuntime = structuredClone(agentFixture) as Record<string, any>;
+    malformedRuntime.fix.runtime = [];
+    expect(() => prepareAgentsConfig(malformedRuntime)).toThrow(
+      "agent fix runtime must be an object",
+    );
+
+    const malformedAllowlist = structuredClone(agentFixture) as Record<string, any>;
+    malformedAllowlist.triage.access.consultableBy = "prod-sentinel";
+    expect(() => prepareAgentsConfig(malformedAllowlist)).toThrow(
+      "agent triage access.consultableBy must be an array of strings",
+    );
+
+    const malformedPrompt = structuredClone(agentFixture) as Record<string, any>;
+    malformedPrompt["prod-sentinel"].runtime.appendSystemPrompt = 42;
+    expect(() => prepareAgentsConfig(malformedPrompt)).toThrow(
+      "agent prod-sentinel runtime.appendSystemPrompt must be a string",
+    );
+  });
 });
 
 describe("prepareHubConfig", () => {
@@ -178,6 +246,81 @@ describe("prepareHubConfig", () => {
 
     expect(prepareHubConfig(once)).toEqual(once);
     expect(hubFixture.spawnTriggers[0]).not.toHaveProperty("sourceAgent");
+  });
+
+  it("requires unique feedback patterns with their expected agent mappings", () => {
+    const duplicate = structuredClone(hubFixture);
+    duplicate.spawnTriggers.push(structuredClone(hubFixture.spawnTriggers[1]));
+    expect(() => prepareHubConfig(duplicate)).toThrow(
+      "feedback spawn trigger SPAWN_FIX\\s+(\\S+) must occur exactly once",
+    );
+
+    const wrongAgent = structuredClone(hubFixture);
+    wrongAgent.spawnTriggers[0].agent = "fix";
+    expect(() => prepareHubConfig(wrongAgent)).toThrow(
+      "feedback spawn trigger SPAWN_FIX_QUICK\\s+(\\S+) must target fix-quick",
+    );
+  });
+
+  it("preserves unrelated feedback trigger fields while restricting the source", () => {
+    const input = structuredClone(hubFixture);
+    Object.assign(input.spawnTriggers[0], {
+      taskTemplate: "Keep this exact template $1",
+      setupCommand: "keep-setup",
+      onSpawnCard: { title: "keep-card" },
+    });
+
+    const prepared = prepareHubConfig(input) as typeof input & {
+      spawnTriggers: Array<(typeof input.spawnTriggers)[number] & {
+        sourceAgent?: string;
+      }>;
+    };
+
+    expect(prepared.spawnTriggers[0]).toEqual({
+      ...input.spawnTriggers[0],
+      sourceAgent: "triage",
+    });
+  });
+
+  it("requires an existing GlitchTip trigger to be unique and exactly safe", () => {
+    const unsafe = structuredClone(hubFixture) as {
+      spawnTriggers: Array<Record<string, unknown>>;
+    };
+    unsafe.spawnTriggers.push({
+      ...GLITCHTIP_FIX_TRIGGER,
+      agent: "shell",
+    });
+    expect(() => prepareHubConfig(unsafe)).toThrow(
+      "GlitchTip spawn trigger ^SPAWN_GLITCHTIP_FIX\\s+([a-z0-9]{20,32})$ does not match the required contract",
+    );
+
+    const duplicate = structuredClone(hubFixture) as {
+      spawnTriggers: Array<Record<string, unknown>>;
+    };
+    duplicate.spawnTriggers.push(
+      structuredClone(GLITCHTIP_FIX_TRIGGER),
+      structuredClone(GLITCHTIP_FIX_TRIGGER),
+    );
+    expect(() => prepareHubConfig(duplicate)).toThrow(
+      "GlitchTip spawn trigger ^SPAWN_GLITCHTIP_FIX\\s+([a-z0-9]{20,32})$ must occur at most once",
+    );
+  });
+
+  it("retains one exact existing GlitchTip trigger without duplication", () => {
+    const input = structuredClone(hubFixture) as {
+      spawnTriggers: Array<Record<string, unknown>>;
+    };
+    input.spawnTriggers.push(structuredClone(GLITCHTIP_FIX_TRIGGER));
+
+    const prepared = prepareHubConfig(input) as {
+      spawnTriggers: Array<Record<string, unknown>>;
+    };
+
+    expect(
+      prepared.spawnTriggers.filter(
+        (trigger) => trigger.pattern === GLITCHTIP_FIX_TRIGGER.pattern,
+      ),
+    ).toEqual([GLITCHTIP_FIX_TRIGGER]);
   });
 });
 
@@ -231,6 +374,26 @@ function withConfigDir(
   }
 }
 
+function nodePreparerIo(overrides: Partial<PreparerIo> = {}): PreparerIo {
+  return {
+    readText: (path) => readFileSync(path, "utf8"),
+    fileMode: (path) => statSync(path).mode & 0o777,
+    copyExclusive: (source, destination) =>
+      copyFileSync(source, destination, constants.COPYFILE_EXCL),
+    writeExclusive: (path, contents, mode) =>
+      writeFileSync(path, contents, {
+        encoding: "utf8",
+        mode,
+        flag: "wx",
+      }),
+    chmod: (path, mode) => chmodSync(path, mode),
+    rename: (source, destination) => renameSync(source, destination),
+    exists: (path) => existsSync(path),
+    unlink: (path) => unlinkSync(path),
+    ...overrides,
+  };
+}
+
 describe("preparer CLI", () => {
   it("checks both files and prints a structural summary without writing", () => {
     withConfigDir(({ dir, agentsPath, hubPath, agentsText, hubText }) => {
@@ -243,10 +406,13 @@ describe("preparer CLI", () => {
         agents: {
           triageConsultableByProdSentinel: true,
           promptContracts: 4,
+          promptContractsExact: true,
         },
         spawnTriggers: {
           feedbackSourceRestricted: 2,
           glitchtipSourceRestricted: 2,
+          feedbackContractsExact: true,
+          glitchtipContractsExact: true,
         },
       });
       expect(result.stderr).toBe("");
@@ -265,7 +431,8 @@ describe("preparer CLI", () => {
 
       const first = runCli(dir, "--apply");
       expect(first.exitCode).toBe(0);
-      expect(JSON.parse(first.stdout).mode).toBe("apply");
+      const firstOutput = JSON.parse(first.stdout);
+      expect(firstOutput.mode).toBe("apply");
       expect(first.stderr).toBe("");
 
       const agentOnce = readFileSync(agentsPath, "utf8");
@@ -277,15 +444,19 @@ describe("preparer CLI", () => {
 
       const firstFiles = readdirSync(dir);
       const agentBackup = firstFiles.find((name) =>
-        name.startsWith("agents.json.bak-"),
+        name.startsWith("agents.json.bak-glitchtip-autofix-"),
       );
       const hubBackup = firstFiles.find((name) =>
-        name.startsWith("hub.config.json.bak-"),
+        name.startsWith("hub.config.json.bak-glitchtip-autofix-"),
       );
       expect(agentBackup).toBeDefined();
       expect(hubBackup).toBeDefined();
       expect(readFileSync(join(dir, agentBackup!), "utf8")).toBe(agentsText);
       expect(readFileSync(join(dir, hubBackup!), "utf8")).toBe(hubText);
+      expect(firstOutput.backups).toEqual({
+        agents: join(dir, agentBackup!),
+        hub: join(dir, hubBackup!),
+      });
       expect(firstFiles.some((name) => name.includes(".tmp-"))).toBeFalse();
 
       const second = runCli(dir, "--apply");
@@ -310,19 +481,205 @@ describe("preparer CLI", () => {
 
         expect(result.exitCode).not.toBe(0);
         expect(result.stderr).toContain(
-          `missing feedback spawn trigger ${hubFixture.spawnTriggers[missingIndex].pattern}`,
+          `feedback spawn trigger ${hubFixture.spawnTriggers[missingIndex].pattern} must occur exactly once`,
         );
         expect(readFileSync(agentsPath, "utf8")).toBe(agentsText);
         expect(readFileSync(hubPath, "utf8")).toBe(invalidHub);
         expect(readdirSync(dir).sort()).toEqual(before);
       });
     }
+
+    withConfigDir(({ dir, agentsPath, hubPath, hubText }) => {
+      const malformedAgents = structuredClone(agentFixture) as Record<
+        string,
+        any
+      >;
+      malformedAgents.triage.access = [];
+      const malformedText = JSON.stringify(malformedAgents);
+      writeFileSync(agentsPath, malformedText);
+
+      const result = runCli(dir, "--apply");
+
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stderr).toContain("agent triage access must be an object");
+      expect(readFileSync(agentsPath, "utf8")).toBe(malformedText);
+      expect(readFileSync(hubPath, "utf8")).toBe(hubText);
+      expect(
+        readdirSync(dir).some((name) =>
+          name.includes(".bak-glitchtip-autofix-"),
+        ),
+      ).toBeFalse();
+    });
   });
 
   it("requires exactly one operation mode", () => {
     withConfigDir(({ dir }) => {
       expect(runCli(dir).exitCode).not.toBe(0);
       expect(runCli(dir, "--check", "--apply").exitCode).not.toBe(0);
+    });
+  });
+
+  it("does not rename either live file when staging the second candidate temp fails", () => {
+    withConfigDir(({ dir, agentsPath, hubPath, agentsText, hubText }) => {
+      let renameCount = 0;
+      const baseIo = nodePreparerIo();
+      const io = nodePreparerIo({
+        writeExclusive: (path, contents, mode) => {
+          if (
+            path.includes("hub.config.json.tmp-glitchtip-autofix-") &&
+            !path.includes("rollback")
+          ) {
+            throw new Error("injected second candidate temp failure");
+          }
+          baseIo.writeExclusive(path, contents, mode);
+        },
+        rename: (source, destination) => {
+          renameCount += 1;
+          baseIo.rename(source, destination);
+        },
+      });
+
+      expect(() =>
+        prepareConfigDirectory(dir, "apply", {
+          io,
+          label: "second-temp",
+        }),
+      ).toThrow("injected second candidate temp failure");
+      expect(renameCount).toBe(0);
+      expect(readFileSync(agentsPath, "utf8")).toBe(agentsText);
+      expect(readFileSync(hubPath, "utf8")).toBe(hubText);
+      expect(
+        readdirSync(dir).filter((name) =>
+          name.includes(".bak-glitchtip-autofix-"),
+        ),
+      ).toHaveLength(2);
+      expect(
+        readdirSync(dir).filter((name) =>
+          name.includes(".tmp-glitchtip-autofix-"),
+        ),
+      ).toEqual([]);
+    });
+  });
+
+  it("rolls back the first live file when the second candidate rename fails", () => {
+    withConfigDir(({ dir, agentsPath, hubPath, agentsText, hubText }) => {
+      const baseIo = nodePreparerIo();
+      const renames: Array<[string, string]> = [];
+      let injected = false;
+      const io = nodePreparerIo({
+        rename: (source, destination) => {
+          renames.push([source, destination]);
+          if (
+            !injected &&
+            destination === hubPath &&
+            source.includes(".tmp-glitchtip-autofix-") &&
+            !source.includes("rollback")
+          ) {
+            injected = true;
+            throw new Error("injected second candidate rename failure");
+          }
+          baseIo.rename(source, destination);
+        },
+      });
+
+      expect(() =>
+        prepareConfigDirectory(dir, "apply", {
+          io,
+          label: "second-rename",
+        }),
+      ).toThrow("injected second candidate rename failure");
+      expect(renames.some(([, destination]) => destination === agentsPath)).toBeTrue();
+      expect(readFileSync(agentsPath, "utf8")).toBe(agentsText);
+      expect(readFileSync(hubPath, "utf8")).toBe(hubText);
+      expect(
+        readdirSync(dir).filter((name) =>
+          name.includes(".bak-glitchtip-autofix-"),
+        ),
+      ).toHaveLength(2);
+      expect(
+        readdirSync(dir).filter((name) =>
+          name.includes(".tmp-glitchtip-autofix-"),
+        ),
+      ).toEqual([]);
+    });
+  });
+
+  it("semantically validates both staged candidate files before renaming", () => {
+    withConfigDir(({ dir, agentsPath, hubPath, agentsText, hubText }) => {
+      const baseIo = nodePreparerIo();
+      let renameCount = 0;
+      const io = nodePreparerIo({
+        writeExclusive: (path, contents, mode) => {
+          if (
+            path.includes("hub.config.json.tmp-glitchtip-autofix-") &&
+            !path.includes("rollback")
+          ) {
+            const unsafe = JSON.parse(contents);
+            unsafe.spawnTriggers.find(
+              (trigger: Record<string, unknown>) =>
+                trigger.pattern === GLITCHTIP_FIX_TRIGGER.pattern,
+            ).agent = "shell";
+            baseIo.writeExclusive(
+              path,
+              `${JSON.stringify(unsafe, null, 2)}\n`,
+              mode,
+            );
+            return;
+          }
+          baseIo.writeExclusive(path, contents, mode);
+        },
+        rename: (source, destination) => {
+          renameCount += 1;
+          baseIo.rename(source, destination);
+        },
+      });
+
+      expect(() =>
+        prepareConfigDirectory(dir, "apply", {
+          io,
+          label: "semantic-temp",
+        }),
+      ).toThrow("does not match the unique required contract");
+      expect(renameCount).toBe(0);
+      expect(readFileSync(agentsPath, "utf8")).toBe(agentsText);
+      expect(readFileSync(hubPath, "utf8")).toBe(hubText);
+      expect(
+        readdirSync(dir).filter((name) =>
+          name.includes(".tmp-glitchtip-autofix-"),
+        ),
+      ).toEqual([]);
+    });
+  });
+
+  it("retries exclusive purpose-named backup collisions without overwriting", () => {
+    withConfigDir(({ dir, agentsPath }) => {
+      const collision = `${agentsPath}.bak-glitchtip-autofix-collision`;
+      writeFileSync(collision, "retain me");
+
+      const result = prepareConfigDirectory(dir, "apply", {
+        io: nodePreparerIo(),
+        label: "collision",
+      });
+
+      expect(readFileSync(collision, "utf8")).toBe("retain me");
+      expect(result.backups?.agents).toBe(`${collision}-2`);
+      expect(result.backups?.hub).toBe(
+        join(dir, "hub.config.json.bak-glitchtip-autofix-collision"),
+      );
+    });
+  });
+
+  it("never removes a pre-existing colliding temporary file", () => {
+    withConfigDir(({ dir, agentsPath }) => {
+      const collision = `${agentsPath}.tmp-glitchtip-autofix-owned`;
+      writeFileSync(collision, "not owned by this run");
+
+      prepareConfigDirectory(dir, "apply", {
+        io: nodePreparerIo(),
+        label: "owned",
+      });
+
+      expect(readFileSync(collision, "utf8")).toBe("not owned by this run");
     });
   });
 });
