@@ -456,10 +456,35 @@ function isAlreadyExists(error: unknown): boolean {
   );
 }
 
+type ErrorWithCleanup = Error & { cleanupErrors?: Error[] };
+
+function asError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
+}
+
+function attachCleanupErrors(error: unknown, cleanupErrors: Error[]): void {
+  if (!(error instanceof Error) || cleanupErrors.length === 0) return;
+  const target = error as ErrorWithCleanup;
+  target.cleanupErrors = [...(target.cleanupErrors ?? []), ...cleanupErrors];
+}
+
+function cleanupPaths(paths: Iterable<string>, io: PreparerIo): Error[] {
+  const errors: Error[] = [];
+  for (const path of paths) {
+    try {
+      if (io.exists(path)) io.unlink(path);
+    } catch (error) {
+      errors.push(asError(error));
+    }
+  }
+  return errors;
+}
+
 function createExclusiveSibling(
   path: string,
   suffix: string,
   create: (candidate: string) => void,
+  io: PreparerIo,
 ): string {
   for (let attempt = 1; ; attempt += 1) {
     const candidate = `${path}.${suffix}${attempt === 1 ? "" : `-${attempt}`}`;
@@ -467,7 +492,9 @@ function createExclusiveSibling(
       create(candidate);
       return candidate;
     } catch (error) {
-      if (!isAlreadyExists(error)) throw error;
+      if (isAlreadyExists(error)) continue;
+      attachCleanupErrors(error, cleanupPaths([candidate], io));
+      throw error;
     }
   }
 }
@@ -508,11 +535,10 @@ function structuralSummary(
   };
 }
 
-function cleanupOwnedTemps(paths: Set<string>, io: PreparerIo): void {
-  for (const path of paths) {
-    if (io.exists(path)) io.unlink(path);
-  }
+function cleanupOwnedTemps(paths: Set<string>, io: PreparerIo): Error[] {
+  const errors = cleanupPaths(paths, io);
   paths.clear();
+  return errors;
 }
 
 type PrepareDirectoryOptions = {
@@ -557,11 +583,13 @@ export function prepareConfigDirectory(
     agentsPath,
     `bak-glitchtip-autofix-${label}`,
     (candidate) => io.copyExclusive(agentsPath, candidate),
+    io,
   );
   const hubBackup = createExclusiveSibling(
     hubPath,
     `bak-glitchtip-autofix-${label}`,
     (candidate) => io.copyExclusive(hubPath, candidate),
+    io,
   );
   summary.backups = { agents: agentsBackup, hub: hubBackup };
 
@@ -576,6 +604,7 @@ export function prepareConfigDirectory(
       path,
       `tmp-glitchtip-autofix-${label}`,
       (candidate) => io.writeExclusive(candidate, contents, fileMode),
+      io,
     );
     ownedTemps.add(temporary);
     io.chmod(temporary, fileMode);
@@ -591,12 +620,15 @@ export function prepareConfigDirectory(
       path,
       `tmp-glitchtip-autofix-rollback-${label}`,
       (candidate) => io.copyExclusive(backup, candidate),
+      io,
     );
     ownedTemps.add(temporary);
     io.chmod(temporary, fileMode);
     return temporary;
   };
 
+  let operationFailed = false;
+  let operationError: unknown;
   try {
     const agentsTemp = stageText(
       agentsPath,
@@ -653,8 +685,21 @@ export function prepareConfigDirectory(
       }
       throw error;
     }
-  } finally {
-    cleanupOwnedTemps(ownedTemps, io);
+  } catch (error) {
+    operationFailed = true;
+    operationError = error;
+  }
+
+  const cleanupErrors = cleanupOwnedTemps(ownedTemps, io);
+  if (operationFailed) {
+    attachCleanupErrors(operationError, cleanupErrors);
+    throw operationError;
+  }
+  if (cleanupErrors.length > 0) {
+    throw new AggregateError(
+      cleanupErrors,
+      "failed to remove one or more GlitchTip preparer temporary files",
+    );
   }
 
   return summary;

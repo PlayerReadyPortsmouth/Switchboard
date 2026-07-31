@@ -14,7 +14,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import {
   type PreparerIo,
   prepareAgentsConfig,
@@ -558,6 +558,127 @@ describe("preparer CLI", () => {
           name.includes(".tmp-glitchtip-autofix-"),
         ),
       ).toEqual([]);
+    });
+  });
+
+  it("cleans a candidate temp created by a writeExclusive attempt that then throws", () => {
+    withConfigDir(({ dir, agentsPath, hubPath, agentsText, hubText }) => {
+      const collision = `${hubPath}.tmp-glitchtip-autofix-after-create`;
+      writeFileSync(collision, "pre-existing collision");
+      const baseIo = nodePreparerIo();
+      const io = nodePreparerIo({
+        writeExclusive: (path, contents, mode) => {
+          baseIo.writeExclusive(path, contents, mode);
+          if (
+            path.includes("hub.config.json.tmp-glitchtip-autofix-after-create") &&
+            !path.includes("rollback")
+          ) {
+            throw new Error("candidate after-create error");
+          }
+        },
+      });
+
+      expect(() =>
+        prepareConfigDirectory(dir, "apply", {
+          io,
+          label: "after-create",
+        }),
+      ).toThrow("candidate after-create error");
+      expect(readFileSync(agentsPath, "utf8")).toBe(agentsText);
+      expect(readFileSync(hubPath, "utf8")).toBe(hubText);
+      expect(readFileSync(collision, "utf8")).toBe("pre-existing collision");
+      expect(
+        readdirSync(dir).filter((name) =>
+          name.includes(".tmp-glitchtip-autofix-"),
+        ),
+      ).toEqual([basename(collision)]);
+    });
+  });
+
+  it("cleans a rollback temp created by a copyExclusive attempt that then throws", () => {
+    withConfigDir(({ dir, agentsPath, hubPath, agentsText, hubText }) => {
+      const collision = `${hubPath}.tmp-glitchtip-autofix-rollback-after-copy`;
+      writeFileSync(collision, "pre-existing collision");
+      const baseIo = nodePreparerIo();
+      const io = nodePreparerIo({
+        copyExclusive: (source, destination) => {
+          baseIo.copyExclusive(source, destination);
+          if (
+            destination.includes(
+              "hub.config.json.tmp-glitchtip-autofix-rollback-after-copy",
+            )
+          ) {
+            throw new Error("rollback after-copy error");
+          }
+        },
+      });
+
+      expect(() =>
+        prepareConfigDirectory(dir, "apply", {
+          io,
+          label: "after-copy",
+        }),
+      ).toThrow("rollback after-copy error");
+      expect(readFileSync(agentsPath, "utf8")).toBe(agentsText);
+      expect(readFileSync(hubPath, "utf8")).toBe(hubText);
+      expect(readFileSync(collision, "utf8")).toBe("pre-existing collision");
+      expect(
+        readdirSync(dir).filter((name) =>
+          name.includes(".tmp-glitchtip-autofix-"),
+        ),
+      ).toEqual([basename(collision)]);
+    });
+  });
+
+  it("attempts every owned cleanup while preserving the original operation error", () => {
+    withConfigDir(({ dir }) => {
+      const baseIo = nodePreparerIo();
+      const unlinkCalls: string[] = [];
+      let failedCleanupPath: string | undefined;
+      const io = nodePreparerIo({
+        copyExclusive: (source, destination) => {
+          if (
+            destination.includes(
+              "hub.config.json.tmp-glitchtip-autofix-rollback-cleanup-mask",
+            )
+          ) {
+            throw new Error("original operation error");
+          }
+          baseIo.copyExclusive(source, destination);
+        },
+        unlink: (path) => {
+          unlinkCalls.push(path);
+          if (!failedCleanupPath) {
+            failedCleanupPath = path;
+            throw new Error("cleanup unlink error");
+          }
+          baseIo.unlink(path);
+        },
+      });
+
+      let caught: unknown;
+      try {
+        prepareConfigDirectory(dir, "apply", {
+          io,
+          label: "cleanup-mask",
+        });
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(caught).toBeInstanceOf(Error);
+      expect((caught as Error).message).toBe("original operation error");
+      expect(
+        (caught as Error & { cleanupErrors?: Error[] }).cleanupErrors?.map(
+          (error) => error.message,
+        ),
+      ).toEqual(["cleanup unlink error"]);
+      expect(unlinkCalls).toHaveLength(3);
+      expect(
+        readdirSync(dir).filter((name) =>
+          name.includes(".tmp-glitchtip-autofix-"),
+        ),
+      ).toEqual([basename(failedCleanupPath!)]);
     });
   });
 
