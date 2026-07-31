@@ -85,6 +85,7 @@ import { ConsultRegistry, mayConsult, consultAnswerFromReply } from "./consult"
 import { resolveFederation, isRemoteTarget, consultRemote, startFederationListener } from "./federation"
 import { MissionRegistry, findWorkflow, renderStepPrompt, renderMissionCard, type MissionRun } from "./workflow"
 import type { AgentConfig, AgentReply, InboundMessage, SpawnTrigger, SpawnCardUpdate, CardSpec, DirectCommand, OutboundRoute, HubConfig, AgentRegistry, SendOutcome } from "./types"
+import { compileSpawnTriggers, matchSpawnTrigger } from "./spawnTriggers"
 import { resolveOutboxFile } from "./outboxAttach"
 import { makeAttachHandler, type AttachFrame } from "./attachHandler"
 import { mirrorAttachment, chatTargetsConversation } from "./attachMirror"
@@ -866,9 +867,9 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): ProcessAgen
   return t
 }
 
-// Spawn triggers: any agent's outbound text matching `pattern` fires an
+// Spawn triggers: an authorized agent's outbound text matching `pattern` fires an
 // ephemeral spawn (and is NOT forwarded to Discord).
-const spawnTriggers = (hub.spawnTriggers ?? []).map((t) => ({ ...t, re: new RegExp(t.pattern) }))
+const spawnTriggers = compileSpawnTriggers(hub.spawnTriggers ?? [])
 
 // Outbound webhooks: agents (and hub events) push signed POSTs to named routes.
 // The hub owns the URL+secret — agents address routes by id, never a raw URL.
@@ -1357,9 +1358,15 @@ async function onAgentReply(reply: AgentReply, key: string): Promise<void | Send
   }
   if (reply.kind === "reply" && reply.text) {
     trace.record({ agent: reply.agent, chat: reply.chatId, kind: "reply", text: reply.text })
-    for (const trig of spawnTriggers) {
-      const m = trig.re.exec(reply.text)
-      if (m) { await runSpawnTrigger(trig, m as unknown as string[], reply.chatId, reply.agent); return }
+    const spawnMatch = matchSpawnTrigger(spawnTriggers, reply.agent, reply.text)
+    if (spawnMatch) {
+      await runSpawnTrigger(
+        spawnMatch.trigger,
+        spawnMatch.groups as unknown as string[],
+        reply.chatId,
+        reply.agent,
+      )
+      return
     }
     // Outbound webhooks: fire any text-triggered routes (fire-and-forget). A
     // `consume` route suppresses the Discord post; otherwise the text still ships.

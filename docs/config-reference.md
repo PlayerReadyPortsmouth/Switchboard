@@ -46,7 +46,7 @@ Source of truth: this file is a snapshot of the code as of 2026-07-02. Re-derive
 | `schedules[]` | array | `[]` | `{ id, cron?, hourUtc?, agent, channelId, message, tz? }` |
 | `commands[]` | array | `[]` | `{ match, agent, channelId, message, allowlistOnly? }` — exact-text → canned message. |
 | `directCommands[]` | array | `[]` | `{ match, exec:{type:"http"\|"shell",...}, render?, template?, cardTitle?, formatAgent?, allowlistOnly? }` |
-| `spawnTriggers[]` | array | `[]` | `{ pattern, agent, taskTemplate, setupCommand? }` — outbound-text regex spawns an ephemeral agent. |
+| `spawnTriggers[]` | array | `[]` | `{ pattern, sourceAgent?, agent, taskTemplate, setupCommand? }` — outbound-text regex spawns an ephemeral agent; `sourceAgent` restricts who may fire it. |
 | `outboundWebhooks[]` | array | `[]` | `{ id, pattern?, url, secretEnv?, template?, requireApproval? }` — agents address by `id`, never a raw URL. |
 | `outboundAllowedHosts[]` | string[] | `[]` | Destination-host allowlist for outbound webhooks. |
 | `outboundRetries` | number | `3` | Outbound delivery retries before dead-lettering. |

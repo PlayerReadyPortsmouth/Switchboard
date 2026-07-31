@@ -226,9 +226,10 @@ export interface SpawnCardUpdate {
   buttons: CardButton[];
 }
 
-/** When ANY agent's outbound text matches `pattern`, spawn `agent` to run a task. */
+/** When an authorized agent's outbound text matches `pattern`, spawn `agent` to run a task. */
 export interface SpawnTrigger {
   pattern: string       // regex tested against outbound agent text
+  sourceAgent?: string  // only this agent's outbound text may fire the trigger
   agent: string         // ephemeral agent to spawn
   taskTemplate: string  // task text; $1,$2… = capture groups, $jobId = generated id
   setupCommand?: string // optional shell command run first (same interpolation)
