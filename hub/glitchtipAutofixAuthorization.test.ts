@@ -13,7 +13,7 @@ function payload(overrides: Record<string, unknown> = {}): string {
 }
 
 function boardTask(overrides: Record<string, unknown> = {}) {
-  return { id: TASK, createdAt: new Date(RECEIVED + 1_000).toISOString(), labels: ["prod-sentinel", "medium"], description: `Details\nsentinel-sig:${SIGNATURE}`, ...overrides };
+  return { id: TASK, archived: false, createdAt: new Date(RECEIVED + 1_000).toISOString(), labels: ["prod-sentinel", "medium"], description: `Details\nsentinel-sig:${SIGNATURE}`, ...overrides };
 }
 
 function boardFetch(task = boardTask()) {
@@ -89,18 +89,73 @@ describe("GlitchtipAutofixAuthorizationRegistry", () => {
     await expect(value.consumeAndAuthorize(request)).resolves.toMatchObject({ ok: false, reason: "missing" });
   });
 
-  test("consumes and denies task mismatch, old cards, missing label, and signature mismatch", async () => {
+  test("consumes and denies task mismatch, old cards, missing label, and missing signature", async () => {
     const cases = [
-      { taskId: "cms89w0kj0xli6cwu1oli8lu8", task: boardTask(), reason: "task_missing" },
+      { taskId: "cms89w0kj0xli6cwu1oli8lu8", task: boardTask(), reason: "task_mismatch" },
       { taskId: TASK, task: boardTask({ createdAt: new Date(RECEIVED - 5_001).toISOString() }), reason: "task_old" },
       { taskId: TASK, task: boardTask({ labels: ["medium"] }), reason: "label_missing" },
-      { taskId: TASK, task: boardTask({ description: "sentinel-sig:other" }), reason: "signature_mismatch" },
+      { taskId: TASK, task: boardTask({ description: "sentinel-sig:other" }), reason: "signature_missing" },
     ];
     for (const c of cases) {
       const { value } = registry();
       value.registerVerifiedBody(payload(), binding);
       await expect(value.consumeAndAuthorize({ ...request, taskId: c.taskId, fetch: boardFetch(c.task) as typeof fetch })).resolves.toMatchObject({ ok: false, reason: c.reason });
     }
+  });
+
+  test("requires the signed sentinel marker as one exact standalone line", async () => {
+    for (const description of [
+      "sentinel-sig:glitchtip:9990",
+      "prefix sentinel-sig:glitchtip:999",
+      "sentinel-sig:glitchtip:999 suffix",
+      "`sentinel-sig:glitchtip:999`",
+    ]) {
+      const { value } = registry();
+      value.registerVerifiedBody(payload(), binding);
+      const result = await value.consumeAndAuthorize({ ...request, fetch: boardFetch(boardTask({ description })) as typeof fetch });
+      expect(result).toMatchObject({ ok: false });
+    }
+  });
+
+  test("denies when an old and newly requested task both carry the exact signed marker", async () => {
+    const { value } = registry();
+    value.registerVerifiedBody(payload(), binding);
+    const old = boardTask({
+      id: "cms89w0kj0xli6cwu1oli8lu8",
+      createdAt: new Date(RECEIVED - 60_000).toISOString(),
+    });
+    const board = (async () => new Response(JSON.stringify({
+      data: { stages: [{ tasks: [old] }, { tasks: [boardTask()] }] },
+    }), { status: 200 })) as unknown as typeof fetch;
+
+    await expect(value.consumeAndAuthorize({ ...request, fetch: board })).resolves.toMatchObject({ ok: false });
+    await expect(value.consumeAndAuthorize(request)).resolves.toMatchObject({ ok: false, reason: "missing" });
+  });
+
+  test("ignores an archived task carrying the same exact signed marker", async () => {
+    const { value } = registry();
+    value.registerVerifiedBody(payload(), binding);
+    const archived = boardTask({ id: "cms89w0kj0xli6cwu1oli8lu8", archived: true });
+    const board = (async () => new Response(JSON.stringify({
+      data: { stages: [{ tasks: [archived] }, { tasks: [boardTask()] }] },
+    }), { status: 200 })) as unknown as typeof fetch;
+
+    await expect(value.consumeAndAuthorize({ ...request, fetch: board })).resolves.toMatchObject({ ok: true });
+  });
+
+  test("malformed command invalidation removes only the oldest pending turn for that binding", async () => {
+    const { value, setNow } = registry();
+    value.registerVerifiedBody(payload(), binding);
+    setNow(RECEIVED + 1_000);
+    value.registerVerifiedBody(payload({ autofixAuthorizationId: OTHER_ID, signature: "glitchtip:1000" }), binding);
+
+    expect(value.invalidateOldest("prod-sentinel", "prod-incidents")).toBe(true);
+    await expect(value.consumeAndAuthorize(request)).resolves.toMatchObject({ ok: false, reason: "missing" });
+    await expect(value.consumeAndAuthorize({
+      ...request,
+      authorizationId: OTHER_ID,
+      fetch: boardFetch(boardTask({ description: "sentinel-sig:glitchtip:1000" })) as typeof fetch,
+    })).resolves.toMatchObject({ ok: true, signature: "glitchtip:1000" });
   });
 
   test("ignores unrelated board tasks with nullable optional fields", async () => {

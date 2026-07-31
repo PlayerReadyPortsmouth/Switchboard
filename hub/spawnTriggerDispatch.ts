@@ -16,6 +16,7 @@ export async function dispatchSpawnTriggerReply(
       sourceAgent: string
       channelId: string
     }) => Promise<GlitchtipAuthorizationResult>
+    invalidate: (input: { sourceAgent: string; channelId: string }) => boolean
     runSpawn: (trigger: CompiledSpawnTrigger, groups: RegExpExecArray) => Promise<void>
     audit: (entry: SpawnAuthorizationAudit) => void
   },
@@ -36,7 +37,8 @@ export async function dispatchSpawnTriggerReply(
     return true
   }
 
-  if (/(?:^|\s)SPAWN_GLITCHTIP_FIX(?:_QUICK)?\b/.test(reply.text)) {
+  if (/SPAWN_GLITCHTIP_FIX(?:_QUICK)?/i.test(reply.text)) {
+    deps.invalidate({ sourceAgent: reply.sourceAgent, channelId: reply.channelId })
     deps.audit({ outcome: "deny", reason: "malformed_command" })
     return true
   }

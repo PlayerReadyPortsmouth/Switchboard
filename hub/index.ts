@@ -1375,6 +1375,7 @@ async function onAgentReply(reply: AgentReply, key: string): Promise<void | Send
           apiToken: process.env.READYAPP_DATAOPS_MCP_TOKEN,
           fetch,
         }),
+        invalidate: (input) => glitchtipAutofixAuthorizations.invalidateOldest(input.sourceAgent, input.channelId),
         runSpawn: (trigger, groups) => runSpawnTrigger(
           trigger,
           groups as unknown as string[],

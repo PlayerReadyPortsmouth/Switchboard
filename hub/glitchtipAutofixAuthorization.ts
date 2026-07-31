@@ -11,10 +11,11 @@ export type GlitchtipAuthorizationReason =
   | "credentials_missing"
   | "board_fetch_failed"
   | "board_payload_invalid"
-  | "task_missing"
+  | "task_mismatch"
   | "task_old"
   | "label_missing"
-  | "signature_mismatch"
+  | "signature_missing"
+  | "signature_duplicate"
 
 export type GlitchtipAuthorizationResult =
   | { ok: true; reason: "authorized"; signature: string }
@@ -55,15 +56,16 @@ function parseVerifiedPayload(rawBody: string): {
   }
 }
 
-function matchingBoardTasks(payload: unknown, taskId: string): BoardTask[] | null {
+function tasksWithExactMarker(payload: unknown, marker: string): BoardTask[] | null {
   if (!isRecord(payload) || !isRecord(payload.data) || !Array.isArray(payload.data.stages)) return null
   const out: BoardTask[] = []
   for (const stage of payload.data.stages) {
     if (!isRecord(stage) || !Array.isArray(stage.tasks)) return null
     for (const task of stage.tasks) {
-      if (!isRecord(task) || task.id !== taskId) continue
+      if (!isRecord(task) || task.archived === true || typeof task.description !== "string") continue
+      if (!task.description.split(/\r?\n/).includes(marker)) continue
       if (typeof task.createdAt !== "string" || !Array.isArray(task.labels) ||
-          !task.labels.every((label) => typeof label === "string") || typeof task.description !== "string") return null
+          !task.labels.every((label) => typeof label === "string") || typeof task.id !== "string") return null
       out.push({ id: task.id, createdAt: task.createdAt, labels: task.labels, description: task.description })
     }
   }
@@ -102,6 +104,15 @@ export class GlitchtipAutofixAuthorizationRegistry {
     return true
   }
 
+  invalidateOldest(sourceAgent: string, channelId: string): boolean {
+    const oldest = [...this.pending.values()]
+      .filter((authorization) => authorization.agent === sourceAgent && authorization.channelId === channelId)
+      .sort((left, right) => left.receivedAt - right.receivedAt || left.id.localeCompare(right.id))[0]
+    if (!oldest) return false
+    this.pending.delete(oldest.id)
+    return true
+  }
+
   async consumeAndAuthorize(input: {
     authorizationId: string
     taskId: string
@@ -115,9 +126,7 @@ export class GlitchtipAutofixAuthorizationRegistry {
     const authorization = this.pending.get(input.authorizationId)
     if (authorization) this.pending.delete(input.authorizationId)
     if (!authorization) {
-      for (const [id, pending] of this.pending) {
-        if (pending.agent === input.sourceAgent && pending.channelId === input.channelId) this.pending.delete(id)
-      }
+      if (!this.seen.has(input.authorizationId)) this.invalidateOldest(input.sourceAgent, input.channelId)
       return { ok: false, reason: "missing" }
     }
     if (now > authorization.expiresAt) return { ok: false, reason: "stale" }
@@ -138,16 +147,17 @@ export class GlitchtipAutofixAuthorizationRegistry {
 
     let parsed: unknown
     try { parsed = await response.json() } catch { return { ok: false, reason: "board_payload_invalid" } }
-    const tasks = matchingBoardTasks(parsed, input.taskId)
+    const tasks = tasksWithExactMarker(parsed, `sentinel-sig:${authorization.signature}`)
     if (!tasks) return { ok: false, reason: "board_payload_invalid" }
-    if (tasks.length !== 1) return { ok: false, reason: "task_missing" }
+    if (tasks.length === 0) return { ok: false, reason: "signature_missing" }
+    if (tasks.length > 1) return { ok: false, reason: "signature_duplicate" }
     const task = tasks[0]
+    if (task.id !== input.taskId) return { ok: false, reason: "task_mismatch" }
     const createdAt = Date.parse(task.createdAt)
     if (!Number.isFinite(createdAt) || createdAt < authorization.receivedAt - this.deps.cardClockToleranceMs || createdAt > now + this.deps.cardClockToleranceMs) {
       return { ok: false, reason: "task_old" }
     }
     if (!task.labels.includes("prod-sentinel")) return { ok: false, reason: "label_missing" }
-    if (!task.description.includes(`sentinel-sig:${authorization.signature}`)) return { ok: false, reason: "signature_mismatch" }
     return { ok: true, reason: "authorized", signature: authorization.signature }
   }
 
