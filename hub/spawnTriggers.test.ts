@@ -35,6 +35,15 @@ describe("matchSpawnTrigger", () => {
     )?.trigger.agent).toBe("fix");
   });
 
+  it("fails closed when a source restriction is present but empty", () => {
+    const malformed = { ...base, sourceAgent: "" };
+    expect(matchSpawnTrigger(
+      compileSpawnTriggers([malformed]),
+      "any-agent",
+      "SPAWN_GLITCHTIP_FIX cms89w0kj0xli6cwu1oli8lu9",
+    )).toBeNull();
+  });
+
   it("does not match extra prose around an anchored command", () => {
     expect(matchSpawnTrigger(
       compileSpawnTriggers([base]),

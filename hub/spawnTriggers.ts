@@ -22,7 +22,7 @@ export function matchSpawnTrigger(
   text: string,
 ): SpawnTriggerMatch | null {
   for (const trigger of triggers) {
-    if (trigger.sourceAgent && trigger.sourceAgent !== sourceAgent) continue;
+    if (trigger.sourceAgent !== undefined && trigger.sourceAgent !== sourceAgent) continue;
     const groups = trigger.re.exec(text);
     if (groups) return { trigger, groups };
   }
