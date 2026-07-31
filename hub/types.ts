@@ -230,6 +230,7 @@ export interface SpawnCardUpdate {
 export interface SpawnTrigger {
   pattern: string       // regex tested against outbound agent text
   sourceAgent?: string  // only this agent's outbound text may fire the trigger
+  authorizationMode?: "readyapp-glitchtip" // one-shot signed ReadyApp authorization + board correlation
   agent: string         // ephemeral agent to spawn
   taskTemplate: string  // task text; $1,$2… = capture groups, $jobId = generated id
   setupCommand?: string // optional shell command run first (same interpolation)

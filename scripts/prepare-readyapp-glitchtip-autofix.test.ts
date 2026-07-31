@@ -23,17 +23,18 @@ import {
 } from "./prepare-readyapp-glitchtip-autofix";
 
 const PROD_SENTINEL_SUFFIX = `## GlitchTip auto-fix handoff
-The signed PROD_ERROR JSON includes autofixHandoff. Card creation and dedup always happen first. Never consult triage for a recurrence, an activation-smoke message, a failed card write, a missing task id, or unless autofixHandoff is exactly true. For an eligible NEW card, call ask_agent with agent "triage" and message \`GLITCHTIP_CANDIDATE <json>\` containing taskId, title, description, severity, signature, release, route, and suspectedCause. Accept only an exact \`SPAWN_GLITCHTIP_FIX <same-taskId>\`, \`SPAWN_GLITCHTIP_FIX_QUICK <same-taskId>\`, or \`NO_GLITCHTIP_FIX <reason>\` reply. Re-emit an accepted SPAWN line exactly and with no other text. Every error, timeout, different id, or malformed answer means no spawn; leave the Bug-board card for humans.`;
+The signed PROD_ERROR JSON includes autofixHandoff and autofixAuthorizationId. Card creation and dedup always happen first. Never consult triage for a recurrence, an activation-smoke message, a failed card write, a missing task id, or unless autofixHandoff is exactly true and autofixAuthorizationId is present. For an eligible NEW card, call ask_agent with agent "triage" and message \`GLITCHTIP_CANDIDATE <json>\` containing taskId, autofixAuthorizationId, title, description, severity, signature, release, route, and suspectedCause. Accept only an exact \`SPAWN_GLITCHTIP_FIX <same-taskId> <same-autofixAuthorizationId>\`, \`SPAWN_GLITCHTIP_FIX_QUICK <same-taskId> <same-autofixAuthorizationId>\`, or \`NO_GLITCHTIP_FIX <reason>\` reply. Re-emit an accepted SPAWN line exactly and with no other text. Every error, timeout, different task or authorization id, or malformed answer means no spawn; leave the Bug-board card for humans.`;
 
 const TRIAGE_SUFFIX = `## GlitchTip candidate consults
-On \`GLITCHTIP_CANDIDATE <json>\`, act only as a classifier. Read the named task from the ReadyAPP Bug fixes board and inspect current code/history. Never call feedback ticket stage/action endpoints and never use card tools in this consult. Return exactly one line: \`SPAWN_GLITCHTIP_FIX_QUICK <taskId>\` for a clear single-file low-risk change; \`SPAWN_GLITCHTIP_FIX <taskId>\` for complex, risky, multi-file, auth/data/money/safeguarding, or uncertain work; or \`NO_GLITCHTIP_FIX <reason>\` for smoke events, duplicates, upstream-only outages, insufficient evidence, feature requests, or non-code incidents. Echo only the supplied taskId.`;
+On \`GLITCHTIP_CANDIDATE <json>\`, act only as a classifier. Read the named task from the ReadyAPP Bug fixes board and inspect current code/history. Never call feedback ticket stage/action endpoints and never use card tools in this consult. Return exactly one line: \`SPAWN_GLITCHTIP_FIX_QUICK <taskId> <autofixAuthorizationId>\` for a clear single-file low-risk change; \`SPAWN_GLITCHTIP_FIX <taskId> <autofixAuthorizationId>\` for complex, risky, multi-file, auth/data/money/safeguarding, or uncertain work; or \`NO_GLITCHTIP_FIX <reason>\` for smoke events, duplicates, upstream-only outages, insufficient evidence, feature requests, or non-code incidents. Echo only the supplied taskId and autofixAuthorizationId.`;
 
 const FIX_SUFFIX = `## Monitoring-card mode
 When the task starts \`Fix ReadyApp GlitchTip monitoring card\`, the identifier is a ReadyAPP Bug fixes board task, not a feedback ticket. Read it from board cmqdu2yui0000qybb4x2uyhwp using READYAPP_DATAOPS_MCP_TOKEN. Do not call \`/tickets/*\` or \`/feedback-actions/*\`. Add concise progress and final PR comments to the task. Use the task id as the Discord correlation_id. Otherwise follow the existing worktree, failing-test-first, scoped verification, assumptions, PR, feedback, and Aurora approval flow exactly. Never merge or deploy yourself.`;
 
 const GLITCHTIP_QUICK_TRIGGER = {
-  pattern: "^SPAWN_GLITCHTIP_FIX_QUICK\\s+([a-z0-9]{20,32})$",
+  pattern: "^SPAWN_GLITCHTIP_FIX_QUICK\\s+([a-z0-9]{20,32})\\s+([A-Za-z0-9_-]{32})$",
   sourceAgent: "prod-sentinel",
+  authorizationMode: "readyapp-glitchtip",
   agent: "fix-quick",
   taskTemplate:
     "Fix ReadyApp GlitchTip monitoring card $1. The Discord correlation_id is $1. Your job id is $jobId. A fresh ReadyApp worktree off live is at /srv/switchboard/worktrees/$jobId. Read task $1 from board cmqdu2yui0000qybb4x2uyhwp and use monitoring-card mode.",
@@ -55,8 +56,9 @@ const GLITCHTIP_QUICK_TRIGGER = {
 };
 
 const GLITCHTIP_FIX_TRIGGER = {
-  pattern: "^SPAWN_GLITCHTIP_FIX\\s+([a-z0-9]{20,32})$",
+  pattern: "^SPAWN_GLITCHTIP_FIX\\s+([a-z0-9]{20,32})\\s+([A-Za-z0-9_-]{32})$",
   sourceAgent: "prod-sentinel",
+  authorizationMode: "readyapp-glitchtip",
   agent: "fix",
   taskTemplate:
     "Fix ReadyApp GlitchTip monitoring card $1. The Discord correlation_id is $1. Your job id is $jobId. A fresh ReadyApp worktree off live is at /srv/switchboard/worktrees/$jobId. Read task $1 from board cmqdu2yui0000qybb4x2uyhwp and use monitoring-card mode.",
@@ -222,7 +224,7 @@ describe("prepareAgentsConfig", () => {
 describe("prepareHubConfig", () => {
   it("source-restricts feedback triggers and adds GlitchTip triggers", () => {
     const prepared = prepareHubConfig(hubFixture) as {
-      spawnTriggers: Array<{ pattern: string; sourceAgent?: string }>;
+      spawnTriggers: Array<{ pattern: string; sourceAgent?: string; authorizationMode?: string }>;
     };
 
     expect(
@@ -235,6 +237,11 @@ describe("prepareHubConfig", () => {
         trigger.pattern.includes("SPAWN_GLITCHTIP_FIX"),
       )?.sourceAgent,
     ).toBe("prod-sentinel");
+    expect(
+      prepared.spawnTriggers.find((trigger) =>
+        trigger.pattern.includes("SPAWN_GLITCHTIP_FIX"),
+      )?.authorizationMode,
+    ).toBe("readyapp-glitchtip");
     expect(prepared.spawnTriggers.slice(-2)).toEqual([
       GLITCHTIP_QUICK_TRIGGER,
       GLITCHTIP_FIX_TRIGGER,
@@ -291,7 +298,7 @@ describe("prepareHubConfig", () => {
       agent: "shell",
     });
     expect(() => prepareHubConfig(unsafe)).toThrow(
-      "GlitchTip spawn trigger ^SPAWN_GLITCHTIP_FIX\\s+([a-z0-9]{20,32})$ does not match the required contract",
+      "GlitchTip spawn trigger ^SPAWN_GLITCHTIP_FIX\\s+([a-z0-9]{20,32})\\s+([A-Za-z0-9_-]{32})$ does not match the required contract",
     );
 
     const duplicate = structuredClone(hubFixture) as {
@@ -302,7 +309,7 @@ describe("prepareHubConfig", () => {
       structuredClone(GLITCHTIP_FIX_TRIGGER),
     );
     expect(() => prepareHubConfig(duplicate)).toThrow(
-      "GlitchTip spawn trigger ^SPAWN_GLITCHTIP_FIX\\s+([a-z0-9]{20,32})$ must occur at most once",
+      "GlitchTip spawn trigger ^SPAWN_GLITCHTIP_FIX\\s+([a-z0-9]{20,32})\\s+([A-Za-z0-9_-]{32})$ must occur at most once",
     );
   });
 
