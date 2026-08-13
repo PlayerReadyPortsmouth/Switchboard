@@ -40,6 +40,7 @@ Source of truth: this file is a snapshot of the code as of 2026-07-02. Re-derive
 | `webIdentityHeader` | string | `"X-Switchboard-User"` | Trusted reverse-proxy identity header for guarded web APIs. Must be a valid HTTP header name. |
 | `memory` | object | — | `{ index: "local"\|"qdrant", embedder: "local"\|"openai", qdrant: {url, apiKeyEnv, collection}, openai: {baseUrl, apiKeyEnv, model} }` |
 | `gardener` | object | off | `{ enabled, intervalMs, importanceWeight, hotSetSize, decayHalfLifeMs, staleAfterMs, archiveAfterMs, scopeBudget }` — vault-hygiene sweep. |
+| `memoryProvenance` | object | off | `{ enabled, maxBodyChars, trustedSourcePrefixes }` — untrusted-source rule: conversation-derived notes are injected as attributed, contained **claims**, never instruction-grade knowledge. Off ⇒ byte-identical to before. |
 | `deployApproverUserId` | string | — | The one Discord user allowed to press `deploy:*` buttons. |
 | `webhookPort` | number | `4400` | Single HTTP listener for all `webhooks[]` routes. |
 | `webhooks[]` | array | `[]` | `{ path, secretEnv, agent, channelId, prefix? }` — inbound HMAC-verified HTTP → agent card. |

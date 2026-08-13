@@ -56,6 +56,7 @@ import { MemoryRetriever } from "./memory/retriever"
 import { AccessStore } from "./memory/accessStore"
 import { Gardener } from "./memory/gardener"
 import { distill } from "./memory/distiller"
+import { recallBody } from "./memory/provenance"
 import { Overseer } from "./overseer"
 import { SessionGovernor } from "./sessionGovernor"
 import { contextWindow } from "./usage"
@@ -319,12 +320,16 @@ const vectorIndex: MemoryIndex = mem.index === "qdrant" && mem.qdrant
 // Usage signal: records access hits, weights recall, drives the proactive hot set.
 const garden = hub.gardener ?? {}
 const accessStore = new AccessStore(join(memoryDir, ".access.json"), garden.decayHalfLifeMs)
+// Untrusted-source rule: conversation-derived notes are injected as attributed,
+// contained CLAIMS rather than instruction-grade knowledge. Absent ⇒ byte-identical.
+const memProvenance = hub.memoryProvenance?.enabled === true ? hub.memoryProvenance : undefined
 const memoryRetriever = new MemoryRetriever({
   store: memoryStore, index: vectorIndex, embedder,
   run: makeRouterRunner(), librarianModel: hub.librarianModel ?? hub.routerModel,
   access: accessStore,
   importanceWeight: garden.importanceWeight ?? (garden.enabled ? 0.15 : 0),
   hotSetSize: garden.hotSetSize ?? (garden.enabled ? 3 : 0),
+  provenance: memProvenance,
 })
 void memoryRetriever.reindexAll().catch((e) => process.stderr.write(`memory: reindex failed: ${e}\n`))
 
@@ -380,6 +385,7 @@ async function runDistill(convId: string): Promise<void> {
   const existing = memoryStore.list(scopes).map((n) => ({ scope: n.scope, title: n.title }))
   const upserts = await distill(
     { conversation, existing }, distillerRunner, hub.distillerModel ?? hub.routerModel,
+    memProvenance,
   )
   for (const u of upserts) {
     try {
@@ -612,14 +618,14 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): ProcessAgen
             try {
               const path = memoryStore.notePath(n.scope as Scope, n.title)
               const note = memoryStore.read(path)
-              return [{ title: note.title, body: note.body }]
+              return [{ title: note.title, body: recallBody(note, memProvenance) }]
             } catch { return [] }
           })
       } catch { return [] }
     }
     try {
       const result = await memoryRetriever.relevant(query, sc)
-      const notes = result.notes.map((n) => ({ title: n.title, body: n.body }))
+      const notes = result.notes.map((n) => ({ title: n.title, body: recallBody(n, memProvenance) }))
       return notes.length > 0 ? notes : byTitle()
     }
     catch { return byTitle() }
