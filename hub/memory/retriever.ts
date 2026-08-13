@@ -5,6 +5,7 @@ import type { MemoryIndex } from "./memoryIndex"
 import type { AccessStore } from "./accessStore"
 import { selectNotes, type Candidate } from "./librarian"
 import { entityGate, dedupAction } from "./dedup"
+import { classifyTrust, renderQuarantineBlock, type ProvenanceOptions } from "./provenance"
 
 export interface RetrieverOpts {
   store: MemoryStore
@@ -19,6 +20,7 @@ export interface RetrieverOpts {
   access?: AccessStore       // usage stats: records hits, weights recall, drives the hot set
   importanceWeight?: number  // boost recall rank by usage importance (default 0 → pure cosine)
   hotSetSize?: number        // notes injected proactively by importance (default 0 → off)
+  provenance?: ProvenanceOptions  // untrusted-source quarantine on injection (default off)
 }
 
 /** Outcome of a background dedup pass over one just-written note. */
@@ -34,13 +36,30 @@ function embedText(n: { title: string; tags: string[]; body: string }): string {
   return `${n.title}\n${n.tags.join(" ")}\n${n.body}`
 }
 
+const MEMORY_PREAMBLE = "Relevant memory (verify anything time-sensitive before relying on it):"
+
+function trustedBlock(n: Note): string {
+  return `## ${n.title} _(as of ${(n.updated || "").slice(0, 10) || "unknown"})_\n${n.body.trim()}`
+}
+
 /** Render chosen notes into a prompt-injectable block; "" when none. Each note
  *  carries an "as of" date so the agent knows how fresh the fact is and can
- *  re-verify stale specifics (file paths, flags) rather than trusting them. */
-export function renderMemory(notes: Note[]): string {
+ *  re-verify stale specifics (file paths, flags) rather than trusting them.
+ *
+ *  With `provenance.enabled`, notes whose `source` is not instruction-grade
+ *  (anything conversation-derived — see `classifyTrust`) are moved into a
+ *  quarantine block: attributed, blockquoted, and explicitly marked as claims
+ *  rather than instructions. Without it the output is byte-identical to before. */
+export function renderMemory(notes: Note[], provenance?: ProvenanceOptions): string {
   if (!notes.length) return ""
-  const blocks = notes.map((n) => `## ${n.title} _(as of ${(n.updated || "").slice(0, 10) || "unknown"})_\n${n.body.trim()}`)
-  return `Relevant memory (verify anything time-sensitive before relying on it):\n${blocks.join("\n\n")}`
+  if (!provenance?.enabled) {
+    return `${MEMORY_PREAMBLE}\n${notes.map(trustedBlock).join("\n\n")}`
+  }
+  const prefixes = provenance.trustedSourcePrefixes
+  const trusted = notes.filter((n) => classifyTrust(n.source, prefixes) === "trusted")
+  const untrusted = notes.filter((n) => classifyTrust(n.source, prefixes) === "untrusted")
+  const sections = [trusted.map(trustedBlock).join("\n\n"), renderQuarantineBlock(untrusted, provenance)]
+  return `${MEMORY_PREAMBLE}\n${sections.filter(Boolean).join("\n\n")}`
 }
 
 /** Two-stage memory retrieval: local vector recall → Claude librarian precision. */
@@ -153,6 +172,6 @@ export class MemoryRetriever {
     for (const p of chosenPaths) {
       try { notes.push(this.o.store.read(p)); access?.hit(p) } catch {}
     }
-    return { notes, render: renderMemory(notes) }
+    return { notes, render: renderMemory(notes, this.o.provenance) }
   }
 }

@@ -332,6 +332,7 @@ export interface HubConfig {
   overseerModel?: string         // default judge model for overseen agents
   memory?: MemoryBackend         // recall index + embedder backend selection (default: all local)
   gardener?: GardenerConfig      // access-weighting + periodic vault hygiene (default: off)
+  memoryProvenance?: MemoryProvenanceConfig  // untrusted-source rule for the vault (default: off)
   // Session health, live status & scaling (all optional; default off/derived).
   contextWindows?: Record<string, number>  // model id → context window (tokens); `default` is the fallback
   statusChannelId?: string       // channel for the live status embed (absent ⇒ board off)
@@ -709,6 +710,20 @@ export interface GardenerConfig {
   staleAfterMs?: number          // age past which a note is flagged stale (default 30d)
   archiveAfterMs?: number        // cold-for-this-long ⇒ archive candidate (default 90d)
   scopeBudget?: number           // notes per scope before archival kicks in (default 200)
+}
+
+/** The untrusted-source rule for the memory vault. The distiller's input is raw
+ *  conversation (attacker-controlled) and its output lands in a later agent's prompt,
+ *  so conversation-derived notes must arrive as *claims with provenance*, never as
+ *  instruction-grade knowledge. Absent/disabled ⇒ injection, `recall` and the distiller
+ *  prompt are byte-identical to before. See
+ *  docs/superpowers/specs/2026-08-13-memory-untrusted-source-design.md. */
+export interface MemoryProvenanceConfig {
+  enabled?: boolean               // quarantine untrusted notes on injection + harden the distiller
+  maxBodyChars?: number           // per-note cap on a quarantined body (default 1500)
+  trustedSourcePrefixes?: string[] // note `source` prefixes that stay instruction-grade
+                                   // (default ["agent:", "operator:", "hub"]; drop "agent:"
+                                   //  for the stricter posture — see spec §4)
 }
 
 /** Selects the memory recall index and embedder. Defaults are fully local
