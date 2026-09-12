@@ -73,6 +73,11 @@ export interface ClaudeArgvOpts {
   appendSystemPrompt?: string
   claudeArgs?: string[]
   resumeSessionId?: string
+  /** Tool allow/deny lists for THIS agent. Persistent agents are spawned with
+   *  `--dangerously-skip-permissions`, so without these the tool set is the CLI's
+   *  full default no matter what the agent registry says. */
+  allowedTools?: string[]
+  disallowedTools?: string[]
 }
 
 /** Guidance appended to every interactive (card-posting) agent's system prompt,
@@ -103,6 +108,10 @@ export function buildClaudeArgv(o: ClaudeArgvOpts): string[] {
     ? `${INTERACTION_GUIDANCE}\n\n${o.appendSystemPrompt}`
     : INTERACTION_GUIDANCE
   argv.push("--append-system-prompt", system)
+  // Tool limits go BEFORE claudeArgs so an operator can still override them with
+  // an explicit flag, and so the ordering is stable for the spawn signature.
+  if (o.allowedTools?.length) argv.push("--allowed-tools", o.allowedTools.join(","))
+  if (o.disallowedTools?.length) argv.push("--disallowed-tools", o.disallowedTools.join(","))
   if (o.claudeArgs?.length) argv.push(...o.claudeArgs)
   return argv
 }

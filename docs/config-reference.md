@@ -83,7 +83,7 @@ Top-level keys are agent names → `AgentConfig` (`hub/types.ts:136-142`):
 
 - `emoji`, `description`, `mode` (`"persistent"|"ephemeral"`)
 - `access`: `{ roles: string[] ("*" = any), users?: string[], consultableBy?: string[], peerableBy?: string[] }`
-- `runtime`: `cwd` (**required**, `~` expanded), `envPassthrough?` / `envFile?` / `env?` (see 3.1), `provider?` (`"claude"|"codex"`, default `"claude"`), `model?`, `allowedTools?` (Claude ephemeral only), `claudeArgs?`, `codexArgs?`, `codexSandbox?` (`"read-only"|"workspace-write"|"danger-full-access"`, Codex default `"danger-full-access"`), `appendSystemPrompt?`, `resumable?`, `useMemory?`, `injectContext?` (`"always"|"onSwitch"|"never"`), `overseer?` `{enabled,maxIterations?,maxWallclockMs?,model?}`, `sessionGovernor?` `{enabled,softPct?,hardPct?,strategy?}`, `maxQueueDepth?` (default 8), `coalesceBurst?`, `pool?` `{min,max,scaleUpQueue,scaleUpSustainMs,replicaIdleMs}`, `audit?`
+- `runtime`: `cwd` (**required**, `~` expanded), `envPassthrough?` / `envFile?` / `env?` (see 3.1), `provider?` (`"claude"|"codex"`, default `"claude"`), `model?`, `allowedTools?` / `disallowedTools?` (see 3.3), `claudeArgs?`, `codexArgs?`, `codexSandbox?` (`"read-only"|"workspace-write"|"danger-full-access"`, Codex default `"danger-full-access"`), `appendSystemPrompt?`, `resumable?`, `useMemory?`, `injectContext?` (`"always"|"onSwitch"|"never"`), `overseer?` `{enabled,maxIterations?,maxWallclockMs?,model?}`, `sessionGovernor?` `{enabled,softPct?,hardPct?,strategy?}`, `maxQueueDepth?` (default 8), `coalesceBurst?`, `pool?` `{min,max,scaleUpQueue,scaleUpSustainMs,replicaIdleMs}`, `audit?`
 
 `claudeArgs` are appended to Claude CLI invocations. `codexArgs` are inserted as Codex global arguments before `app-server`. Changing the provider, model, provider-specific arguments, Codex sandbox, cwd, resumability, appended prompt, or allowed tools is a hard-reload change for a non-pooled persistent agent.
 
@@ -166,6 +166,41 @@ identical to before.
     "envPassthrough": [],
     "envFile": "/srv/agents/managers/.env",
     "runAs": { "user": "agent-managers" }
+  }
+}
+```
+
+### 3.3 Tool limits on persistent agents (`allowedTools`, `disallowedTools`)
+
+`allowedTools` was previously honoured for ephemeral agents only, so a persistent
+agent — which is what any agent that keeps context is — had no tool limit from
+config at all. Persistent agents are also spawned with
+`--dangerously-skip-permissions`, so there was no prompt to fall back on either:
+the tool set was the CLI's full default regardless of what the registry said.
+
+Both lists now reach the CLI as `--allowed-tools` / `--disallowed-tools`,
+comma-joined, for persistent and ephemeral agents alike.
+
+| Key | Type | Meaning |
+|---|---|---|
+| `allowedTools` | string[] | Only these tools are available. |
+| `disallowedTools` | string[] | These are denied. Supports the CLI's pattern form, e.g. `Bash(git *)`. |
+
+They are emitted **after** `--append-system-prompt` and **before** `claudeArgs`,
+so an operator can still override either with an explicit flag, and both join the
+spawn signature so a change hard-reloads that agent.
+
+⚠️ A tool list is a capability limit, not a data boundary. An agent restricted to
+`Read` can still open any file its unix user can reach — see 3.1 and 3.2 for the
+env and user scoping that make the limit mean something.
+
+```json
+"managers": {
+  "mode": "persistent",
+  "runtime": {
+    "cwd": "/srv/agents/managers",
+    "allowedTools": ["Read", "Grep", "Glob"],
+    "disallowedTools": ["Bash", "Write", "Edit", "WebFetch"]
   }
 }
 ```
