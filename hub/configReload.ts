@@ -29,6 +29,7 @@ export function agentSpawnSignature(cfg: AgentConfig): string {
     resumable: cfg.runtime?.resumable,
     appendSystemPrompt: cfg.runtime?.appendSystemPrompt,
     allowedTools: cfg.runtime?.allowedTools,
+    disallowedTools: cfg.runtime?.disallowedTools,
     envPassthrough: cfg.runtime?.envPassthrough,
     envFile: cfg.runtime?.envFile,
     env: cfg.runtime?.env,

@@ -142,7 +142,8 @@ export interface AgentRuntime {
   cwd: string
   provider?: AgentProvider
   model?: string
-  allowedTools?: string[]      // ephemeral only
+  allowedTools?: string[]      // tool allowlist; applies to ephemeral AND persistent agents
+  disallowedTools?: string[]   // tool denylist, e.g. ["Bash", "WebFetch"]
   claudeArgs?: string[]        // extra flags appended to the agent's `claude` invocation
   codexArgs?: string[]         // extra global flags inserted before `codex app-server`
   codexSandbox?: CodexSandbox  // defaults to danger-full-access in the Codex transport

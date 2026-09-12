@@ -175,6 +175,8 @@ export class StreamJsonTransport implements AgentTransport {
         model: this.cfg.runtime.model,
         appendSystemPrompt: this.cfg.runtime.appendSystemPrompt,
         claudeArgs: this.cfg.runtime.claudeArgs,
+        allowedTools: this.cfg.runtime.allowedTools,
+        disallowedTools: this.cfg.runtime.disallowedTools,
       })
       this.proc = spawner(argv, this.cfg.runtime.cwd, buildAgentEnv(
         this.cfg.runtime,
