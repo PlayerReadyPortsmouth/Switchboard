@@ -100,7 +100,7 @@ export class CodexAppServerTransport implements AgentTransport {
       this.cfg.runtime,
       process.env as Record<string, string | undefined>,
       { HUB_SOCKET: this.opts.socketPath, AGENT_NAME: this.name },
-    ))
+    ), this.cfg.runtime.runAs)
     this.proc.onStdoutLine(line => this.handleLine(line))
     this.proc.onExit(code => this.handleExit(code))
 

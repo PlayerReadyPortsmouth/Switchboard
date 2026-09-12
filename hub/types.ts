@@ -1,3 +1,4 @@
+import type { RunAsSpec } from "./runAs"
 /** A Discord message normalised for routing. */
 export interface InboundMessage {
   chatId: string        // Discord channel id (DM channel or guild channel)
@@ -158,6 +159,7 @@ export interface AgentRuntime {
   envPassthrough?: string[]  // hub env vars this agent inherits; ["*"] / absent = all (previous behaviour)
   envFile?: string           // KEY=value file read for this agent alone (~ expanded)
   env?: Record<string, string>  // inline env for this agent; wins over envFile and passthrough
+  runAs?: RunAsSpec          // drop to this unix user (needs a root hub); absent = the hub own user
 }
 
 export interface AgentConfig {

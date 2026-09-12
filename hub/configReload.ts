@@ -32,6 +32,7 @@ export function agentSpawnSignature(cfg: AgentConfig): string {
     envPassthrough: cfg.runtime?.envPassthrough,
     envFile: cfg.runtime?.envFile,
     env: cfg.runtime?.env,
+    runAs: cfg.runtime?.runAs,
   })
 }
 

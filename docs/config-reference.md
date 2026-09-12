@@ -126,6 +126,50 @@ part of the spawn signature, so changing one hard-reloads that agent.
 }
 ```
 
+### 3.2 Per-agent unix user (`runAs`)
+
+`envPassthrough` keeps the hub's variables out of an agent's environment, but the
+filesystem stays open: every agent runs as the hub's user, so `Read` on an
+absolute path reaches any file that user can reach, including another agent's
+`envFile` and the hub's own `.env`. `runAs` drops the agent to its own unix user
+so the boundary is one the kernel enforces.
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `runAs.user` | string | — | Unix user (or uid) to drop to. |
+| `runAs.group` | string | the user's own name | Unix group (or gid). |
+| `runAs.initGroups` | boolean | `true` | Apply the account's supplementary groups. |
+
+`Bun.spawn` takes no uid or gid, so the exec vector is wrapped in `setpriv`
+(util-linux), which drops privilege and execs the provider binary in place.
+`--` terminates setpriv's own flags so an agent's arguments are never parsed as
+setpriv's. Account names are validated against `^[A-Za-z0-9._-]{1,64}$` at config
+load — not because argv needs escaping, but so a typo cannot quietly run an agent
+as the wrong account.
+
+**Requires a root hub.** Privilege only drops downwards, so a non-root hub throws
+at spawn rather than running the agent as the hub user while the config claims
+otherwise. Absent `runAs`, the exec vector is untouched and behaviour is
+identical to before.
+
+**Operational prerequisites**, none of which this code can check for you:
+- the agent's `cwd`, its `envFile` and any `--add-dir` path must be readable by that user
+- the shim socket (`socketPath`) must be connectable by it — a unix socket created by root is not reachable by an unprivileged user unless the directory and socket permit it, so set the state dir up deliberately
+- give each agent user a home it can write to, or tools that expect `$HOME` will fail in confusing ways
+
+```json
+"managers": {
+  "mode": "persistent",
+  "access": { "roles": ["manager"] },
+  "runtime": {
+    "cwd": "/srv/agents/managers",
+    "envPassthrough": [],
+    "envFile": "/srv/agents/managers/.env",
+    "runAs": { "user": "agent-managers" }
+  }
+}
+```
+
 ## 4. Config loading, hot-reload, web editor
 
 - **`hub/config.ts`** — `loadConfigs(dir)` parses both files, `expandHome()`s `stateDir`, `socketPath`, `outboundAttachments.outboxDir`, `shareLinks.artifactsDir`, and every agent's `runtime.cwd`.

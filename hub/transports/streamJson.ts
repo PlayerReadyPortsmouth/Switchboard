@@ -1,5 +1,6 @@
 import { writeFileSync, unlinkSync, readFileSync } from "fs"
 import { buildAgentEnv } from "../agentEnv"
+import { buildExecVector, type RunAsSpec } from "../runAs"
 import type { AgentConfig, AgentReply, AgentTurnOutcome, InboundMessage, CardSpec, TurnUsage, SendOutcome } from "../types"
 import { contextTokens, fillPct, blendUsage } from "../usage"
 import { TurnGate } from "../turnGate"
@@ -17,7 +18,7 @@ export interface AgentProcessHandle {
   kill(): void
 }
 export type ProcessSpawner = (
-  argv: string[], cwd: string, env: Record<string, string>,
+  argv: string[], cwd: string, env: Record<string, string>, runAs?: RunAsSpec,
 ) => AgentProcessHandle
 
 /** Minimal socket surface StreamJsonTransport needs (real = ShimSocketServer). */
@@ -179,7 +180,7 @@ export class StreamJsonTransport implements AgentTransport {
         this.cfg.runtime,
         process.env as Record<string, string | undefined>,
         { HUB_SOCKET: socketPath, AGENT_NAME: this.name },
-      ))
+      ), this.cfg.runtime.runAs)
       this.alive = true
       this.proc.onExit(() => {
         this.alive = false
@@ -335,8 +336,10 @@ export function splitLines(acc: { buf: string }, chunk: string): string[] {
 
 /** Real spawner: Bun.spawn with a stdout line reader. */
 export function makeBunProcessSpawner(bin = "claude"): ProcessSpawner {
-  return (argv, cwd, env) => {
-    const proc = Bun.spawn([bin, ...argv], { cwd, env, stdin: "pipe", stdout: "pipe", stderr: "inherit" })
+  return (argv, cwd, env, runAs) => {
+    // runAs wraps the vector in setpriv so the agent runs as its own unix user.
+    const exec = buildExecVector(bin, argv, runAs)
+    const proc = Bun.spawn([exec.bin, ...exec.argv], { cwd, env, stdin: "pipe", stdout: "pipe", stderr: "inherit" })
     let lineCb: (l: string) => void = () => {}
     let exitCb: (c: number) => void = () => {}
     const acc = { buf: "" }
