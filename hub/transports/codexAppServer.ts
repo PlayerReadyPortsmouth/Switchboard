@@ -1,4 +1,5 @@
 import { readFileSync, unlinkSync, writeFileSync } from "fs"
+import { buildAgentEnv } from "../agentEnv"
 import type { AgentConfig, AgentReply, AgentTurnOutcome, InboundMessage, SendOutcome, TurnUsage } from "../types"
 import { contextTokens, fillPct } from "../usage"
 import { TurnGate } from "../turnGate"
@@ -95,9 +96,11 @@ export class CodexAppServerTransport implements AgentTransport {
       publishEnabled: this.opts.publishEnabled, peeringEnabled: this.opts.peeringEnabled,
       receiptsEnabled: this.opts.receiptsEnabled,
     })
-    this.proc = spawner(argv, this.cfg.runtime.cwd, {
-      ...(process.env as Record<string, string>), HUB_SOCKET: this.opts.socketPath, AGENT_NAME: this.name,
-    })
+    this.proc = spawner(argv, this.cfg.runtime.cwd, buildAgentEnv(
+      this.cfg.runtime,
+      process.env as Record<string, string | undefined>,
+      { HUB_SOCKET: this.opts.socketPath, AGENT_NAME: this.name },
+    ))
     this.proc.onStdoutLine(line => this.handleLine(line))
     this.proc.onExit(code => this.handleExit(code))
 

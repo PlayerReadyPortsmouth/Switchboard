@@ -155,6 +155,9 @@ export interface AgentRuntime {
   coalesceBurst?: boolean    // fold consecutive same-conversation queued messages into one turn
   pool?: PoolPolicy          // opt-in replica auto-scaling for a hot persistent agent
   audit?: boolean            // per-agent audit opt-out: false ⇒ skip this agent's events even when hub audit is on
+  envPassthrough?: string[]  // hub env vars this agent inherits; ["*"] / absent = all (previous behaviour)
+  envFile?: string           // KEY=value file read for this agent alone (~ expanded)
+  env?: Record<string, string>  // inline env for this agent; wins over envFile and passthrough
 }
 
 export interface AgentConfig {
