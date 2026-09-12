@@ -67,6 +67,7 @@ export function loadConfigs(dir: string): { hub: HubConfig; agents: AgentRegistr
   if (hub.shareLinks?.artifactsDir) hub.shareLinks.artifactsDir = expandHome(hub.shareLinks.artifactsDir)
   for (const [name, a] of Object.entries(agents)) {
     a.runtime.cwd = expandHome(a.runtime.cwd)
+    if (a.runtime.envFile) a.runtime.envFile = expandHome(a.runtime.envFile)
     if (a.runtime.provider !== undefined && a.runtime.provider !== "claude" && a.runtime.provider !== "codex") {
       throw new Error(`config: agent "${name}" has invalid runtime.provider "${a.runtime.provider}"`)
     }

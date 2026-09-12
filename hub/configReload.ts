@@ -4,7 +4,7 @@
  *  router/fallback models, `commands` / `directCommands`, and per-agent `access`
  *  — WITHOUT touching any running agent process. A HARD reload additionally
  *  respawns the persistent agents whose spawn-affecting config (provider, model, provider args,
- *  cwd, resumable, mode, appendSystemPrompt, allowedTools) changed. Some changes
+ *  cwd, resumable, mode, appendSystemPrompt, allowedTools, env scoping) changed. Some changes
  *  can be applied by NEITHER reload and need a full hub restart: ports/host binds,
  *  the socket path, the state dir, the default agent, adding/removing an agent,
  *  flipping an agent's mode, or a pooled agent's spawn config (pools aren't hot-
@@ -29,6 +29,9 @@ export function agentSpawnSignature(cfg: AgentConfig): string {
     resumable: cfg.runtime?.resumable,
     appendSystemPrompt: cfg.runtime?.appendSystemPrompt,
     allowedTools: cfg.runtime?.allowedTools,
+    envPassthrough: cfg.runtime?.envPassthrough,
+    envFile: cfg.runtime?.envFile,
+    env: cfg.runtime?.env,
   })
 }
 

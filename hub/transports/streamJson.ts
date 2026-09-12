@@ -1,4 +1,5 @@
 import { writeFileSync, unlinkSync, readFileSync } from "fs"
+import { buildAgentEnv } from "../agentEnv"
 import type { AgentConfig, AgentReply, AgentTurnOutcome, InboundMessage, CardSpec, TurnUsage, SendOutcome } from "../types"
 import { contextTokens, fillPct, blendUsage } from "../usage"
 import { TurnGate } from "../turnGate"
@@ -174,10 +175,11 @@ export class StreamJsonTransport implements AgentTransport {
         appendSystemPrompt: this.cfg.runtime.appendSystemPrompt,
         claudeArgs: this.cfg.runtime.claudeArgs,
       })
-      this.proc = spawner(argv, this.cfg.runtime.cwd, {
-        ...(process.env as Record<string, string>),
-        HUB_SOCKET: socketPath, AGENT_NAME: this.name,
-      })
+      this.proc = spawner(argv, this.cfg.runtime.cwd, buildAgentEnv(
+        this.cfg.runtime,
+        process.env as Record<string, string | undefined>,
+        { HUB_SOCKET: socketPath, AGENT_NAME: this.name },
+      ))
       this.alive = true
       this.proc.onExit(() => {
         this.alive = false
