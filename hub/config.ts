@@ -3,6 +3,8 @@ import { join } from "path"
 import { homedir } from "os"
 import type { HubConfig, AgentRegistry } from "./types"
 
+import { validateRunAs } from "./runAs"
+
 export function expandHome(p: string): string {
   return p.startsWith("~") ? join(homedir(), p.slice(1)) : p
 }
@@ -68,6 +70,7 @@ export function loadConfigs(dir: string): { hub: HubConfig; agents: AgentRegistr
   for (const [name, a] of Object.entries(agents)) {
     a.runtime.cwd = expandHome(a.runtime.cwd)
     if (a.runtime.envFile) a.runtime.envFile = expandHome(a.runtime.envFile)
+    if (a.runtime.runAs) validateRunAs(a.runtime.runAs, name)
     if (a.runtime.provider !== undefined && a.runtime.provider !== "claude" && a.runtime.provider !== "codex") {
       throw new Error(`config: agent "${name}" has invalid runtime.provider "${a.runtime.provider}"`)
     }
