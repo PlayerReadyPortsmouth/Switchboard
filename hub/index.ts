@@ -12,6 +12,7 @@ import { agentsFeatureEnabled, resolveWorkspaceRole } from "./operations/access"
 import { classifyHubChange, invalidSafeFieldValue, type HubChangeClassification } from "./hubConfigDraft"
 import { HubConfigPreviewRegistry } from "./hubConfigPreview"
 import { BaseGate } from "./baseGate"
+import { permittedAgents } from "./access"
 import { Gateway, parseNotifyCustomId } from "./gateway"
 import { ThreadAgentRegistry } from "./threadAgents"
 import { ThreadStateStore } from "./threadState"
@@ -100,7 +101,7 @@ import { Database } from "bun:sqlite"
 import { ConversationEventStream, ConversationService, createDiscordConversationMigrator, createTypingNotifier, inboundLinkRoute, LegacyDiscordCompatibilityRouter, ProductionIngressGate, SqliteConversationRepository, TurnCoordinator, buildAttachmentEvent, buildToolStepEvent, buildCardEvent, summariseToolInput, attachmentCreatedAt, resolveConversationId } from "./conversations"
 import { publishCardToWeb } from "./webCardPublisher"
 import { DeliveryWorker, DiscordAdapter, SurfaceRouter, admitsSurfaceEvent } from "./surfaces"
-import type { SurfaceGate } from "./surfaces"
+import type { NormalizedSurfaceEvent, SurfaceGate } from "./surfaces"
 import { createAsyncShutdown } from "./shutdown"
 import { MemoryBrowse } from "./memoryBrowse"
 import { BrowseSessions } from "./memoryBrowseSessions"
@@ -1964,6 +1965,33 @@ const baseGate = new BaseGate(join(hub.stateDir, "access.json"))
 const canonicalGate: SurfaceGate = (userId, chatId, isDM, threadParentId) =>
   baseGate.gate(userId, chatId, isDM, Date.now(), threadParentId)
 
+/** Layer 1 for the canonical path: may THIS caller use the agent serving this channel?
+ *
+ *  `permittedAgents` was called in exactly one place — `Orchestrator.handleMessage` — so an
+ *  agent's `access.users`, `access.roles` and `access.channels` were enforced on the legacy
+ *  path and nowhere else. For any migrated channel they were a comment rather than a
+ *  boundary, which is the same fault as the base gate guarding one door of two.
+ *
+ *  A denial is audited and silent, exactly like the base gate's: a per-message refusal in a
+ *  busy channel is a reply storm, and the ledger is where an operator looks to answer "why
+ *  did it not answer me". ⚠️ That does mean a denied person sees nothing, which is a real
+ *  cost — it is a deliberate match to Layer 0's behaviour, not an oversight. */
+async function canonicalAgentAllowed(agent: string, event: NormalizedSurfaceEvent): Promise<boolean> {
+  const roles = discordEnabled ? await gateway.resolveRoles(event.authorId) : []
+  const permitted = permittedAgents(agents, roles, event.authorId, {
+    channelId: event.externalLocationId,
+    threadParentId: event.threadParentId,
+    isDM: event.isDM,
+  })
+  if (permitted.includes(agent)) return true
+  audit.record({
+    kind: "access", actor: `user:${event.authorId}`, action: "deny",
+    chat: event.externalLocationId, outcome: "deny",
+    detail: { agent, reason: "agent_not_permitted" },
+  })
+  return false
+}
+
 // Only allowlisted users may press card buttons.
 if (discordGateway) gateway.setPermissionAuthorizer((uid) => baseGate.listAllowed().includes(uid))
 
@@ -2409,8 +2437,8 @@ if (discordGateway) gateway.handleInbound((m) => {
   // traffic must neither migrate nor take the canonical route — it falls through
   // to the orchestrator, which gates it again, drops it, and records the deny.
   const canonical = !compatibilityMessage && admitsSurfaceEvent(surfaceEvent, canonicalGate)
-  if (canonical) ensureDiscordConversation?.(surfaceEvent,
-    resolvePinnedAgent(m.chatId, hub.channelAgents ?? []) ?? hub.defaultAgent)
+  const legacyPin = canonical ? resolvePinnedAgent(m.chatId, hub.channelAgents ?? []) : null
+  if (canonical) ensureDiscordConversation?.(surfaceEvent, legacyPin ?? hub.defaultAgent, legacyPin)
   // Linked locations are canonical conversation traffic and are handled by the
   // Discord surface adapter; all other locations retain the legacy command/card path.
   if (canonical && turnCoordinator && inboundLinkRoute(conversationRepo.resolveTransportLink("discord", m.chatId)) === "canonical") return
@@ -2704,8 +2732,15 @@ if (discordEnabled) {
     // control at all until now, which is how the hub came to answer in channels
     // absent from groups[].
     if (!admitsSurfaceEvent(event, canonicalGate)) return Promise.resolve()
-    ensureDiscordConversation?.(event, resolvePinnedAgent(event.externalLocationId, hub.channelAgents ?? []) ?? hub.defaultAgent)
-    return turnCoordinator?.acceptSurfaceEvent(event).then(() => {}) ?? Promise.resolve()
+    const pinned = resolvePinnedAgent(event.externalLocationId, hub.channelAgents ?? [])
+    const conversation = ensureDiscordConversation?.(event, pinned ?? hub.defaultAgent, pinned)
+    if (!conversation || !turnCoordinator) return Promise.resolve()
+    // Layer 1 runs AFTER the conversation exists, because the question is "may you use
+    // THIS channel's agent", which needs the agent the channel actually settled on.
+    return (async () => {
+      if (!(await canonicalAgentAllowed(conversation.primaryAgent, event))) return
+      await turnCoordinator.acceptSurfaceEvent(event)
+    })()
   })
   console.error("switchboard hub: gateway connected")
 }
