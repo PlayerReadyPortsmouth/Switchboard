@@ -100,6 +100,20 @@ export interface AgentTurnOutcome {
 export interface AgentAccess {
   roles: string[]       // role names; "*" means any paired user
   users?: string[]      // user snowflakes
+  /** Channel snowflakes this agent may be used in. Absent ⇒ anywhere.
+   *
+   *  A RESTRICTION, never a grant: it narrows where an agent the caller is already
+   *  permitted to use can be reached, and can never widen access to someone whom
+   *  `roles`/`users` did not already allow. That keeps it composable and makes it
+   *  impossible to accidentally open an agent up by adding a channel.
+   *
+   *  Messages in a THREAD count as being in the thread's parent channel, so locking an
+   *  agent to a channel does not quietly break threads inside it.
+   *
+   *  A DM is not one of an agent's channels, so a channel-locked agent is unreachable
+   *  by DM. Deliberate: the point of locking dev tools to a room is that they are not
+   *  available outside it. */
+  channels?: string[]
   consultableBy?: string[]  // agent names allowed to consult this agent via ask_agent ("*" = any); absent ⇒ none
   peerableBy?: string[]   // remote peer names allowed to reach this agent via ask_peer ("*" = any); absent ⇒ none
 }

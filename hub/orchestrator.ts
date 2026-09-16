@@ -54,7 +54,11 @@ export class Orchestrator {
     if (perm && this.deps.resolvePermission(perm.code, perm.behavior)) return
 
     const roles = await this.deps.resolveRoles(inbound.userId)
-    const permitted = permittedAgents(this.reg, roles, inbound.userId)
+    const permitted = permittedAgents(this.reg, roles, inbound.userId, {
+      channelId: inbound.chatId,
+      threadParentId: inbound.threadParentId,
+      isDM: inbound.isDM,
+    })
     const key = chatKey(this.hub.chatKeyScope, inbound.isDM, inbound.chatId, inbound.userId)
     const bound = this.bindings.get(key)?.agent ?? null
 
