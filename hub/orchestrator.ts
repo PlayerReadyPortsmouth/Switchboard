@@ -24,6 +24,17 @@ export interface OrchestratorDeps {
     Promise<{ ok: true } | { ok: false; reason: "cap" } | { ok: false; reason: "worktree_error"; error: string }>
   isAvailable: (agent: string) => boolean
   sendPlain: (chatId: string, text: string) => Promise<void>
+  /** What serves this channel on the CANONICAL path, if anything.
+   *
+   *  `null` ⇒ an ordinary legacy channel, where per-user bindings work exactly as they
+   *  always have. Non-null ⇒ the channel has one agent for everyone, bindings are not
+   *  consulted for it, and the control commands must say so instead of describing a
+   *  binding that will never be read. Absent dep ⇒ everything behaves as before. */
+  canonicalChannel?: (chatId: string) => { agent: string; pinned: boolean } | null
+  /** Point a canonical channel at a different agent. Only called for a canonical channel
+   *  that is NOT pinned, since a pin is an operator decision a chat command must not
+   *  silently overwrite. Returns false if the change did not stick. */
+  setCanonicalChannelAgent?: (chatId: string, agent: string) => boolean
   /** Optional: enrich the inbound (recent-message context + memory) right before
    *  dispatch. Returns the message to actually deliver. Absent ⇒ deliver as-is. */
   prepareDispatch?: (ctx: {
@@ -135,20 +146,46 @@ export class Orchestrator {
     c: ReturnType<typeof parseControlCommand> & object,
     inbound: InboundMessage, key: string, permitted: string[], bound: string | null,
   ): Promise<void> {
+    // A canonical channel has ONE agent for everyone and never reads a binding, so every
+    // answer below has to be about the channel rather than about this person. Before this,
+    // `!switch` wrote a binding nothing would read and replied "Switched to X" while the
+    // next ordinary message still went to the channel's agent. A control that acknowledges
+    // and then does nothing is worse than one that errors: it is believed once and then
+    // quietly disbelieved forever.
+    const canonical = this.deps.canonicalChannel?.(inbound.chatId) ?? null
     switch (c.cmd) {
       case "agents":
-        await this.deps.sendPlain(inbound.chatId, renderAgentList(this.reg, permitted, bound)); return
+        await this.deps.sendPlain(inbound.chatId, renderAgentList(this.reg, permitted, canonical?.agent ?? bound)); return
       case "who":
-        await this.deps.sendPlain(inbound.chatId, bound ? `Bound to **${bound}**.` : "Not bound yet."); return
+        await this.deps.sendPlain(inbound.chatId, canonical
+          ? `This channel is served by ${this.reg[canonical.agent]?.emoji ?? ""} **${canonical.agent}**${canonical.pinned ? " (pinned in config)" : ""} — the same agent for everyone here, not a per-person binding.`
+          : bound ? `Bound to **${bound}**.` : "Not bound yet."); return
       case "reset":
         this.bindings.clear(key)
-        await this.deps.sendPlain(inbound.chatId, "Cleared. Next message routes fresh."); return
-      case "switch":
+        await this.deps.sendPlain(inbound.chatId, canonical
+          ? `Nothing to clear here — this channel is served by **${canonical.agent}** for everyone, so there is no per-person binding.`
+          : "Cleared. Next message routes fresh."); return
+      case "switch": {
         if (!permitted.includes(c.arg)) {
           await this.deps.sendPlain(inbound.chatId, `**${c.arg}** is not available to you.`); return
         }
+        if (canonical?.pinned) {
+          await this.deps.sendPlain(inbound.chatId,
+            `This channel is pinned to **${canonical.agent}** in config, so I can't switch it. An operator needs to change \`channelAgents\`.`)
+          return
+        }
+        if (canonical) {
+          if (!this.deps.setCanonicalChannelAgent?.(inbound.chatId, c.arg)) {
+            await this.deps.sendPlain(inbound.chatId, `Couldn't switch this channel to **${c.arg}**.`); return
+          }
+          this.bindings.set(key, { agent: c.arg, lastActive: Date.parse(inbound.ts) })
+          await this.deps.sendPlain(inbound.chatId,
+            `Switched **this channel** to ${this.reg[c.arg].emoji} **${c.arg}** — that applies to everyone here, not just you.`)
+          return
+        }
         this.bindings.set(key, { agent: c.arg, lastActive: Date.parse(inbound.ts) })
         await this.deps.sendPlain(inbound.chatId, `Switched to ${this.reg[c.arg].emoji} **${c.arg}**.`); return
+      }
     }
   }
 }

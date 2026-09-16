@@ -2297,6 +2297,25 @@ const orchestrator = new Orchestrator(hub, agents, {
   },
   isAvailable: (agent) => dispatcher.isAvailable(agent),
   sendPlain: (chatId, text) => gateway.sendPlain(chatId, text),
+  // Control commands take the LEGACY path even in a canonical channel (they start with
+  // "!"), so this is how they learn that the channel they are answering about is served
+  // canonically and has no binding to talk about.
+  canonicalChannel: (chatId) => {
+    const link = conversationRepo.resolveTransportLink("discord", chatId)
+    if (inboundLinkRoute(link) !== "canonical") return null
+    const conversation = conversationRepo.getConversation(link!.conversationId)
+    if (!conversation) return null
+    return {
+      agent: conversation.primaryAgent,
+      pinned: resolvePinnedAgent(chatId, hub.channelAgents ?? []) !== null,
+    }
+  },
+  setCanonicalChannelAgent: (chatId, agent) => {
+    const link = conversationRepo.resolveTransportLink("discord", chatId)
+    if (inboundLinkRoute(link) !== "canonical") return false
+    try { conversationRepo.updateConversation(link!.conversationId, { primaryAgent: agent }, Date.now()); return true }
+    catch { return false }
+  },
   prepareDispatch: async ({ agent, inbound, isSwitch }) => {
     const rt = agents[agent]?.runtime
     // Record inbound in the trace. Attribution of this agent's tool_use/
