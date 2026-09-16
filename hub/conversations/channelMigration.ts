@@ -66,7 +66,7 @@ export interface DiscordConversationMigrationDeps {
 
 /** Build the stateful channel migration boundary used by the Discord adapter. */
 export function createDiscordConversationMigrator(deps: DiscordConversationMigrationDeps) {
-  return function ensureDiscordConversation(event: DiscordMigrationEvent, configuredAgent: string): Conversation {
+  return function ensureDiscordConversation(event: DiscordMigrationEvent, configuredAgent: string, pinnedAgent?: string | null): Conversation {
     const createdAt = deps.now()
     const conversationId = deps.id()
     const creator = "system:discord-migration"
@@ -80,7 +80,7 @@ export function createDiscordConversationMigrator(deps: DiscordConversationMigra
     // Runs for existing conversations too, so a channel rename — and the legacy
     // `Discord <snowflake>` titles migrated before names were carried — self-correct
     // on the next inbound message, with no manual DB edit.
-    const conversation = refreshTitle(deps, ensured.conversation, title, event.externalLocationId)
+    const conversation = refreshPinnedAgent(deps, refreshTitle(deps, ensured.conversation, title, event.externalLocationId), pinnedAgent)
     ensureExternalParticipant(deps, ensured.conversation.id, event.authorId)
     // Runs for existing conversations too (this migrator is invoked on every inbound
     // Discord message), so enabling the mirror backfills channels migrated earlier.
@@ -99,6 +99,26 @@ function refreshTitle(deps: DiscordConversationMigrationDeps, conversation: Conv
   if (desired === `Discord ${externalLocationId}`) return conversation  // never downgrade a real name back to the snowflake
   if (!isMigratorOwnedTitle(conversation.title, externalLocationId)) return conversation
   try { return deps.repo.updateConversation(conversation.id, { title: desired }, deps.now()) }
+  catch { return conversation }
+}
+
+/** Re-apply a channel pin to an EXISTING conversation.
+ *
+ *  `primaryAgent` is chosen once at creation and was never revisited, so adding a
+ *  `channelAgents` entry for a channel that had ALREADY migrated did nothing at all: the
+ *  config named one agent, the conversation kept serving another, and neither side showed
+ *  the disagreement. A pin is an explicit operator statement about a channel, so it wins,
+ *  and it is re-applied on every inbound message rather than only at creation.
+ *
+ *  Absence of a pin deliberately changes NOTHING — an unpinned channel keeps whatever agent
+ *  it has, so a `primaryAgent` chosen in the web UI is never clobbered by the hub default on
+ *  the next Discord message. Same reasoning as `isMigratorOwnedTitle`: only correct what we
+ *  can prove somebody configured.
+ *
+ *  Never throws: a failed re-pin must not drop the message. */
+function refreshPinnedAgent(deps: DiscordConversationMigrationDeps, conversation: Conversation, pinnedAgent?: string | null): Conversation {
+  if (!pinnedAgent || conversation.primaryAgent === pinnedAgent) return conversation
+  try { return deps.repo.updateConversation(conversation.id, { primaryAgent: pinnedAgent }, deps.now()) }
   catch { return conversation }
 }
 

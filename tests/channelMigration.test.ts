@@ -28,6 +28,50 @@ test("first Discord event creates one linked conversation and imports only relia
   expect(audits).toEqual([{ channelId: "c1", imported: 2, skipped: 1 }])
 })
 
+// --- channel pins on an EXISTING conversation -----------------------------------
+// primaryAgent was chosen once at creation and never revisited, so pinning a channel
+// that had already migrated did nothing at all.
+function pinFixture() {
+  const repo = new SqliteConversationRepository(new Database(":memory:"))
+  let n = 0
+  const ensure = createDiscordConversationMigrator({ repo, now: () => 100, id: () => `id-${++n}` })
+  const event = { adapter: "discord", eventId: "m1", externalLocationId: "c1", externalMessageId: "m1", authorId: "u", authorName: "U", content: "hi", createdAt: 40, locationName: "skippy-qa" }
+  return { repo, ensure, event }
+}
+
+test("a pin added AFTER a channel migrated is applied on the next message", () => {
+  const f = pinFixture()
+  expect(f.ensure(f.event, "skippy-upgraded").primaryAgent).toBe("skippy-upgraded")
+  // operator adds channelAgents: [{ channelId: "c1", agent: "qa" }]
+  const after = f.ensure(f.event, "qa", "qa")
+  expect(after.primaryAgent).toBe("qa")
+  expect(f.repo.getConversation(after.id)?.primaryAgent).toBe("qa")
+})
+
+test("NO pin leaves an existing primaryAgent alone — a web-side choice is not clobbered by the default", () => {
+  const f = pinFixture()
+  const created = f.ensure(f.event, "skippy-upgraded")
+  f.repo.updateConversation(created.id, { primaryAgent: "architect" }, 150)
+  const after = f.ensure(f.event, "skippy-upgraded", null)
+  expect(after.primaryAgent).toBe("architect")
+})
+
+test("a pin that already matches writes nothing", () => {
+  const f = pinFixture()
+  f.ensure(f.event, "qa", "qa")
+  const before = f.repo.getConversation(f.repo.resolveTransportLink("discord", "c1")!.conversationId)!
+  const after = f.ensure(f.event, "qa", "qa")
+  expect(after.primaryAgent).toBe("qa")
+  expect(after.updatedAt).toBe(before.updatedAt)
+})
+
+test("the pin wins over a stale primaryAgent even when the pin changes again", () => {
+  const f = pinFixture()
+  f.ensure(f.event, "skippy-upgraded")
+  expect(f.ensure(f.event, "qa", "qa").primaryAgent).toBe("qa")
+  expect(f.ensure(f.event, "dev", "dev").primaryAgent).toBe("dev")
+})
+
 test("repeated ensure resolves the unique transport-link winner", () => {
   const repo = new SqliteConversationRepository(new Database(":memory:"))
   let n = 0
