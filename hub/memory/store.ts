@@ -8,6 +8,22 @@ export type Scope =
   | `agents/${string}`
   | `channels/${string}`
 
+/** Where a note's CONTENT came from, as distinct from who wrote the file.
+ *  `source` answers "which component wrote this"; `origin` answers "can it be trusted
+ *  to be talking about us rather than to us".
+ *
+ *  This matters once agents of different privilege share one vault. A low-privilege
+ *  agent reads a parent's email, a ticket or a session note and distils it to memory;
+ *  a higher-privilege agent later reads that note back. Without provenance the vault
+ *  is an unauthenticated message bus from the low-privilege agent to the high one —
+ *  the same confused-deputy path as a shared context, only asynchronous and therefore
+ *  harder to spot.
+ *
+ *  `undefined` means unknown, and renders exactly as before: we mark only what we know. */
+export type Origin =
+  | "operator"    // said by a user or an operator directly to the agent
+  | "untrusted"   // derived from content the agent READ (email, ticket, note, web page)
+
 export interface Note {
   path: string        // absolute file path
   scope: Scope
@@ -15,6 +31,7 @@ export interface Note {
   tags: string[]
   body: string
   source: string      // "distiller" | "agent:<name>" | …
+  origin?: Origin     // provenance of the CONTENT; undefined = unknown
   created: string     // ISO
   updated: string     // ISO
 }
@@ -35,6 +52,7 @@ export function serializeNote(n: Omit<Note, "path">): string {
     `created: ${JSON.stringify(n.created)}`,
     `updated: ${JSON.stringify(n.updated)}`,
     `source: ${JSON.stringify(n.source)}`,
+    ...(n.origin ? [`origin: ${JSON.stringify(n.origin)}`] : []),
     "---",
     "",
   ].join("\n")
@@ -70,6 +88,11 @@ export function parseNote(path: string, raw: string): Note {
     tags,
     body: body.replace(/^\n+/, "").replace(/\s+$/, ""),
     source: fm.source ? unquote(fm.source) : "unknown",
+    // Only "operator" and "untrusted" are meaningful; anything else stays unknown so a
+    // malformed or hand-edited front-matter can never silently assert trust.
+    ...(fm.origin && ["operator", "untrusted"].includes(unquote(fm.origin))
+      ? { origin: unquote(fm.origin) as Origin }
+      : {}),
     created: fm.created ? unquote(fm.created) : new Date(0).toISOString(),
     updated: fm.updated ? unquote(fm.updated) : new Date(0).toISOString(),
   }
@@ -87,7 +110,7 @@ export class MemoryStore {
 
   write(
     scope: Scope,
-    note: { title: string; tags?: string[]; body: string; source: string },
+    note: { title: string; tags?: string[]; body: string; source: string; origin?: Origin },
   ): string {
     const path = this.notePath(scope, note.title)
     const now = new Date().toISOString()
@@ -96,7 +119,7 @@ export class MemoryStore {
     mkdirSync(this.scopeDir(scope), { recursive: true })
     const contents = serializeNote({
       scope, title: note.title, tags: note.tags ?? [], body: note.body,
-      source: note.source, created, updated: now,
+      source: note.source, origin: note.origin, created, updated: now,
     })
     const tmp = path + ".tmp"
     writeFileSync(tmp, contents)
