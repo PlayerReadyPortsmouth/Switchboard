@@ -34,6 +34,7 @@ export class DiscordAdapter implements SurfaceAdapter {
         replyToExternalId: message.replyToMessageId,
         locationName: message.channelName,
         threadParentName: message.threadParentName,
+        threadParentId: message.threadParentId,
         isDM: message.isDM,
       }
       void Promise.resolve().then(() => onEvent(event)).catch(this.reportError)

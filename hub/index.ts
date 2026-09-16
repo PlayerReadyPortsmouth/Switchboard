@@ -99,7 +99,8 @@ import { createHash, randomBytes, randomUUID } from "crypto"
 import { Database } from "bun:sqlite"
 import { ConversationEventStream, ConversationService, createDiscordConversationMigrator, inboundLinkRoute, LegacyDiscordCompatibilityRouter, ProductionIngressGate, SqliteConversationRepository, TurnCoordinator, buildAttachmentEvent, buildToolStepEvent, buildCardEvent, summariseToolInput, attachmentCreatedAt, resolveConversationId } from "./conversations"
 import { publishCardToWeb } from "./webCardPublisher"
-import { DeliveryWorker, DiscordAdapter, SurfaceRouter } from "./surfaces"
+import { DeliveryWorker, DiscordAdapter, SurfaceRouter, admitsSurfaceEvent } from "./surfaces"
+import type { SurfaceGate } from "./surfaces"
 import { createAsyncShutdown } from "./shutdown"
 import { MemoryBrowse } from "./memoryBrowse"
 import { BrowseSessions } from "./memoryBrowseSessions"
@@ -1954,6 +1955,15 @@ if (shareLinksOn) {
 
 const baseGate = new BaseGate(join(hub.stateDir, "access.json"))
 
+/** The Layer-0 wall as the CANONICAL conversation path sees it.
+ *
+ *  Deliberately does not write an audit record: every inbound Discord message is
+ *  delivered to both this path and the legacy orchestrator, and the orchestrator's
+ *  own gate call already records each denial exactly once. Auditing here as well
+ *  would double every deny in the ledger. */
+const canonicalGate: SurfaceGate = (userId, chatId, isDM, threadParentId) =>
+  baseGate.gate(userId, chatId, isDM, Date.now(), threadParentId)
+
 // Only allowlisted users may press card buttons.
 if (discordGateway) gateway.setPermissionAuthorizer((uid) => baseGate.listAllowed().includes(uid))
 
@@ -2386,15 +2396,24 @@ if (discordGateway) gateway.handleInbound((m) => {
   // its canonical channel mapping synchronously before this multiplexer reaches
   // the legacy orchestrator branch.
   const compatibilityMessage = /^\s*!/.test(m.content)
-  if (!compatibilityMessage) ensureDiscordConversation?.({
+  const surfaceEvent = {
     adapter: "discord", eventId: m.messageId, externalLocationId: m.chatId,
     externalMessageId: m.messageId, authorId: m.userId, authorName: m.user,
     content: m.content, createdAt: Date.parse(m.ts), replyToExternalId: m.replyToMessageId,
-    locationName: m.channelName, threadParentName: m.threadParentName, isDM: m.isDM,
-  }, resolvePinnedAgent(m.chatId, hub.channelAgents ?? []) ?? hub.defaultAgent)
+    locationName: m.channelName, threadParentName: m.threadParentName,
+    threadParentId: m.threadParentId, isDM: m.isDM,
+  }
+  // Layer 0, before anything canonical happens. Establishing a transport link is
+  // itself a privileged act: once a channel has one, its traffic leaves this path
+  // at the return below and is served by the surface router instead. So refused
+  // traffic must neither migrate nor take the canonical route — it falls through
+  // to the orchestrator, which gates it again, drops it, and records the deny.
+  const canonical = !compatibilityMessage && admitsSurfaceEvent(surfaceEvent, canonicalGate)
+  if (canonical) ensureDiscordConversation?.(surfaceEvent,
+    resolvePinnedAgent(m.chatId, hub.channelAgents ?? []) ?? hub.defaultAgent)
   // Linked locations are canonical conversation traffic and are handled by the
   // Discord surface adapter; all other locations retain the legacy command/card path.
-  if (!compatibilityMessage && turnCoordinator && inboundLinkRoute(conversationRepo.resolveTransportLink("discord", m.chatId)) === "canonical") return
+  if (canonical && turnCoordinator && inboundLinkRoute(conversationRepo.resolveTransportLink("discord", m.chatId)) === "canonical") return
   channelStream.publish(m.chatId, { kind: "chat", ts: Date.now(), author: m.user, content: m.content, origin: "discord" })
   const trimmed = m.content.trim()
   // Audit ledger query (operator-only): list recent governed effects or a rollup.
@@ -2663,6 +2682,11 @@ if (discordEnabled) {
   await surfaceRouter.startAll(event => {
     if (!conversationIngress.tryRun(() => true).accepted) return Promise.resolve()
     if (/^\s*!/.test(event.content)) return Promise.resolve()
+    // Layer 0. This subscriber is a second, independent door into the hub — it
+    // migrates the channel and runs the turn itself — and consulted no access
+    // control at all until now, which is how the hub came to answer in channels
+    // absent from groups[].
+    if (!admitsSurfaceEvent(event, canonicalGate)) return Promise.resolve()
     ensureDiscordConversation?.(event, resolvePinnedAgent(event.externalLocationId, hub.channelAgents ?? []) ?? hub.defaultAgent)
     return turnCoordinator?.acceptSurfaceEvent(event).then(() => {}) ?? Promise.resolve()
   })
