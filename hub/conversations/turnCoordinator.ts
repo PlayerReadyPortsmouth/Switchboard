@@ -76,7 +76,15 @@ export class TurnCoordinator {
     if (result.inserted) {
       const links = this.repo.listTransportLinks(link.conversationId).filter(item => item.id !== link.id && item.enabled && item.syncMode !== "inbound_only" && item.syncMode !== "notifications_only")
       const deliveries = links.length ? this.repo.createDeliveries(result.message.id, links, "message", this.now()) : []
-      this.dispatch(link.conversationId, result.message, `${event.adapter}:${event.authorId}`, `${event.adapter}:${event.authorName}`)
+      // The RAW author id and name, deliberately not the `adapter:id` form used for
+      // storage above. These two fields are the SPEAKER, and the only thing that reads
+      // them on this path is `speakerFrame`, which renders
+      // `[speaker] discord_user_id=<id> username=<name>`. Namespacing them here produced
+      // `discord_user_id=discord:4253…` — double-prefixed, and not a snowflake any rule
+      // keyed on a Discord id could match. The stored message keeps its namespaced
+      // `author` (set independently on `input` above), so identity for the transcript
+      // and identity for the agent stay separate concerns.
+      this.dispatch(link.conversationId, result.message, event.authorId, event.authorName)
       if (deliveries.length) this.deliverInBackground(result.message, deliveries, links)
     }
     return result
