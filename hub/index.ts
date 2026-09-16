@@ -97,7 +97,7 @@ import { DocumentsDb, publishDocument, uploadDocument, setVisibility, deleteDocu
 import { runDocumentsMigrations } from "./documentsMigrations"
 import { createHash, randomBytes, randomUUID } from "crypto"
 import { Database } from "bun:sqlite"
-import { ConversationEventStream, ConversationService, createDiscordConversationMigrator, inboundLinkRoute, LegacyDiscordCompatibilityRouter, ProductionIngressGate, SqliteConversationRepository, TurnCoordinator, buildAttachmentEvent, buildToolStepEvent, buildCardEvent, summariseToolInput, attachmentCreatedAt, resolveConversationId } from "./conversations"
+import { ConversationEventStream, ConversationService, createDiscordConversationMigrator, createTypingNotifier, inboundLinkRoute, LegacyDiscordCompatibilityRouter, ProductionIngressGate, SqliteConversationRepository, TurnCoordinator, buildAttachmentEvent, buildToolStepEvent, buildCardEvent, summariseToolInput, attachmentCreatedAt, resolveConversationId } from "./conversations"
 import { publishCardToWeb } from "./webCardPublisher"
 import { DeliveryWorker, DiscordAdapter, SurfaceRouter, admitsSurfaceEvent } from "./surfaces"
 import type { SurfaceGate } from "./surfaces"
@@ -2667,6 +2667,22 @@ publishCardInFlight = (correlationId, inFlight) => {
   } catch (error) { process.stderr.write(`web cards: in-flight publish failed: ${error}\n`) }
 }
 
+// "typing…" while an agent works. Off unless configured, so an existing deployment
+// is byte-identical. Resolves the conversation's own Discord locations at ping time
+// rather than caching them, so a link added or disabled mid-turn is respected.
+const typingNotifier = hub.typingIndicator?.enabled && discordEnabled
+  ? createTypingNotifier({
+      refreshMs: hub.typingIndicator.refreshMs,
+      maxMs: hub.typingIndicator.maxMs,
+      send: (conversationId) => {
+        for (const link of conversationRepo.listTransportLinks(conversationId)) {
+          if (link.adapter !== "discord" || !link.enabled) continue
+          if (link.syncMode === "inbound_only" || link.syncMode === "notifications_only") continue
+          void gateway.sendTyping(link.externalLocationId)
+        }
+      },
+    })
+  : undefined
 turnCoordinator = new TurnCoordinator(
   conversationService,
   conversationRepo,
@@ -2676,6 +2692,7 @@ turnCoordinator = new TurnCoordinator(
   () => Date.now(),
   () => randomUUID(),
   error => audit.record({ kind: "event", actor: "hub", action: "canonical_surface_error", outcome: "error", detail: { error: error instanceof Error ? error.message : String(error) } }),
+  typingNotifier,
 )
 const deliveryWorker = new DeliveryWorker(conversationRepo, surfaceRouter)
 if (discordEnabled) {
@@ -2946,7 +2963,7 @@ if (webServer) console.error(`switchboard hub: web dashboard on ${hub.webHost ??
 const cleanupConversations = createAsyncShutdown({
   stopAcceptingWeb: () => { webServer?.stopAccepting(); conversationIngress.close(); turnCoordinator!.beginShutdown() },
   stopRetryWorker: async () => { await deliveryWorker.stop(); await turnCoordinator!.drainDeliveries() },
-  stopAdapters: () => surfaceRouter.stopAll(),
+  stopAdapters: () => { typingNotifier?.stopAll(); return surfaceRouter.stopAll() },
   stopWeb: async () => { await webServer?.stop() },
   closeDatabase: () => conversationDb.close(),
 })

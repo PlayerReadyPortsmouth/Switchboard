@@ -269,6 +269,16 @@ export interface ChannelAgent {
   threadWorktreeRepo?: string; // when the agent's runtime.cwd holds multiple repo checkouts (not a repo itself), name the subdirectory each thread's isolated worktree branches from. Absent ⇒ runtime.cwd itself is the base repo.
 }
 
+/** Show a surface's native "typing…" indicator while an agent is working a turn.
+ *
+ *  Off unless `enabled` is true, so an existing deployment behaves exactly as before.
+ *  Only surfaces that can express it act on it; everywhere else it is ignored. */
+export interface TypingIndicatorConfig {
+  enabled: boolean;
+  refreshMs?: number;  // re-ping interval (default 8000 — Discord expires at ~10s)
+  maxMs?: number;      // give up after this long with no reply (default 120000)
+}
+
 /** A keyword chat command that runs dedicated code (shell or HTTP) and formats
  *  the result — no model in the loop, unless `formatAgent` is set (then the raw
  *  result is handed to that agent to format/reply). The "Tier B" surface that
@@ -342,6 +352,7 @@ export interface HubConfig {
   deployApproverUserId?: string  // Discord user id allowed to press deploy:* buttons
   gatedActions?: GatedAction[]   // hub-side button handlers that run shell commands
   channelAgents?: ChannelAgent[]  // channels pinned to a specific agent
+  typingIndicator?: TypingIndicatorConfig;  // show "typing…" while an agent works (default OFF)
   threadAgents?: ThreadAgentsConfig; // per-thread dedicated agent instances (default off)
   // Memory & context (all optional; sensible defaults applied in index.ts).
   memoryDir?: string             // Obsidian-style note vault root (default <stateDir>/memory)
