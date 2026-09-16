@@ -69,6 +69,112 @@ test("!switch to a non-permitted agent is refused", async () => {
   expect(f.plain[0].text.toLowerCase()).toContain("not available")
 })
 
+// --- control commands in a CANONICAL channel ------------------------------------
+// A canonical channel has one agent for everyone and never reads a binding, so !switch
+// used to write a binding nothing would read and reply "Switched to X" while the next
+// ordinary message still went to the channel's agent.
+const guild = (content: string, userId = "u1"): InboundMessage =>
+  ({ chatId: "chan", messageId: "m", userId, user: "bob", content, ts: "t", isDM: false })
+
+function canonical(f: ReturnType<typeof fakes>, opts: { agent?: string; pinned?: boolean; setOk?: boolean } = {}) {
+  const set: { chatId: string; agent: string }[] = []
+  ;(f.deps as any).canonicalChannel = () => ({ agent: opts.agent ?? "qa", pinned: opts.pinned ?? false })
+  ;(f.deps as any).setCanonicalChannelAgent = (chatId: string, agent: string) => {
+    set.push({ chatId, agent }); return opts.setOk ?? true
+  }
+  return set
+}
+
+test("!switch in a LEGACY channel is unchanged", async () => {
+  const f = fakes()
+  const o = new Orchestrator(hub, reg, f.deps as any)
+  await o.handleMessage(guild("!switch research"))
+  expect(f.plain[0].text).toContain("Switched to")
+  expect(f.plain[0].text).not.toContain("this channel")
+})
+
+test("!switch in a canonical channel changes the CHANNEL and says so", async () => {
+  const f = fakes()
+  const set = canonical(f)
+  const o = new Orchestrator(hub, reg, f.deps as any)
+  await o.handleMessage(guild("!switch research"))
+  expect(set).toEqual([{ chatId: "chan", agent: "research" }])
+  expect(f.plain[0].text).toContain("this channel")
+  expect(f.plain[0].text).toContain("everyone here")
+})
+
+test("REGRESSION: !switch in a canonical channel never claims a per-person switch", async () => {
+  const f = fakes()
+  canonical(f)
+  const o = new Orchestrator(hub, reg, f.deps as any)
+  await o.handleMessage(guild("!switch research"))
+  // The old reply was exactly this, and it was a lie.
+  expect(f.plain[0].text).not.toBe("Switched to 🔬 **research**.")
+})
+
+test("!switch refuses on a PINNED channel and does not touch the conversation", async () => {
+  const f = fakes()
+  const set = canonical(f, { agent: "qa", pinned: true })
+  const o = new Orchestrator(hub, reg, f.deps as any)
+  await o.handleMessage(guild("!switch research"))
+  expect(set).toEqual([])
+  expect(f.plain[0].text).toContain("pinned")
+  expect(f.plain[0].text).toContain("channelAgents")
+  expect(f.plain[0].text).not.toContain("Switched")
+})
+
+test("a failed canonical switch reports failure instead of claiming success", async () => {
+  const f = fakes()
+  canonical(f, { setOk: false })
+  const o = new Orchestrator(hub, reg, f.deps as any)
+  await o.handleMessage(guild("!switch research"))
+  expect(f.plain[0].text).toContain("Couldn't switch")
+})
+
+test("!switch to a non-permitted agent is still refused before anything canonical happens", async () => {
+  const f = fakes()
+  f.deps.resolveRoles = async () => []
+  const set = canonical(f)
+  const o = new Orchestrator(hub, reg, f.deps as any)
+  await o.handleMessage(guild("!switch research"))
+  expect(set).toEqual([])
+  expect(f.plain[0].text.toLowerCase()).toContain("not available")
+})
+
+test("!who in a canonical channel describes the CHANNEL, not a binding", async () => {
+  const f = fakes()
+  canonical(f, { agent: "research" })
+  const o = new Orchestrator(hub, reg, f.deps as any)
+  await o.handleMessage(guild("!who"))
+  expect(f.plain[0].text).toContain("This channel is served by")
+  expect(f.plain[0].text).toContain("research")
+  expect(f.plain[0].text).not.toContain("Bound to")
+})
+
+test("!who says so when the channel is pinned", async () => {
+  const f = fakes()
+  canonical(f, { agent: "qa", pinned: true })
+  const o = new Orchestrator(hub, reg, f.deps as any)
+  await o.handleMessage(guild("!who"))
+  expect(f.plain[0].text).toContain("pinned in config")
+})
+
+test("!reset in a canonical channel does not promise a fresh route it cannot deliver", async () => {
+  const f = fakes()
+  canonical(f, { agent: "qa" })
+  const o = new Orchestrator(hub, reg, f.deps as any)
+  await o.handleMessage(guild("!reset"))
+  expect(f.plain[0].text).toContain("Nothing to clear")
+  expect(f.plain[0].text).not.toContain("routes fresh")
+})
+
+test("!reset in a legacy channel is unchanged", async () => {
+  const f = fakes()
+  const o = new Orchestrator(hub, reg, f.deps as any)
+  await o.handleMessage(guild("!reset"))
+  expect(f.plain[0].text).toContain("routes fresh")
+})
+
 test("an unpaired stranger gets a pairing code and is not dispatched", async () => {
   const f = fakes()
   f.deps.baseGate = () => ({ action: "pair" as const, code: "abc123" })
