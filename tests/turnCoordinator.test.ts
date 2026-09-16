@@ -75,7 +75,9 @@ describe("TurnCoordinator", () => {
     expect((await f.coordinator.acceptSurfaceEvent(event))?.inserted).toBe(true)
     expect((await f.coordinator.acceptSurfaceEvent(event))?.inserted).toBe(false)
     expect(f.dispatched).toHaveLength(1)
-    expect(f.dispatched[0]).toMatchObject({ chatId: f.conversation.id, userId: "discord:42", user: "discord:Ada", content: "from discord" })
+    // Updated to the NEW contract, not loosened: these two fields are the speaker the
+    // agent is told about, and PR #69 gave them a consumer that needs a real Discord id.
+    expect(f.dispatched[0]).toMatchObject({ chatId: f.conversation.id, userId: "42", user: "Ada", content: "from discord" })
   })
 
   test("durably fans inbound events to other eligible links but never echoes to the origin", async () => {
@@ -111,6 +113,25 @@ describe("TurnCoordinator", () => {
     expect(errors).toHaveLength(1)
     expect((await coordinator.acceptSurfaceEvent(event))?.inserted).toBe(false)
     expect(dispatched).toHaveLength(1)
+  })
+
+  test("dispatches the RAW Discord author id and name, so the speaker frame carries a real snowflake", async () => {
+    const f = fixture()
+    f.repo.createTransportLink({ id: "link", conversationId: f.conversation.id, adapter: "discord", externalLocationId: "room", label: null, syncMode: "two_way", enabled: true }, 1)
+    await f.coordinator.acceptSurfaceEvent({ adapter: "discord", eventId: "e1", externalLocationId: "room", externalMessageId: "m1", authorId: "425368343789305865", authorName: "Stephen", content: "hello", createdAt: 2 })
+    expect(f.dispatched).toHaveLength(1)
+    expect(f.dispatched[0]!.userId).toBe("425368343789305865")
+    expect(f.dispatched[0]!.user).toBe("Stephen")
+    // Not the namespaced form, which is what produced discord_user_id=discord:4253…
+    expect(f.dispatched[0]!.userId).not.toContain("discord:")
+  })
+
+  test("the STORED message keeps its adapter-namespaced author — transcript identity is a separate concern", async () => {
+    const f = fixture()
+    f.repo.createTransportLink({ id: "link", conversationId: f.conversation.id, adapter: "discord", externalLocationId: "room", label: null, syncMode: "two_way", enabled: true }, 1)
+    await f.coordinator.acceptSurfaceEvent({ adapter: "discord", eventId: "e2", externalLocationId: "room", externalMessageId: "m2", authorId: "425368343789305865", authorName: "Stephen", content: "hello", createdAt: 2 })
+    const stored = f.repo.listMessages(f.conversation.id).at(-1)!
+    expect(stored.author).toBe("discord:425368343789305865")
   })
 
   test("rejects malformed normalized events without persistence or dispatch", async () => {
