@@ -16,6 +16,14 @@ export interface NormalizedSurfaceEvent {
   locationName?: string      // the location's own name; for a thread, the THREAD's name
   threadParentName?: string  // set when the location is a thread: the parent's name
   isDM?: boolean             // direct message: there is no channel name to show
+  /** Set when the location is a thread: the PARENT channel's id.
+   *
+   *  Carried for access control, not for naming. The base gate opts channels in by
+   *  id, and a thread's own id is a fresh snowflake nobody ever configured — so
+   *  without the parent's id here, gating the canonical path would refuse every
+   *  thread under an opted-in channel. The name alone cannot stand in: two channels
+   *  may share a name, and an access decision must never be taken on one. */
+  threadParentId?: string
 }
 
 export interface SurfaceDelivery {
