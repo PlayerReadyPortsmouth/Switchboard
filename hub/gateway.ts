@@ -488,6 +488,16 @@ export class Gateway {
     if (ch && "send" in ch) await (ch as any).send({ content: text })
   }
 
+  /** Show Discord's own "typing…" line in a channel. Expires after ~10s, so a long
+   *  turn needs repeating; the caller owns that. Purely cosmetic, so it swallows its
+   *  own failures: a rate limit or a deleted channel must never surface as a turn error. */
+  async sendTyping(chatId: string): Promise<void> {
+    try {
+      const ch = await this.client.channels.fetch(chatId)
+      if (ch && "sendTyping" in ch) await (ch as any).sendTyping()
+    } catch {}
+  }
+
   /** Post a message carrying file attachments. Returns true if delivered, false
    *  on any failure so the caller can audit the real outcome. */
   async sendFiles(chatId: string, attachments: { data: Buffer; name: string }[], caption?: string): Promise<boolean> {

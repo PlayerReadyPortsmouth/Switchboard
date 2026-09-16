@@ -10,6 +10,12 @@ export interface TurnDispatcher {
 }
 
 export interface TurnEventPublisher { publish(event: ConversationEvent): void }
+
+/** Optional surface feedback while a turn is in flight. Absent ⇒ nothing changes. */
+export interface TurnTypingNotifier {
+  start(conversationId: string): void
+  stop(conversationId: string): void
+}
 export interface TurnSurfaceRouter { deliver(message: Message, links: TransportLink[], kind?: "transcript" | "notification", replyToExternalIds?: ReadonlyMap<string, string>): Promise<SurfaceDeliveryResult[]> }
 export type AgentTurnResult = { message: Message; deliveries: Delivery[]; inserted: boolean }
 export type AgentTurnAcceptance = AgentTurnResult | { closed: true; message?: never; deliveries?: never; inserted?: never }
@@ -41,6 +47,8 @@ export class TurnCoordinator {
     private readonly now: () => number,
     private readonly id: () => string,
     private readonly reportError: (error: unknown) => void = error => process.stderr.write(`turn coordinator delivery failed: ${error}\n`),
+    /** Optional, and last so every existing call site is unchanged. */
+    private readonly typing?: TurnTypingNotifier,
   ) {}
 
   async submitWebTurn(identity: string, conversationId: string, input: WebTurnInput): Promise<AppendMessageResult> {
@@ -191,5 +199,13 @@ export class TurnCoordinator {
 
   private turnState(message: Message, state: "queued" | "working" | "completed" | "failed"): void {
     this.events.publish({ kind: "turn_state", conversationId: message.conversationId, sequence: message.sequence, ts: this.now(), state, detail: { messageId: message.id } })
+    // Every terminal outcome funnels through here, so this is the one place that
+    // cannot leave a channel typing after a turn has settled. Guarded because the
+    // indicator is cosmetic and must never be able to fail a turn.
+    if (!this.typing) return
+    try {
+      if (state === "working") this.typing.start(message.conversationId)
+      else if (state === "completed" || state === "failed") this.typing.stop(message.conversationId)
+    } catch {}
   }
 }
