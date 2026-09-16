@@ -1,7 +1,7 @@
 import { test, expect } from "bun:test"
 import {
   parseStreamEvent, userMessageFrame, interactionFrame,
-  buildClaudeArgv, buildShimMcpConfig, INTERACTION_GUIDANCE,
+  buildClaudeArgv, buildShimMcpConfig, INTERACTION_GUIDANCE, SPEAKER_GUIDANCE,
 } from "../hub/transports/streamJsonFraming"
 
 test("parseStreamEvent extracts a result reply", () => {
@@ -53,11 +53,14 @@ test("buildClaudeArgv assembles the proven flags", () => {
   expect(argv.slice(-2)).toEqual(["--add-dir", "/x"])
 })
 
-test("buildClaudeArgv always appends the interaction guidance, even with no per-agent prompt", () => {
+test("buildClaudeArgv always appends the built-in guidance, even with no per-agent prompt", () => {
   const argv = buildClaudeArgv({ mcpConfigPath: "/tmp/m.json" })
   expect(argv).not.toContain("--model")
   expect(argv).toContain("--append-system-prompt")
-  expect(argv[argv.indexOf("--append-system-prompt") + 1]).toBe(INTERACTION_GUIDANCE)
+  // Both built-ins ship in code so they apply to every stream-json agent without
+  // per-agent config, and the interaction guidance still comes first.
+  const system = argv[argv.indexOf("--append-system-prompt") + 1]!
+  expect(system).toBe(`${INTERACTION_GUIDANCE}\n\n${SPEAKER_GUIDANCE}`)
 })
 
 test("INTERACTION_GUIDANCE tells agents to use modals and to split past 5 fields", () => {
