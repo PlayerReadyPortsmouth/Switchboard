@@ -6,7 +6,7 @@ import { contextTokens, fillPct, blendUsage } from "../usage"
 import { TurnGate } from "../turnGate"
 import type { AgentTransport } from "./index"
 import {
-  parseStreamEvent, userMessageFrame, interactionFrame,
+  parseStreamEvent, userMessageFrame, speakerFrame, interactionFrame,
   buildClaudeArgv, buildShimMcpConfig,
 } from "./streamJsonFraming"
 import type { ToolUseBlock } from "./streamJsonFraming"
@@ -116,7 +116,9 @@ export class StreamJsonTransport implements AgentTransport {
       send: (inbound) => {
         this.lastActivity = Date.now()
         this.lastChatId = inbound.chatId
-        this.proc?.writeStdin(userMessageFrame(inbound.content))
+        this.proc?.writeStdin(
+          speakerFrame({ userId: inbound.userId, username: inbound.user }, inbound.content),
+        )
       },
       maxQueueDepth: cfg.runtime.maxQueueDepth,
       coalesce: cfg.runtime.coalesceBurst,
