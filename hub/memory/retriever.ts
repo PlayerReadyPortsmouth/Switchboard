@@ -1,7 +1,8 @@
 import type { ClaudeRunner } from "../router"
 import type { Embedder } from "./embedder"
 import type { MemoryStore, Note, Scope } from "./store"
-import type { MemoryIndex } from "./memoryIndex"
+import type { IndexWrite, MemoryIndex } from "./memoryIndex"
+import { createHash } from "crypto"
 import type { AccessStore } from "./accessStore"
 import { selectNotes, type Candidate } from "./librarian"
 import { entityGate, dedupAction } from "./dedup"
@@ -19,6 +20,19 @@ export interface RetrieverOpts {
   access?: AccessStore       // usage stats: records hits, weights recall, drives the hot set
   importanceWeight?: number  // boost recall rank by usage importance (default 0 → pure cosine)
   hotSetSize?: number        // notes injected proactively by importance (default 0 → off)
+  reindexBatchSize?: number  // notes per embedder call during reindexAll (default 8)
+  reindexPersistEvery?: number // batches between index writes during reindexAll (default 8)
+  reindexYieldMs?: number    // pause between batches so the event loop breathes (default 25)
+}
+
+/** What one reindexAll pass did. */
+export interface ReindexStats {
+  total: number      // notes in the vault
+  embedded: number   // notes (re-)embedded
+  skipped: number    // notes whose stored vector already matched their content
+  batches: number    // embedder calls
+  writes: number     // bulk index writes (setMany calls, or per-entry sets when unsupported)
+  ms: number         // wall time
 }
 
 /** Outcome of a background dedup pass over one just-written note. */
@@ -32,6 +46,10 @@ function firstLines(body: string, max = 200): string {
 }
 function embedText(n: { title: string; tags: string[]; body: string }): string {
   return `${n.title}\n${n.tags.join(" ")}\n${n.body}`
+}
+/** Content hash of the exact text that gets embedded. */
+export function embedHash(text: string): string {
+  return createHash("sha256").update(text).digest("hex")
 }
 
 /** Render chosen notes into a prompt-injectable block; "" when none. Each note
@@ -61,21 +79,74 @@ export class MemoryRetriever {
   constructor(private o: RetrieverOpts) {}
 
   /** Embed a note and (re)place it in the recall index, stamped with the current
-   *  embedding version. */
+   *  embedding version and the content hash of what was embedded. */
   async indexNote(note: Note): Promise<void> {
-    const [vec] = await this.o.embedder.embed([embedText(note)])
-    if (vec) await this.o.index.set(note.path, note.scope, vec, this.o.embedder.version)
+    const text = embedText(note)
+    const [vec] = await this.o.embedder.embed([text])
+    if (vec) await this.o.index.set(note.path, note.scope, vec, this.o.embedder.version, embedHash(text))
   }
 
-  /** Embed every note currently in the vault (boot / rebuild). */
-  async reindexAll(): Promise<void> {
-    const notes = this.o.store.allNotes()
-    if (!notes.length) return
-    const vecs = await this.o.embedder.embed(notes.map(embedText))
+  /** Bring the index up to date with every note in the vault (boot / rebuild).
+   *  Notes whose stored vector already matches their content, embedding version and
+   *  scope are skipped. The rest are embedded in small batches — one batch of the
+   *  whole vault needs gigabytes of attention buffers — with a yield between
+   *  batches, and the index is written in bulk every few batches rather than once
+   *  per note. Search keeps using the existing index while this runs. */
+  async reindexAll(): Promise<ReindexStats> {
+    const started = Date.now()
+    const batchSize = Math.max(1, this.o.reindexBatchSize ?? 8)
+    const persistEvery = Math.max(1, this.o.reindexPersistEvery ?? 8)
+    const yieldMs = Math.max(0, this.o.reindexYieldMs ?? 25)
     const version = this.o.embedder.version
-    for (let i = 0; i < notes.length; i++) {
-      if (vecs[i]) await this.o.index.set(notes[i].path, notes[i].scope, vecs[i], version)
+    const index = this.o.index
+    const notes = this.o.store.allNotes()
+    const stats: ReindexStats = { total: notes.length, embedded: 0, skipped: 0, batches: 0, writes: 0, ms: 0 }
+
+    type Todo = { note: Note; text: string; hash: string; prevHash: string | undefined; had: boolean }
+    const todo: Todo[] = []
+    for (const note of notes) {
+      const text = embedText(note)
+      const hash = embedHash(text)
+      const m = index.meta?.(note.path)
+      if (m && m.hash === hash && m.version === version && m.scope === note.scope) { stats.skipped++; continue }
+      todo.push({ note, text, hash, prevHash: m?.hash, had: !!m })
     }
+
+    const byPath = new Map(todo.map((t) => [t.note.path, t]))
+    let pending: IndexWrite[] = []
+    const flush = async () => {
+      if (!pending.length) return
+      // A live indexNote/remove may have touched an entry while we were embedding;
+      // its write is newer than ours, so leave it alone.
+      const writes = index.meta
+        ? pending.filter((w) => {
+            const cur = index.meta!(w.path)
+            const t = byPath.get(w.path)!
+            return t.had ? (!!cur && cur.hash === t.prevHash) : !cur
+          })
+        : pending
+      pending = []
+      if (!writes.length) return
+      if (index.setMany) await index.setMany(writes)
+      else for (const w of writes) await index.set(w.path, w.scope, w.vector, w.version, w.hash)
+      stats.writes++
+    }
+    for (let i = 0; i < todo.length; i += batchSize) {
+      const batch = todo.slice(i, i + batchSize)
+      const vecs = await this.o.embedder.embed(batch.map((t) => t.text))
+      stats.batches++
+      batch.forEach((t, j) => {
+        const v = vecs[j]
+        if (!v) return
+        pending.push({ path: t.note.path, scope: t.note.scope, vector: v, version, hash: t.hash })
+        stats.embedded++
+      })
+      if (stats.batches % persistEvery === 0) await flush()
+      if (i + batchSize < todo.length) await new Promise((r) => setTimeout(r, yieldMs))
+    }
+    await flush()
+    stats.ms = Date.now() - started
+    return stats
   }
 
   /** Background dedup for a just-written note. Finds same-scope near-neighbours,

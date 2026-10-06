@@ -328,7 +328,13 @@ const memoryRetriever = new MemoryRetriever({
   importanceWeight: garden.importanceWeight ?? (garden.enabled ? 0.15 : 0),
   hotSetSize: garden.hotSetSize ?? (garden.enabled ? 3 : 0),
 })
-void memoryRetriever.reindexAll().catch((e) => process.stderr.write(`memory: reindex failed: ${e}\n`))
+// The boot reindex starts only once the Discord gateway is up (see below), so the
+// login never competes with the embedder. Recall uses the persisted index meanwhile.
+const startMemoryReindex = () => {
+  void memoryRetriever.reindexAll()
+    .then((s) => console.error(`memory: reindex done: ${s.total} notes, ${s.embedded} embedded, ${s.skipped} unchanged, ${s.batches} batches, ${s.writes} index writes, ${s.ms} ms`))
+    .catch((e) => process.stderr.write(`memory: reindex failed: ${e}\n`))
+}
 
 const memBrowseOn = hub.memoryBrowse?.enabled === true
 const memOperators = (hub.memoryBrowse?.operatorIds?.length ? hub.memoryBrowse.operatorIds
@@ -2763,6 +2769,7 @@ if (discordEnabled) {
   })
   console.error("switchboard hub: gateway connected")
 }
+setTimeout(startMemoryReindex, discordEnabled ? 5_000 : 0).unref()
 deliveryWorker.start()
 
 setInterval(() => {

@@ -1,8 +1,9 @@
 import { readFileSync, writeFileSync, mkdirSync, renameSync } from "fs"
 import { dirname } from "path"
-import type { MemoryIndex, SearchHit } from "./memoryIndex"
+import type { EntryMeta, IndexWrite, MemoryIndex, SearchHit } from "./memoryIndex"
 
-export interface IndexEntry { path: string; scope: string; vector: number[]; version?: string }
+export interface IndexEntry { path: string; scope: string; vector: number[]; version?: string; hash?: string }
+type StoredEntry = { scope: string; vector: number[]; version?: string; hash?: string }
 export type { SearchHit }
 
 /** Cosine similarity; tolerant of length mismatch / zero vectors. */
@@ -22,9 +23,22 @@ export class VectorIndex implements MemoryIndex {
   private entries = new Map<string, IndexEntry>()
   constructor(private file?: string) { this.load() }
 
-  async set(path: string, scope: string, vector: number[], version?: string): Promise<void> {
-    this.entries.set(path, { path, scope, vector, version })
+  /** Number of times the index file has been written (observability and tests). */
+  writes = 0
+
+  async set(path: string, scope: string, vector: number[], version?: string, hash?: string): Promise<void> {
+    this.entries.set(path, { path, scope, vector, version, hash })
     this.persist()
+  }
+  /** Bulk write: the whole file is rewritten once for the batch, not once per entry. */
+  async setMany(entries: IndexWrite[]): Promise<void> {
+    if (!entries.length) return
+    for (const e of entries) this.entries.set(e.path, { path: e.path, scope: e.scope, vector: e.vector, version: e.version, hash: e.hash })
+    this.persist()
+  }
+  meta(path: string): EntryMeta | undefined {
+    const e = this.entries.get(path)
+    return e ? { scope: e.scope, version: e.version, hash: e.hash } : undefined
   }
   async remove(path: string): Promise<void> {
     if (this.entries.delete(path)) this.persist()
@@ -47,17 +61,18 @@ export class VectorIndex implements MemoryIndex {
   private load(): void {
     if (!this.file) return
     try {
-      const obj = JSON.parse(readFileSync(this.file, "utf8")) as Record<string, { scope: string; vector: number[]; version?: string }>
+      const obj = JSON.parse(readFileSync(this.file, "utf8")) as Record<string, StoredEntry>
       for (const [path, v] of Object.entries(obj)) this.entries.set(path, { path, ...v })
     } catch {}
   }
   private persist(): void {
     if (!this.file) return
-    const obj: Record<string, { scope: string; vector: number[]; version?: string }> = {}
-    for (const e of this.entries.values()) obj[e.path] = { scope: e.scope, vector: e.vector, version: e.version }
+    const obj: Record<string, StoredEntry> = {}
+    for (const e of this.entries.values()) obj[e.path] = { scope: e.scope, vector: e.vector, version: e.version, hash: e.hash }
     mkdirSync(dirname(this.file), { recursive: true })
     const tmp = this.file + ".tmp"
     writeFileSync(tmp, JSON.stringify(obj))
     renameSync(tmp, this.file)
+    this.writes++
   }
 }
