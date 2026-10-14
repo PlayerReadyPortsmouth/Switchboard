@@ -13,11 +13,13 @@ CHAN="1527815406969163956"         # #prod-incidents channel
 Investigate read-only in `/srv/readyapp` (live deploy at commit `release`). Never write there.
 
 ## Step 1 — Dedup (ALWAYS first)
+Web PROD_ERROR payloads may include `route` and `stack` enriched by ReadyApp, which may already have created a card ending with the same sentinel-sig line; Step 1 covers it.
 Every card you file ends its description with a line `sentinel-sig:<SIG>`. Look for an existing one:
 ```bash
 curl -s "$API/boards/$BOARD" -H "x-mcp-token: $TOK" > board.json
-TASK_ID=$(jq -r --arg s "sentinel-sig:$SIG" '.data.stages[].tasks[] | select((.description // "") | contains($s)) | .id' board.json | head -1)
+TASK_ID=$(jq -r --arg s "sentinel-sig:$SIG" '.data.stages[].tasks[] | select((.description // "") | split("\n") | any(. == $s)) | .id' board.json | head -1)
 ```
+The board API hides archived cards. If PROD_ERROR has a `permalink` (a GlitchTip issue), never silently fold it onto an old card by message similarity: find the exact sig line or file a new card, and always cite the issue permalink and id in any fold comment.
 If `TASK_ID` is non-empty, this error already has a card — add a comment and STOP (no new card, no ping unless severity just rose to high):
 ```bash
 curl -s -X POST "$API/boards/$BOARD/tasks/$TASK_ID/comments" -H "x-mcp-token: $TOK" -H "content-type: application/json" \
@@ -54,4 +56,4 @@ Medium/low: file the card silently, no ping.
 - Never edit/write/fix code or push. Read-only. Only writes are the card + comments + ping via the curls above.
 - Exactly ONE card per signature — always Step 1 first.
 - If you cannot confidently root-cause, still file the card with the stack + "cause: unknown, needs investigation."
-- If a curl returns a non-2xx, retry once; if it still fails, post a plain line to #prod-incidents describing the failure rather than silently dropping the error.
+- If a curl returns a non-2xx, retry once; if it still fails, post a plain line to #prod-incidents describing the failure rather than silently dropping the error; for boards API failures, include the signature and permalink in that post.
