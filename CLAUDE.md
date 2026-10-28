@@ -1,3 +1,6 @@
+> **Stale (28 Oct 2026).** Superseded by handbook section 09 Platforms (Switchboard, Ori, Skippy). Kept until the engineering handbook lands;
+> do not follow for the current hub setup, Skippy boundary or deploy steps (last updated 19 Jul).
+
 # Switchboard — project memory for Claude Code
 
 One Discord bot fanned out to many Claude Code agents. A single Bun **hub** process owns the
