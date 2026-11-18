@@ -85,6 +85,7 @@ import type { WebDeps, ChannelInfo } from "./webServer"
 import { ConsultRegistry, TurnSpeakers, mayConsult, speakerBlocking, consultAnswerFromReply } from "./consult"
 import { TurnProgress, looksBig } from "./turnProgress"
 import { AccessGrantStore, AccessRequests, parseAccessCustomId } from "./accessRequests"
+import { runSpeakerData, toolsFor } from "./speakerData"
 import { formatOutbound } from "./format"
 import { resolveFederation, isRemoteTarget, consultRemote, startFederationListener } from "./federation"
 import { MissionRegistry, findWorkflow, renderStepPrompt, renderMissionCard, type MissionRun } from "./workflow"
@@ -533,7 +534,7 @@ function runLocalConsult(requester: string, targetName: string, message: string,
     // `getLastChatId()` is exact per process, so a pooled replica is checked against the
     // turn it is actually serving. A remote requester has no key: nobody to check here.
     const servingChat = requesterKey ? transports.get(requesterKey)?.getLastChatId() || undefined : undefined
-    const blocked = turnSpeakers && requesterKey
+    const blocked = turnSpeakers && hub.consult?.enforceCallerAccess && requesterKey
       ? speakerBlocking(turnSpeakers.behind(requester, servingChat), targetName)
       : null
     if (blocked) {
@@ -628,6 +629,25 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): ProcessAgen
       const path = memoryStore.write(s, { title, tags, body, source: `agent:${name}` })
       void memoryRetriever.indexNote(memoryStore.read(path)).then(() => runDedup(path)).catch(() => {})
     } catch (e) { process.stderr.write(`memory: remember failed: ${e}\n`) }
+  })
+  // Speaker-scoped data: fetched by the hub for whoever this process is answering right
+  // now. `getLastChatId()` is exact per process, so a pooled replica is matched to its own
+  // turn; if the hub still cannot name exactly one person, runSpeakerData refuses.
+  socket.onMyData(async ({ tool, query }) => {
+    if (!hub.speakerData?.enabled || !turnSpeakers) return "(unavailable: data tools are not switched on.)"
+    const chat = transports.get(key)?.getLastChatId() || undefined
+    return runSpeakerData(hub.speakerData, {
+      fetch: (url, init) => fetch(url, init),
+      secret: (env) => process.env[env],
+      audit: (e) => audit.record({
+        kind: "access", actor: `agent:${e.agent}`, action: "my_data", target: e.tool, outcome: e.outcome,
+        detail: { user: e.userId, ...(e.detail ?? {}) },
+      }),
+    }, {
+      agent: name, allowed: cfg.runtime.speakerData ?? [], tool, query,
+      // No chat known ⇒ nobody, never "everyone with a turn on this agent".
+      people: chat ? turnSpeakers.behind(name, chat) : [],
+    })
   })
   socket.onRecall(async ({ query, scopes }) => {
     const sc = (scopes?.length ? scopes : ["global", `agents/${name}`]) as Scope[]
@@ -817,6 +837,7 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): ProcessAgen
     resumable: cfg.runtime.resumable === true,
     sessionPath: sessionPathFor(hub.stateDir, key, provider),
     consultEnabled: !!hub.consult?.enabled,
+    speakerDataTools: toolsFor(hub.speakerData, cfg.runtime.speakerData),
     attachEnabled: !!hub.outboundAttachments?.enabled,
     publishEnabled: shareLinksOn,
     peeringEnabled: peeringOn,
@@ -1076,7 +1097,8 @@ const accessRequests = hub.accessRequests?.enabled && discordEnabled
 
 // Who each agent's current turn is for, so a consult can be checked against the person
 // and not only the agent. Off unless consult.enforceCallerAccess.
-const turnSpeakers = hub.consult?.enabled && hub.consult.enforceCallerAccess
+// Also needed by speaker-scoped data tools, which must know who a turn is for.
+const turnSpeakers = (hub.consult?.enabled && hub.consult.enforceCallerAccess) || hub.speakerData?.enabled
   ? new TurnSpeakers(() => Date.now())
   : undefined
 const turnProgress = hub.turnProgress?.enabled && discordEnabled

@@ -59,6 +59,8 @@ export interface StreamJsonOpts {
   mcpConfigPath: string
   /** Seam for tests; defaults to writing the file. */
   writeMcpConfig?: (path: string, contents: string) => void
+  /** Speaker-scoped data tools this agent may call through my_data (see hub/speakerData.ts). */
+  speakerDataTools?: { name: string; description: string }[]
   /** Expose the ask_agent inter-agent consult tool to this agent (CONSULT=1). */
   consultEnabled?: boolean
   /** Expose the attach_file outbound-attachment tool to this agent (ATTACH_FILES=1). */
@@ -162,7 +164,7 @@ export class StreamJsonTransport implements AgentTransport {
     await socket.listen()
 
     const write = this.opts.writeMcpConfig ?? ((p, c) => writeFileSync(p, c))
-    write(mcpConfigPath, JSON.stringify(buildShimMcpConfig(shimPath, socketPath, this.name, this.opts.consultEnabled, this.opts.attachEnabled, this.opts.publishEnabled, this.opts.peeringEnabled, this.opts.receiptsEnabled)))
+    write(mcpConfigPath, JSON.stringify(buildShimMcpConfig(shimPath, socketPath, this.name, this.opts.consultEnabled, this.opts.attachEnabled, this.opts.publishEnabled, this.opts.peeringEnabled, this.opts.receiptsEnabled, this.opts.speakerDataTools ?? [])))
 
     const initialSessionId = this.opts.resumable
       ? (this.opts.readSession?.() ?? (this.opts.sessionPath ? readSessionFile(this.opts.sessionPath) : undefined))
