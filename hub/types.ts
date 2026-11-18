@@ -114,6 +114,9 @@ export interface AgentAccess {
    *  by DM. Deliberate: the point of locking dev tools to a room is that they are not
    *  available outside it. */
   channels?: string[]
+  /** Discord user ids who may approve or deny a request for access to this agent.
+   *  Absent ⇒ the hub's `accessRequests.approvers`. */
+  owners?: string[]
   consultableBy?: string[]  // agent names allowed to consult this agent via ask_agent ("*" = any); absent ⇒ none
   peerableBy?: string[]   // remote peer names allowed to reach this agent via ask_peer ("*" = any); absent ⇒ none
 }
@@ -273,6 +276,33 @@ export interface ChannelAgent {
  *
  *  Off unless `enabled` is true, so an existing deployment behaves exactly as before.
  *  Only surfaces that can express it act on it; everywhere else it is ignored. */
+/** When a person is refused an agent, offer a card to ask for it; the agent's owners
+ *  approve (time-limited or permanent) or deny on a second card. Grants are kept in
+ *  `<stateDir>/access-grants.json`. Off unless `enabled`. */
+export interface AccessRequestsConfig {
+  enabled?: boolean
+  /** Where approval cards are posted. Absent ⇒ the chat the request was made in. */
+  approvalChannelId?: string
+  /** Who decides for an agent with no `access.owners` of its own. */
+  approvers?: string[]
+  /** Length of a time-limited grant in hours (default 24). */
+  grantHours?: number
+}
+
+/** Progress feedback on the ROUTED (legacy) Discord path, where `typingIndicator` alone
+ *  never reached: typing for every turn, and a hub-owned holding reply for a turn the
+ *  router judges big, kept up to date as colleagues are consulted and removed when the
+ *  real answer is posted. Off unless `enabled`. */
+export interface TurnProgressConfig {
+  enabled?: boolean
+  /** Post the holding reply for big turns (default true). false ⇒ typing only. */
+  holdingReply?: boolean
+  /** With no router decision, treat a message at least this long as big (default 700). */
+  bigChars?: number
+  /** Stop waiting on an unfinished turn after this long (default 900000 = 15 min). */
+  maxMs?: number
+}
+
 export interface TypingIndicatorConfig {
   enabled: boolean;
   refreshMs?: number;  // re-ping interval (default 8000 — Discord expires at ~10s)
@@ -353,6 +383,11 @@ export interface HubConfig {
   gatedActions?: GatedAction[]   // hub-side button handlers that run shell commands
   channelAgents?: ChannelAgent[]  // channels pinned to a specific agent
   typingIndicator?: TypingIndicatorConfig;  // show "typing…" while an agent works (default OFF)
+  /** In a guild channel, stay silent when a message quote-replies to another person and
+   *  does not open with an agent's name (default off: agents answer everything). */
+  quietOnHumanReply?: boolean
+  turnProgress?: TurnProgressConfig;  // routed-path typing + holding reply for big turns (default OFF)
+  accessRequests?: AccessRequestsConfig;  // "Request access" cards when a person is refused an agent (default OFF)
   threadAgents?: ThreadAgentsConfig; // per-thread dedicated agent instances (default off)
   // Memory & context (all optional; sensible defaults applied in index.ts).
   memoryDir?: string             // Obsidian-style note vault root (default <stateDir>/memory)
@@ -600,6 +635,11 @@ export interface PeeringConfig {
 export interface ConsultConfig {
   enabled?: boolean              // expose ask_agent + honor consults (default off)
   timeoutMs?: number             // hub-side wait for the target's reply (default 90000)
+  /** Also require the PERSON whose message started the requester's turn to be allowed
+   *  the target (default off). Without it, someone with no access to an agent can reach
+   *  it by asking an agent they do have to consult it. Turns with no person behind them
+   *  (schedules, workflows) keep the agent-level check only. */
+  enforceCallerAccess?: boolean
 }
 
 /** One configured remote peer hub: where to dial it and which env var holds the

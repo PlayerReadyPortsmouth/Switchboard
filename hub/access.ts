@@ -21,6 +21,9 @@ export function permittedAgents(
   callerRoles: string[],
   callerUserId: string,
   where?: CallerContext,
+  /** Agents this caller holds a live access GRANT for (see accessRequests.ts). A grant
+   *  counts exactly like being listed in `access.users`: `access.channels` still narrows. */
+  granted: string[] = [],
 ): string[] {
   const roleSet = new Set(callerRoles)
   const out: string[] = []
@@ -30,7 +33,8 @@ export function permittedAgents(
     const ok =
       roles.includes("*") ||
       roles.some(r => roleSet.has(r)) ||
-      users.includes(callerUserId)
+      users.includes(callerUserId) ||
+      granted.includes(name)
     if (!ok) continue
     const channels = cfg.access.channels
     if (channels && channels.length > 0) {

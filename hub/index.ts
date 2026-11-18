@@ -82,7 +82,10 @@ import { ChannelStream, type ChannelEvent } from "./channelStream"
 import { pendingApprovalsToJson, buildWebInboundMessage, formatMirrorLine } from "./webActions"
 import { buildAuditText, buildToolsText } from "./commandActions"
 import type { WebDeps, ChannelInfo } from "./webServer"
-import { ConsultRegistry, mayConsult, consultAnswerFromReply } from "./consult"
+import { ConsultRegistry, TurnSpeakers, mayConsult, speakerBlocking, consultAnswerFromReply } from "./consult"
+import { TurnProgress, looksBig } from "./turnProgress"
+import { AccessGrantStore, AccessRequests, parseAccessCustomId } from "./accessRequests"
+import { formatOutbound } from "./format"
 import { resolveFederation, isRemoteTarget, consultRemote, startFederationListener } from "./federation"
 import { MissionRegistry, findWorkflow, renderStepPrompt, renderMissionCard, type MissionRun } from "./workflow"
 import type { AgentConfig, AgentReply, InboundMessage, SpawnTrigger, SpawnCardUpdate, CardSpec, DirectCommand, OutboundRoute, HubConfig, AgentRegistry, SendOutcome } from "./types"
@@ -525,6 +528,24 @@ function runLocalConsult(requester: string, targetName: string, message: string,
       resolveAnswer(`(not permitted to consult "${targetName}")`)
       return
     }
+    // The agent may consult the target. May the PERSON it is working for use it? Without
+    // this an agent's permission is borrowed for a caller who was never granted it.
+    // `getLastChatId()` is exact per process, so a pooled replica is checked against the
+    // turn it is actually serving. A remote requester has no key: nobody to check here.
+    const servingChat = requesterKey ? transports.get(requesterKey)?.getLastChatId() || undefined : undefined
+    const blocked = turnSpeakers && requesterKey
+      ? speakerBlocking(turnSpeakers.behind(requester, servingChat), targetName)
+      : null
+    if (blocked) {
+      audit.record({
+        kind: "consult", actor: `agent:${requester}`, action: "ask", target: targetName, outcome: "deny",
+        detail: { reason: "caller_not_permitted", user: blocked.userId, chat: blocked.chatId },
+      })
+      turnProgress?.note(requester, `Could not ask **${targetName}**: the person asking has no access to them`)
+      void accessRequests?.offer(blocked.chatId, blocked.userId, targetName)
+      resolveAnswer(`(refused: the person you are helping does not have access to "${targetName}", so you may not consult ${targetName} on their behalf. Tell them plainly that this part needs someone with access to ${targetName}; do not answer it yourself.)`)
+      return
+    }
     // Wrap resolveAnswer so the retry loop can tell when the consult has been settled
     // by external means (e.g. the target finished its current turn and answered).
     let consultSettled = false
@@ -534,6 +555,7 @@ function runLocalConsult(requester: string, targetName: string, message: string,
       resolveAnswer(answer)
     }
     const e = consultRegistry.open(requester, targetName, settle)
+    turnProgress?.note(requester, `Asking ${agents[targetName]?.emoji ?? ""} **${targetName}**`)
     audit.record({ kind: "consult", actor: `agent:${requester}`, action: "ask", target: targetName, chat: e.channel, outcome: "ok", corr: e.id })
     const inbound: InboundMessage = { chatId: e.channel, messageId: `consult:${requester}`, userId: "system", user: "hub",
       content: message, ts: new Date().toISOString(), isDM: false }
@@ -1021,6 +1043,54 @@ const hubConfigPreviews = new HubConfigPreviewRegistry(
 const approvalCards = new Map<string, { chatId: string; messageId: string }>()
 const channelActivity = new Map<string, { agent: string; lastActive: number }>()
 const channelStream = new ChannelStream()
+// Turn progress on the routed (legacy) Discord path: typing for every turn, plus a
+// hub-owned holding reply for a turn the router judges big. Off unless configured, so
+// an existing deployment is byte-identical. See hub/turnProgress.ts.
+const routedTyping = hub.turnProgress?.enabled && discordEnabled
+  ? createTypingNotifier({
+      refreshMs: hub.typingIndicator?.refreshMs,
+      maxMs: hub.turnProgress.maxMs ?? 15 * 60_000,
+      send: (chatId) => { void gateway.sendTyping(chatId) },
+    })
+  : undefined
+// Access requests: a person refused an agent gets a card to ask for it; that agent's
+// owners decide on a second card. Hub-side throughout, so no agent can grant anything.
+// The grant store is always read (a grant made while the feature was on keeps working
+// until it expires); the cards are only offered when accessRequests.enabled.
+const accessGrants = new AccessGrantStore(join(hub.stateDir, "access-grants.json"))
+const accessRequests = hub.accessRequests?.enabled && discordEnabled
+  ? new AccessRequests({
+      sendCard: (chatId, card) => gateway.sendCard(chatId, card),
+      editCard: (chatId, id, card) => gateway.editCard(chatId, id, card),
+      sendPlain: (chatId, text) => gateway.sendPlain(chatId, text),
+      ownersOf: (agent) => agents[agent]?.access.owners ?? hub.accessRequests?.approvers ?? [],
+      agentExists: (agent) => !!agents[agent],
+      agentEmoji: (agent) => agents[agent]?.emoji ?? "",
+      grants: accessGrants,
+      audit: (e) => audit.record({
+        kind: "access", actor: e.actor, action: e.action, target: e.agent, outcome: e.outcome,
+        detail: { user: e.userId, ...(e.detail ?? {}) },
+      }),
+    }, { approvalChannelId: hub.accessRequests.approvalChannelId, grantHours: hub.accessRequests.grantHours })
+  : undefined
+
+// Who each agent's current turn is for, so a consult can be checked against the person
+// and not only the agent. Off unless consult.enforceCallerAccess.
+const turnSpeakers = hub.consult?.enabled && hub.consult.enforceCallerAccess
+  ? new TurnSpeakers(() => Date.now())
+  : undefined
+const turnProgress = hub.turnProgress?.enabled && discordEnabled
+  ? new TurnProgress({
+      post: (chatId, text) => gateway.sendPlainId(chatId, text),
+      edit: (chatId, id, text) => gateway.editPlain(chatId, id, text),
+      remove: (chatId, id) => gateway.deletePlain(chatId, id),
+      typing: routedTyping,
+      // The same tag a real reply carries, so the holding reply reads as that agent's.
+      tag: (agent) => agents[agent] ? formatOutbound("", agents[agent], hub.tagStyle, 2000, "newline", agent)[0] ?? "" : "",
+    }, { holdingReply: hub.turnProgress.holdingReply, maxMs: hub.turnProgress.maxMs })
+  : undefined
+if (turnProgress) setInterval(() => { turnProgress.sweep() }, 30_000).unref()
+
 // Inter-agent consult: ask_agent dispatches the question to the target on a
 // virtual "consult:<id>" channel; the target's reply is intercepted in
 // onAgentReply and returned to the caller. Off unless consult.enabled.
@@ -1311,6 +1381,7 @@ async function onAgentReply(reply: AgentReply, key: string): Promise<void | Send
     const answer = consultAnswerFromReply(reply)
     if (answer !== undefined) {
       const settled = consultRegistry.settle(reply.chatId, answer)
+      if (settled) turnProgress?.note(settled.requester, `${agents[settled.target]?.emoji ?? ""} **${settled.target}** has answered`)
       if (settled) audit.record({
         kind: "consult", actor: `agent:${settled.target}`, action: "answer",
         target: settled.requester, chat: reply.chatId, outcome: "ok", corr: settled.id,
@@ -1427,6 +1498,11 @@ async function onAgentReply(reply: AgentReply, key: string): Promise<void | Send
     channelActivity.set(reply.chatId, { agent: reply.agent, lastActive: Date.now() })
     channelStream.publish(reply.chatId, { kind: "chat", ts: Date.now(), author: reply.agent, content: reply.text, origin: "agent" })
   }
+  // The real answer is about to land: stop typing and clear the holding reply first, so
+  // the channel never shows both. Only a text reply ends the turn; a card or an update
+  // mid-turn must not.
+  if (reply.kind === "reply") turnSpeakers?.end(reply.agent, reply.chatId)
+  if (reply.kind === "reply") await turnProgress?.finish(reply.chatId, reply.agent)
   await gateway.sendReply(reply, agents[reply.agent])
   // F3 auto-escalation: if this real persistent-agent turn logged tool errors, re-run
   // it once at higher effort (rate-capped). `key === reply.agent` only for a live
@@ -1988,7 +2064,7 @@ async function canonicalAgentAllowed(agent: string, event: NormalizedSurfaceEven
     channelId: event.externalLocationId,
     threadParentId: event.threadParentId,
     isDM: event.isDM,
-  })
+  }, accessGrants.agentsFor(event.authorId))
   if (permitted.includes(agent)) return true
   audit.record({
     kind: "access", actor: `user:${event.authorId}`, action: "deny",
@@ -2000,6 +2076,15 @@ async function canonicalAgentAllowed(agent: string, event: NormalizedSurfaceEven
 
 // Only allowlisted users may press card buttons.
 if (discordGateway) gateway.setPermissionAuthorizer((uid) => baseGate.listAllowed().includes(uid))
+// Access-request buttons are for whoever may speak in that channel: the person asking is, by
+// definition, someone without wider access, and an agent's owners need not be on the DM
+// allowlist. Who may press WHICH of those buttons is decided in AccessRequests.click. In a
+// DM there is no channel opt-in to lean on, so the allowlist still applies.
+if (discordGateway) gateway.setButtonAuthorizer((customId, uid, channelId, isDM) => {
+  if (!parseAccessCustomId(customId)) return undefined
+  if (isDM) return undefined
+  return baseGate.gate(uid, channelId, false, Date.now()).action === "deliver"
+})
 
 async function handleMemButton(action: string, arg: { corrId: string; idx?: number }, userId: string): Promise<void> {
   const s = memSessions.get(arg.corrId)
@@ -2076,6 +2161,12 @@ const abandonDiscordClick = (customId: string): void => cardSync.release(correla
 
 // A card button was clicked → gated actions run hub-side; others relay to the agent.
 if (discordGateway) gateway.onNotifyButton((customId, userId) => {
+  // The hub's own access-request cards. Handled before the card-sync claim below: these
+  // cards belong to no agent, and the verdict (who may press what) is decided right here
+  // against the Discord id of whoever clicked. A returned reason restores the buttons.
+  if (parseAccessCustomId(customId)) {
+    return accessRequests ? accessRequests.click(customId, userId) : "Access requests are switched off."
+  }
   const busy = beginDiscordClick(customId)
   if (busy) return busy
   const ap = parseApprovalCustomId(customId)
@@ -2303,6 +2394,8 @@ const orchestrator = new Orchestrator(hub, agents, {
   },
   isAvailable: (agent) => dispatcher.isAvailable(agent),
   sendPlain: (chatId, text) => gateway.sendPlain(chatId, text),
+  grantedAgents: (userId) => accessGrants.agentsFor(userId),
+  ...(accessRequests ? { offerAccess: (chatId: string, userId: string, agent: string) => { void accessRequests.offer(chatId, userId, agent) } } : {}),
   // Control commands take the LEGACY path even in a canonical channel (they start with
   // "!"), so this is how they learn that the channel they are answering about is served
   // canonically and has no binding to talk about.
@@ -2322,8 +2415,23 @@ const orchestrator = new Orchestrator(hub, agents, {
     try { conversationRepo.updateConversation(link!.conversationId, { primaryAgent: agent }, Date.now()); return true }
     catch { return false }
   },
-  prepareDispatch: async ({ agent, inbound, isSwitch }) => {
+  prepareDispatch: async ({ agent, inbound, isSwitch, big }) => {
     const rt = agents[agent]?.runtime
+    // Routed-path progress: typing now, and a holding reply if this looks like a long job.
+    // `big` is the router's call; with no router decision fall back to message length.
+    if (turnSpeakers && inbound.userId && inbound.userId !== "system") {
+      let roles: string[] = []
+      try { roles = discordEnabled ? await gateway.resolveRoles(inbound.userId) : [] } catch {}
+      turnSpeakers.begin(agent, {
+        userId: inbound.userId, chatId: inbound.chatId,
+        permitted: permittedAgents(agents, roles, inbound.userId, {
+          channelId: inbound.chatId, threadParentId: inbound.threadParentId, isDM: inbound.isDM,
+        }, accessGrants.agentsFor(inbound.userId)),
+      })
+    }
+    turnProgress?.begin(inbound.chatId, agent, {
+      big: big ?? looksBig(inbound.content, hub.turnProgress?.bigChars),
+    })
     // Record inbound in the trace. Attribution of this agent's tool_use/
     // tool_result records (which carry no chat id) is handled by the transport's
     // own `lastChatId`, stamped when the turn gate delivers the message.
@@ -3024,7 +3132,7 @@ if (webServer) console.error(`switchboard hub: web dashboard on ${hub.webHost ??
 const cleanupConversations = createAsyncShutdown({
   stopAcceptingWeb: () => { webServer?.stopAccepting(); conversationIngress.close(); turnCoordinator!.beginShutdown() },
   stopRetryWorker: async () => { await deliveryWorker.stop(); await turnCoordinator!.drainDeliveries() },
-  stopAdapters: () => { typingNotifier?.stopAll(); return surfaceRouter.stopAll() },
+  stopAdapters: () => { typingNotifier?.stopAll(); routedTyping?.stopAll(); return surfaceRouter.stopAll() },
   stopWeb: async () => { await webServer?.stop() },
   closeDatabase: () => conversationDb.close(),
 })
@@ -3075,6 +3183,7 @@ if (hub.consult?.enabled) {
   setInterval(() => {
     for (const e of consultRegistry.sweepExpired()) {
       e.resolve(`(agent "${e.target}" did not respond in time)`)
+      turnProgress?.note(e.requester, `**${e.target}** did not answer in time`)
       audit.record({ kind: "consult", actor: "hub", action: "timeout", target: e.requester, outcome: "error", corr: e.id })
     }
   }, 10_000).unref()

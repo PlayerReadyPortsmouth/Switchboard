@@ -1,5 +1,5 @@
 import type { AgentRegistry, HubConfig, InboundMessage } from "./types"
-import type { RouteDecision } from "./router"
+import { addressedAgent, type RouteDecision } from "./router"
 import { permittedAgents } from "./access"
 import { chatKey, decideAgent, BindingStore } from "./bindings"
 import { parseControlCommand, renderAgentList } from "./gateway"
@@ -24,6 +24,11 @@ export interface OrchestratorDeps {
     Promise<{ ok: true } | { ok: false; reason: "cap" } | { ok: false; reason: "worktree_error"; error: string }>
   isAvailable: (agent: string) => boolean
   sendPlain: (chatId: string, text: string) => Promise<void>
+  /** Agents this person holds a live access grant for. Absent ⇒ none. */
+  grantedAgents?: (userId: string) => string[]
+  /** The person opened a message with the name of an agent they may not use, and a
+   *  grant would let them use it here. Absent ⇒ the message is routed as before. */
+  offerAccess?: (chatId: string, userId: string, agent: string) => void
   /** What serves this channel on the CANONICAL path, if anything.
    *
    *  `null` ⇒ an ordinary legacy channel, where per-user bindings work exactly as they
@@ -39,6 +44,8 @@ export interface OrchestratorDeps {
    *  dispatch. Returns the message to actually deliver. Absent ⇒ deliver as-is. */
   prepareDispatch?: (ctx: {
     agent: string; key: string; inbound: InboundMessage; isSwitch: boolean
+    /** The router judged this a long job. Absent when no router ran (pinned channel). */
+    big?: boolean
   }) => Promise<InboundMessage>
 }
 
@@ -69,12 +76,34 @@ export class Orchestrator {
       channelId: inbound.chatId,
       threadParentId: inbound.threadParentId,
       isDM: inbound.isDM,
-    })
+    }, this.deps.grantedAgents?.(inbound.userId))
     const key = chatKey(this.hub.chatKeyScope, inbound.isDM, inbound.chatId, inbound.userId)
     const bound = this.bindings.get(key)?.agent ?? null
 
     const control = parseControlCommand(inbound.content)
     if (control) { await this.handleControl(control, inbound, key, permitted, bound); return }
+
+    // People talking to each other: a guild message that quote-replies to another PERSON
+    // is not for an agent, unless it opens with an agent's name. (`quote` is only set for a
+    // reply to a non-bot author, so replying to an agent's own message still reaches it.)
+    // Silent by design, like a base-gate drop: answering "not for me" in a busy channel is
+    // the very noise this exists to remove. Off unless hub.quietOnHumanReply.
+    if (this.hub.quietOnHumanReply && !inbound.isDM && inbound.quote
+      && !addressedAgent(inbound.content, permitted)) return
+
+    // "Susie, …" from someone who may not use Susie. Sending it to whichever agent the
+    // router fancies instead would answer a question they did not ask of that agent, so
+    // stop here and offer the access request. Only when a grant would actually work in
+    // this place: an agent scoped to other channels is not on offer here.
+    if (this.deps.offerAccess && !addressedAgent(inbound.content, permitted)) {
+      const wanted = addressedAgent(inbound.content, Object.keys(this.reg))
+      if (wanted && permittedAgents(this.reg, roles, inbound.userId, {
+        channelId: inbound.chatId, threadParentId: inbound.threadParentId, isDM: inbound.isDM,
+      }, [wanted]).includes(wanted)) {
+        this.deps.offerAccess(inbound.chatId, inbound.userId, wanted)
+        return
+      }
+    }
 
     // Per-thread instance: a message inside a Discord thread whose parent is
     // pinned with `threaded: true` gets its own dedicated agent instance,
@@ -116,7 +145,9 @@ export class Orchestrator {
     )
     // Guard: never honour a router pick outside the caller's permitted set.
     const decision = routed && permitted.includes(routed.agent) ? routed : null
-    const agent = decideAgent({
+    // A message that opens with a permitted agent's name goes to that agent, whatever the
+    // router or the sticky binding would have done. The router still ran, for its `big` call.
+    const agent = addressedAgent(inbound.content, permitted) ?? decideAgent({
       current, permitted, decision,
       threshold: this.hub.switchThreshold, defaultAgent: this.hub.defaultAgent,
     })
@@ -127,17 +158,17 @@ export class Orchestrator {
       return
     }
     this.bindings.set(key, { agent, sessionId: this.bindings.get(key)?.sessionId, lastActive: Date.parse(inbound.ts) })
-    await this.dispatchEnriched(agent, key, inbound, bound !== agent)
+    await this.dispatchEnriched(agent, key, inbound, bound !== agent, decision?.big)
   }
 
   /** Dispatch after an optional context/memory enrichment pass. `isSwitch` is
    *  true when this turn changed (or freshly bound) the agent — the signal the
    *  `onSwitch` injection policy keys off, so a newly-bound agent gets caught up. */
   private async dispatchEnriched(
-    agent: string, key: string, inbound: InboundMessage, isSwitch: boolean,
+    agent: string, key: string, inbound: InboundMessage, isSwitch: boolean, big?: boolean,
   ): Promise<void> {
     const toSend = this.deps.prepareDispatch
-      ? await this.deps.prepareDispatch({ agent, key, inbound, isSwitch })
+      ? await this.deps.prepareDispatch({ agent, key, inbound, isSwitch, big })
       : inbound
     this.deps.dispatch(agent, key, toSend)
   }

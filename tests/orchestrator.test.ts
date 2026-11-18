@@ -339,3 +339,78 @@ test("dispatchThread reporting a worktree_error sends the specific git error, no
   expect(f.plain[0].text).toContain("fatal: disk full")
   expect(f.plain[0].text).not.toContain("Too many active")
 })
+
+// ---- quietOnHumanReply + name addressing (18 Nov 2026) ----
+
+const guildMsg = (content: string, extra: Partial<InboundMessage> = {}): InboundMessage =>
+  ({ chatId: "100000", messageId: "m", userId: "u1", user: "bob", content, ts: "t", isDM: false, ...extra })
+
+test("quietOnHumanReply: a reply to another person is not dispatched", async () => {
+  const f = fakes()
+  const o = new Orchestrator({ ...hub, quietOnHumanReply: true }, reg, f.deps as any)
+  await o.handleMessage(guildMsg("Worth trying for sure", { quote: { user: "aurora", content: "what do you think?" } }))
+  expect(f.dispatched).toEqual([])
+  expect(f.plain).toEqual([])
+})
+
+test("quietOnHumanReply: a reply to a person that opens with an agent's name still goes to it", async () => {
+  const f = fakes()
+  const o = new Orchestrator({ ...hub, quietOnHumanReply: true }, reg, f.deps as any)
+  await o.handleMessage(guildMsg("research, can you check that?", { quote: { user: "aurora", content: "is it true?" } }))
+  expect(f.dispatched.map(d => d.agent)).toEqual(["research"])
+})
+
+test("quietOnHumanReply: ordinary messages and DMs are unaffected", async () => {
+  const f = fakes()
+  const o = new Orchestrator({ ...hub, quietOnHumanReply: true }, reg, f.deps as any)
+  await o.handleMessage(guildMsg("what is the plan?"))
+  await o.handleMessage({ ...dm("thanks"), quote: { user: "aurora", content: "x" } })
+  expect(f.dispatched.length).toBe(2)
+})
+
+test("quietOnHumanReply off (default): a reply to a person is dispatched as before", async () => {
+  const f = fakes()
+  const o = new Orchestrator(hub, reg, f.deps as any)
+  await o.handleMessage(guildMsg("Worth trying for sure", { quote: { user: "aurora", content: "what do you think?" } }))
+  expect(f.dispatched.length).toBe(1)
+})
+
+test("a message that opens with a permitted agent's name overrides the router's pick", async () => {
+  const f = fakes()   // the fake router always answers "research"
+  const o = new Orchestrator(hub, reg, f.deps as any)
+  await o.handleMessage(guildMsg("Hey qa, quick one"))
+  expect(f.dispatched.map(d => d.agent)).toEqual(["qa"])
+})
+
+// ---- addressing an agent you may not use → access offer (18 Nov 2026) ----
+
+test("opening with the name of an agent you may not use offers access and routes nowhere", async () => {
+  const f = fakes()
+  const offers: string[] = []
+  const deps = { ...f.deps, resolveRoles: async () => [] as string[], offerAccess: (_c: string, _u: string, a: string) => { offers.push(a) } }
+  const o = new Orchestrator(hub, reg, deps as any)
+  await o.handleMessage(guildMsg("research, dig into this for me"))   // no "dev" role ⇒ not permitted research
+  expect(offers).toEqual(["research"])
+  expect(f.dispatched).toEqual([])
+})
+
+test("no offer when the agent is scoped to other channels, so a grant would not help here", async () => {
+  const f = fakes()
+  const offers: string[] = []
+  const scoped: AgentRegistry = { ...reg, research: { ...reg.research, access: { roles: ["dev"], channels: ["999999"] } } }
+  const deps = { ...f.deps, resolveRoles: async () => [] as string[], route: async () => ({ agent: "qa", confidence: 0.9, switch: true }),
+    offerAccess: (_c: string, _u: string, a: string) => { offers.push(a) } }
+  const o = new Orchestrator(hub, scoped, deps as any)
+  await o.handleMessage(guildMsg("research, dig into this for me"))
+  expect(offers).toEqual([])
+  expect(f.dispatched.map(d => d.agent)).toEqual(["qa"])
+})
+
+test("no offer when the person may already use the agent they named", async () => {
+  const f = fakes()
+  const offers: string[] = []
+  const o = new Orchestrator(hub, reg, { ...f.deps, offerAccess: (_c: string, _u: string, a: string) => { offers.push(a) } } as any)
+  await o.handleMessage(guildMsg("research, dig into this for me"))
+  expect(offers).toEqual([])
+  expect(f.dispatched.map(d => d.agent)).toEqual(["research"])
+})
