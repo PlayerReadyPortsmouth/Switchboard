@@ -30,6 +30,11 @@ export interface SpeakerDataConfig {
   timeoutMs?: number
   /** Response bodies longer than this are cut, with a note. Default 20000 chars. */
   maxChars?: number
+  /** Changes the speaker may make to their own records, each proposed by the agent and
+   *  confirmed by that person on a card before the hub performs it. See speakerActions.ts. */
+  actions?: Record<string, import("./speakerActions").SpeakerAction>
+  /** How long a proposed action waits for Confirm (default 15 minutes). */
+  confirmTtlMs?: number
   /** In a shared channel, send an answer that used these tools to the person by DM and
    *  leave only a one-line pointer in the channel. Default TRUE: a person's own records
    *  should not be posted to a room because of where they happened to ask. */

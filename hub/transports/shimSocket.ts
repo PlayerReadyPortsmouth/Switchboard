@@ -29,6 +29,7 @@ export class ShimSocketServer {
   private postWebhookCb: (w: { target: string; body?: string }) => void = () => {}
   private askAgentCb: (q: { agent: string; message: string }) => Promise<string> = async () => ""
   private myDataCb: (q: { tool: string; query?: string }) => Promise<string> = async () => "(unavailable: data tools are not switched on.)"
+  private myActionCb: (q: { action: string; params: unknown }) => Promise<string> = async () => "(unavailable: actions are not switched on. Nothing was proposed or changed.)"
   private notifyPeerCb: (n: { target: string; text: string }) => void = () => {}
   private askPeerCb: (q: { target: string; message: string }) => Promise<string> = async () => ""
   private attachCb: (a: { chatId: string; path: string; caption?: string; filename?: string }) => OutcomeReturn = () => {}
@@ -47,6 +48,7 @@ export class ShimSocketServer {
   onPostWebhook(cb: typeof this.postWebhookCb) { this.postWebhookCb = cb }
   onAskAgent(cb: typeof this.askAgentCb) { this.askAgentCb = cb }
   onMyData(cb: typeof this.myDataCb) { this.myDataCb = cb }
+  onMyAction(cb: typeof this.myActionCb) { this.myActionCb = cb }
   onNotifyPeer(cb: typeof this.notifyPeerCb) { this.notifyPeerCb = cb }
   onAskPeer(cb: typeof this.askPeerCb) { this.askPeerCb = cb }
   onAttach(cb: typeof this.attachCb) { this.attachCb = cb }
@@ -108,6 +110,12 @@ export class ShimSocketServer {
         // Request/response: run retrieval, then write the result back keyed by id.
         void this.recallCb({ query: m.query, scopes: m.scopes }).then((notes) => {
           try { socket.write(encode({ t: "recall_result", id: m.id, notes })) } catch {}
+        })
+        break
+      case "my_action":
+        // Request/response: the hub posts a confirmation card for the SPEAKER and reports back.
+        void this.myActionCb({ action: String(m.action ?? ""), params: m.params }).then((answer) => {
+          try { socket.write(encode({ t: "my_action_result", id: m.id, answer })) } catch {}
         })
         break
       case "my_data":

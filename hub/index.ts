@@ -88,6 +88,7 @@ import { AccessGrantStore, AccessRequests, parseAccessCustomId } from "./accessR
 import { PendingShares, PrivateReplies, SHARE_PREFIX, runSpeakerData, toolsFor } from "./speakerData"
 import { AssistantNames, displayName } from "./assistantNames"
 import { TurnLedger, parseUsageCommand, renderUsage } from "./turnLedger"
+import { ACTION_PREFIX, SpeakerActions, actionsFor } from "./speakerActions"
 import { formatOutbound } from "./format"
 import { resolveFederation, isRemoteTarget, consultRemote, startFederationListener } from "./federation"
 import { MissionRegistry, findWorkflow, renderStepPrompt, renderMissionCard, type MissionRun } from "./workflow"
@@ -635,6 +636,17 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): ProcessAgen
   // Speaker-scoped data: fetched by the hub for whoever this process is answering right
   // now. `getLastChatId()` is exact per process, so a pooled replica is matched to its own
   // turn; if the hub still cannot name exactly one person, runSpeakerData refuses.
+  socket.onMyAction(async ({ action, params }) => {
+    if (!speakerActions || !turnSpeakers) return "(unavailable: actions are not switched on. Nothing was proposed or changed.)"
+    const chat = transports.get(key)?.getLastChatId() || undefined
+    turnLedger.data(key, `propose:${action}`)
+    return speakerActions.propose({
+      agent: name, allowed: cfg.runtime.speakerActions ?? [], action, params,
+      // A consult or other virtual channel is not somewhere a person can confirm.
+      chatId: chat && /^\d{5,}$/.test(chat) ? chat : undefined,
+      people: chat ? turnSpeakers.behind(name, chat) : [],
+    })
+  })
   socket.onMyData(async ({ tool, query }) => {
     if (!hub.speakerData?.enabled || !turnSpeakers) return "(unavailable: data tools are not switched on.)"
     const chat = transports.get(key)?.getLastChatId() || undefined
@@ -842,6 +854,7 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): ProcessAgen
     sessionPath: sessionPathFor(hub.stateDir, key, provider),
     consultEnabled: !!hub.consult?.enabled,
     speakerDataTools: toolsFor(hub.speakerData, cfg.runtime.speakerData),
+    speakerActions: hub.speakerData?.enabled ? actionsFor(hub.speakerData.actions, cfg.runtime.speakerActions) : [],
     attachEnabled: !!hub.outboundAttachments?.enabled,
     publishEnabled: shareLinksOn,
     peeringEnabled: peeringOn,
@@ -1105,6 +1118,24 @@ const accessRequests = hub.accessRequests?.enabled && discordEnabled
 // Answers built from a person's own records go to them by DM, not into a shared channel.
 const privateReplies = hub.speakerData?.enabled && hub.speakerData.privateReplies !== false && discordEnabled
   ? new PrivateReplies()
+  : undefined
+// Speaker-scoped actions: an agent proposes a change to the speaker's own records, the
+// speaker confirms it on a card, and only then does the hub perform it, as them.
+const speakerActions = hub.speakerData?.enabled && hub.speakerData.actions && Object.keys(hub.speakerData.actions).length && discordEnabled
+  ? new SpeakerActions({
+      baseUrl: hub.speakerData.baseUrl, secretEnv: hub.speakerData.secretEnv, actions: hub.speakerData.actions,
+      timeoutMs: hub.speakerData.timeoutMs, confirmTtlMs: hub.speakerData.confirmTtlMs,
+    }, {
+      sendCard: (chatId, card) => gateway.sendCard(chatId, card),
+      editCard: (chatId, id, card) => gateway.editCard(chatId, id, card),
+      post: (url, init) => fetch(url, { method: "POST", ...init }),
+      secret: (env) => process.env[env],
+      agentEmoji: (agent) => agents[agent]?.emoji ?? "",
+      audit: (e) => audit.record({
+        kind: "exec", actor: e.userId ? `user:${e.userId}` : `agent:${e.agent}`, action: "my_action", target: e.action, outcome: e.outcome,
+        detail: { agent: e.agent, ...(e.detail ?? {}) },
+      }),
+    })
   : undefined
 /** One `turn` ledger record per agent turn: who asked, which agent, tools, tokens, cost. */
 const turnLedger = new TurnLedger()
@@ -2164,6 +2195,8 @@ if (discordGateway) gateway.setPermissionAuthorizer((uid) => baseGate.listAllowe
 if (discordGateway) gateway.setButtonAuthorizer((customId, uid, channelId, isDM) => {
   // A share button lives in a DM and belongs to exactly one person: its owner may press it.
   if (customId.startsWith(SHARE_PREFIX)) return pendingShares.ownedBy(customId, uid)
+  // A proposed change belongs to the person it is for, wherever the card was shown.
+  if (customId.startsWith(ACTION_PREFIX)) return speakerActions?.ownedBy(customId, uid) ?? false
   if (!parseAccessCustomId(customId)) return undefined
   if (isDM) return undefined
   return baseGate.gate(uid, channelId, false, Date.now()).action === "deliver"
@@ -2249,6 +2282,10 @@ if (discordGateway) gateway.onNotifyButton((customId, userId) => {
   // against the Discord id of whoever clicked. A returned reason restores the buttons.
   if (parseAccessCustomId(customId)) {
     return accessRequests ? accessRequests.click(customId, userId) : "Access requests are switched off."
+  }
+  // Confirm / Cancel on a proposed change to someone's own records: theirs alone to press.
+  if (customId.startsWith(ACTION_PREFIX)) {
+    return speakerActions ? speakerActions.click(customId, userId) : "Actions are switched off."
   }
   // "Share to the channel" under a private answer: only its owner, only once. The answer
   // is posted where they originally asked, attributed to them as the one who shared it.

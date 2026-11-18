@@ -113,6 +113,14 @@ async function main() {
   let reqCounter = 0
   const pending = new Map<string, (notes: { title: string; body: string }[]) => void>()
   const pendingData = new Map<string, (answer: string) => void>()
+/** This agent's speaker-scoped actions (proposals the speaker must confirm). */
+const SPEAKER_ACTIONS: { name: string; description: string; params: Record<string, string>; required: string[] }[] = (() => {
+  try {
+    const v = JSON.parse(process.env.SPEAKER_ACTIONS ?? "[]")
+    return Array.isArray(v) ? v.filter(a => a && typeof a.name === "string" && typeof a.description === "string")
+      .map(a => ({ name: a.name, description: a.description, params: a.params && typeof a.params === "object" ? a.params : {}, required: Array.isArray(a.required) ? a.required : [] })) : []
+  } catch { return [] }
+})()
 /** This agent's speaker-scoped data tools, as the hub configured them. */
 const SPEAKER_DATA: { name: string; description: string }[] = (() => {
   try {
@@ -137,6 +145,9 @@ const pendingAsk = new Map<string, (answer: string) => void>()
           } else if (m.t === "ask_agent_result" && m.id && pendingAsk.has(m.id)) {
             pendingAsk.get(m.id)!(m.answer ?? "")
             pendingAsk.delete(m.id)
+          } else if (m.t === "my_action_result" && m.id && pendingData.has(m.id)) {
+            pendingData.get(m.id)!(m.answer ?? "")
+            pendingData.delete(m.id)
           } else if (m.t === "my_data_result" && m.id && pendingData.has(m.id)) {
             pendingData.get(m.id)!(m.answer ?? "")
             pendingData.delete(m.id)
@@ -234,6 +245,18 @@ const pendingAsk = new Map<string, (answer: string) => void>()
           target: { type: "string", description: "The configured outbound route id to fire." },
           body: { type: "string", description: "Optional request body (used when the route has no template)." } },
           required: ["target"] } },
+      // my_action is exposed only when the hub gives this agent speaker-scoped actions. It
+      // PROPOSES a change to the speaker's own records; the hub shows them a Confirm card
+      // and only they can press it. There is no argument for whose records.
+      ...(SPEAKER_ACTIONS.length ? [{
+        name: "my_action",
+        description: "Propose a change to the records of the person you are talking to. This does NOT make the change: the hub shows that person a confirmation card with exactly what will happen, and only they can confirm it. After calling it, tell them to check the card and press Confirm; never say the change has been made. Actions: " +
+          SPEAKER_ACTIONS.map(a => `${a.name} (${a.description}; params: ${Object.entries(a.params).map(([k, d]) => `${k}=${d}${a.required.includes(k) ? " [required]" : ""}`).join(", ")})`).join("; ") + ".",
+        inputSchema: { type: "object", properties: {
+          action: { type: "string", enum: SPEAKER_ACTIONS.map(a => a.name), description: "Which action to propose." },
+          params: { type: "object", description: "The action's parameters, by the names listed for it.", additionalProperties: true } },
+          required: ["action", "params"] },
+      }] : []),
       // my_data is exposed only when the hub gives this agent speaker-scoped data tools.
       // The hub decides WHO the records are for (the person who sent the message); there
       // is deliberately no argument for it here.
@@ -317,6 +340,17 @@ const pendingAsk = new Map<string, (answer: string) => void>()
         pendingPeerAsk.set(id, resolve)
         sock.write(encode({ t: "ask_peer", id, target: args.target, message: args.message }))
         const timer = setTimeout(() => { if (pendingPeerAsk.delete(id)) resolve("(the peer agent did not respond in time)") }, 310000)
+        ;(timer as { unref?: () => void }).unref?.()
+      })
+      return { content: [{ type: "text", text: answer }] }
+    }
+    // my_action is request/response: the hub posts the confirmation card and says so.
+    if (req.params.name === "my_action") {
+      const id = `x${++reqCounter}`
+      const answer = await new Promise<string>((resolve) => {
+        pendingData.set(id, resolve)
+        sock.write(encode({ t: "my_action", id, action: args.action, params: args.params }))
+        const timer = setTimeout(() => { if (pendingData.delete(id)) resolve("(unavailable: the hub did not answer in time. Nothing was proposed or changed. Say so.)") }, 30000)
         ;(timer as { unref?: () => void }).unref?.()
       })
       return { content: [{ type: "text", text: answer }] }
