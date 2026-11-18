@@ -684,7 +684,7 @@ export interface FederationConfig {
 export type AuditKind =
   | "route" | "spawn" | "exec" | "outbound"
   | "session" | "access" | "approval" | "event" | "card" | "consult" | "mission"
-  | "liaison"
+  | "liaison" | "turn"
 
 /** One ledger record: who (`actor`) did what (`kind`/`action`) to what (`target`)
  *  in which conversation (`chat`), and how it resolved (`outcome`). Metadata only
@@ -727,6 +727,10 @@ export interface AuditFilter {
   since?: number
   limit?: number
 }
+
+/** hub.audit additions. `viewers` may run `!audit` / `!usage` without being on the DM
+ *  allowlist (which otherwise gates every operator command). */
+export interface AuditViewers { viewers?: string[] }
 
 export interface AuditSummary {
   total: number

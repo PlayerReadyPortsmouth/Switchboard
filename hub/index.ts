@@ -87,6 +87,7 @@ import { TurnProgress, looksBig } from "./turnProgress"
 import { AccessGrantStore, AccessRequests, parseAccessCustomId } from "./accessRequests"
 import { PendingShares, PrivateReplies, SHARE_PREFIX, runSpeakerData, toolsFor } from "./speakerData"
 import { AssistantNames, displayName } from "./assistantNames"
+import { TurnLedger, parseUsageCommand, renderUsage } from "./turnLedger"
 import { formatOutbound } from "./format"
 import { resolveFederation, isRemoteTarget, consultRemote, startFederationListener } from "./federation"
 import { MissionRegistry, findWorkflow, renderStepPrompt, renderMissionCard, type MissionRun } from "./workflow"
@@ -644,7 +645,7 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): ProcessAgen
         kind: "access", actor: `agent:${e.agent}`, action: "my_data", target: e.tool, outcome: e.outcome,
         detail: { user: e.userId, ...(e.detail ?? {}) },
       }),
-      onFetched: (userId) => { if (chat && !dmChats.has(chat)) privateReplies?.mark(name, chat, userId) },
+      onFetched: (userId) => { turnLedger.data(key, tool); if (chat && !dmChats.has(chat)) privateReplies?.mark(name, chat, userId) },
     }, {
       agent: name, allowed: cfg.runtime.speakerData ?? [], tool, query,
       // No chat known ⇒ nobody, never "everyone with a turn on this agent".
@@ -695,6 +696,7 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): ProcessAgen
       audit.record({ kind: "consult", actor: `agent:${requester}`, action: "ask", target: targetName, outcome: "ok", detail: { remote: true } })
       return consultRemote(fedRuntime, targetName, message, requester, hub.consult.timeoutMs ?? 90_000)
     }
+    turnLedger.consulted(key, targetName)
     return runLocalConsult(requester, targetName, message, key)
   })
   // Outbound peer notify: queue + spool. Fire-and-forget from the agent's view.
@@ -875,6 +877,7 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): ProcessAgen
     // orchestrator's.
     const chat = t.getLastChatId()
     trace.record({ agent: name, chat, kind: "tool_use", tools })
+    turnLedger.tools(key, tools.map(t => t.name))
     if (chat) channelStream.publish(chat, { kind: "tool_use", ts: Date.now(), agent: name, tools })
     if (toolObs) toolUsage.recordToolUse(name, tools)
     // Web execution spine: only for chats that resolve to a canonical conversation.
@@ -1103,6 +1106,8 @@ const accessRequests = hub.accessRequests?.enabled && discordEnabled
 const privateReplies = hub.speakerData?.enabled && hub.speakerData.privateReplies !== false && discordEnabled
   ? new PrivateReplies()
   : undefined
+/** One `turn` ledger record per agent turn: who asked, which agent, tools, tokens, cost. */
+const turnLedger = new TurnLedger()
 /** People's own names for agents marked `access.nameable` (`!name Jeeves`). */
 const assistantNames = new AssistantNames(join(hub.stateDir, "assistant-names.json"))
 const namingOn = Object.values(agents).some(a => a.access.nameable)
@@ -1408,6 +1413,19 @@ function cardTraceText(card: CardSpec): string {
 async function onAgentReply(reply: AgentReply, key: string): Promise<void | SendOutcome> {
   if (!conversationIngress.tryRun(() => true).accepted) return { ok: false, error: "Hub is shutting down" }
   if (toolObs) toolUsage.endTurn(reply.agent)
+  // The turn ledger: written here, before any branch below consumes the reply, so a
+  // consult answer, a mission step and an ordinary reply are all counted the same way.
+  if (reply.kind === "reply" && !auditOptedOut(reply.agent)) {
+    try {
+      const consult = consultRegistry.peek(reply.chatId)
+      const asker = consult ? [...new Set((turnSpeakers?.behind(consult.requester) ?? []).map(s => s.userId))] : []
+      audit.record(turnLedger.close({
+        key, agent: reply.agent, chat: reply.chatId, usage: reply.usage,
+        speakers: consult ? [] : (turnSpeakers?.behind(reply.agent, reply.chatId) ?? []),
+        ...(consult ? { consultedBy: consult.requester, ...(asker.length === 1 ? { forUser: asker[0] } : {}) } : {}),
+      }))
+    } catch (e) { process.stderr.write(`turn ledger: ${e}\n`) }
+  }
   // A tool whose result never arrived (agent restarted, transport died) would pin its
   // entry forever — the turn ending is the honest end of the wait, so drop this
   // agent's stragglers. Their spine rows stay on `running`; we can't measure what
@@ -2700,8 +2718,18 @@ if (discordGateway) gateway.handleInbound((m) => {
     void escalateTurn(m.chatId, "manual")
     return
   }
+  const mayViewAudit = baseGate.listAllowed().includes(m.userId) || (hub.audit as { viewers?: string[] } | undefined)?.viewers?.includes(m.userId) === true
+  const usageCmd = parseUsageCommand(trimmed)
+  if (usageCmd) {
+    if (!mayViewAudit) return
+    if (!hub.audit?.enabled) { void gateway.sendPlain(m.chatId, "📜 audit logging is off (set `hub.audit.enabled`)."); return }
+    const rows = audit.recent({ kind: "turn", since: Date.now() - usageCmd.days * 86_400_000, limit: 20_000 })
+    // sendPlainId suppresses mentions, so a usage report names people without pinging them.
+    void gateway.sendPlainId(m.chatId, renderUsage(rows, usageCmd.days === 1 ? "last 24 hours" : `last ${usageCmd.days} days`))
+    return
+  }
   if (/^!audit\b/i.test(trimmed)) {
-    if (!baseGate.listAllowed().includes(m.userId)) return
+    if (!mayViewAudit) return
     if (!hub.audit?.enabled) { void gateway.sendPlain(m.chatId, "📜 audit logging is off (set `hub.audit.enabled`)."); return }
     void gateway.sendPlain(m.chatId, buildAuditText(trimmed.replace(/^!audit\b/i, ""), audit, (ts) => new Date(ts).toISOString().slice(11, 19)))
     return

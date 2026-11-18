@@ -136,6 +136,11 @@ export class ConsultRegistry {
     return e
   }
 
+  /** The pending consult on this channel, without settling it. */
+  peek(channel: string): PendingConsult | undefined {
+    return this.byChannel.get(channel)
+  }
+
   isConsultChannel(channel: string): boolean {
     return this.byChannel.has(channel)
   }
