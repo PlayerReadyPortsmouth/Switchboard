@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test"
-import { mayConsult, ConsultRegistry, consultAnswerFromReply } from "../hub/consult"
+import { mayConsult, ConsultRegistry, consultAnswerFromReply, TurnSpeakers, speakerBlocking } from "../hub/consult"
 import type { AgentConfig, AgentReply } from "../hub/types"
 
 const target = (consultableBy?: string[]): AgentConfig => ({
@@ -123,4 +123,62 @@ test("sweepExpired returns only past-deadline consults", () => {
   expect(expired.map((e) => e.id)).toEqual([a.id])
   expect(h.r.pendingCount()).toBe(1)
   expect(h.r.isConsultChannel(b.channel)).toBe(true)
+})
+
+// ---- caller access: the person behind the turn, not only the agent ----
+
+const who = (userId: string, chatId: string, permitted: string[]) => ({ userId, chatId, permitted, at: 0 })
+
+test("speakerBlocking: a person may only be served by agents they are permitted", () => {
+  const aurora = who("aurora", "100000", ["Bill", "Ted"])
+  expect(speakerBlocking([aurora], "Bill")).toBeNull()
+  expect(speakerBlocking([aurora], "Susie")?.userId).toBe("aurora")
+})
+
+test("speakerBlocking: nobody behind the turn leaves the agent-level check to decide", () => {
+  expect(speakerBlocking([], "Susie")).toBeNull()
+})
+
+test("speakerBlocking: when two people could be behind a consult, both must be allowed", () => {
+  const stephen = who("stephen", "100000", ["Bill", "Susie"])
+  const aurora = who("aurora", "100000", ["Bill"])
+  expect(speakerBlocking([stephen], "Susie")).toBeNull()
+  expect(speakerBlocking([stephen, aurora], "Susie")?.userId).toBe("aurora")
+})
+
+test("TurnSpeakers narrows to the chat the consulting process is serving", () => {
+  const s = new TurnSpeakers(() => 1000)
+  s.begin("Bill", { userId: "aurora", chatId: "100000", permitted: ["Bill"] })
+  s.begin("Bill", { userId: "stephen", chatId: "200000", permitted: ["Bill", "Susie"] })
+  expect(s.behind("Bill", "100000").map(x => x.userId)).toEqual(["aurora"])
+  expect(s.behind("Bill", "200000").map(x => x.userId)).toEqual(["stephen"])
+  expect(s.behind("Bill").map(x => x.userId)).toEqual(["aurora", "stephen"])
+  expect(s.behind("Bill", "300000")).toEqual([])
+})
+
+test("TurnSpeakers: end removes that chat's turn only", () => {
+  const s = new TurnSpeakers(() => 1000)
+  s.begin("Bill", { userId: "aurora", chatId: "100000", permitted: [] })
+  s.begin("Bill", { userId: "stephen", chatId: "200000", permitted: [] })
+  s.end("Bill", "100000")
+  expect(s.behind("Bill").map(x => x.userId)).toEqual(["stephen"])
+  s.end("Bill", "200000")
+  expect(s.behind("Bill")).toEqual([])
+})
+
+test("TurnSpeakers: a turn that never replied ages out instead of pinning a stale speaker", () => {
+  let now = 1000
+  const s = new TurnSpeakers(() => now, 60_000)
+  s.begin("Bill", { userId: "aurora", chatId: "100000", permitted: [] })
+  now += 61_000
+  expect(s.behind("Bill")).toEqual([])
+})
+
+test("TurnSpeakers keeps agents separate and ignores an end for an unknown turn", () => {
+  const s = new TurnSpeakers(() => 1000)
+  s.begin("Bill", { userId: "aurora", chatId: "100000", permitted: [] })
+  s.end("Susie", "100000")
+  s.end("Bill", "999999")
+  expect(s.behind("Bill").map(x => x.userId)).toEqual(["aurora"])
+  expect(s.behind("Susie")).toEqual([])
 })

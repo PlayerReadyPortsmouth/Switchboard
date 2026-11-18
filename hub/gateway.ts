@@ -207,6 +207,9 @@ export class Gateway {
   private permButtonCb: (requestId: string, behavior: "allow" | "deny") => void = () => {}
   private notifyButtonCb: (customId: string, userId: string) => NotifyRouteFailure = () => {}
   private isAuthorized: (userId: string) => boolean = () => false
+  /** Per-button override of `isAuthorized`, for buttons whose audience is wider than the
+   *  DM allowlist. `undefined` ⇒ no opinion, fall back to `isAuthorized`. */
+  private buttonAuthorizer: (customId: string, userId: string, channelId: string, isDM: boolean) => boolean | undefined = () => undefined
   private modalByCustomId = new Map<string, CardModal>()
   private cardStore: CardStore | null = null
   private notifyGate: (customId: string, userId: string) => boolean = () => true
@@ -258,6 +261,7 @@ export class Gateway {
 
   /** Called by the hub: which users may answer permission prompts (base-gate allowlist). */
   setPermissionAuthorizer(fn: (userId: string) => boolean): void { this.isAuthorized = fn }
+  setButtonAuthorizer(fn: (customId: string, userId: string, channelId: string, isDM: boolean) => boolean | undefined): void { this.buttonAuthorizer = fn }
   onPermissionButton(cb: (requestId: string, behavior: "allow" | "deny") => void): void {
     this.permButtonCb = cb
   }
@@ -345,7 +349,11 @@ export class Gateway {
         return
       }
       if (!interaction.isButton()) return
-      if (!this.isAuthorized(interaction.user.id)) {
+      // `isAuthorized` is the DM allowlist. Someone who may talk to the bot in an opted-in
+      // channel is not necessarily on it, so a button meant for exactly those people (the
+      // access-request card) gets its own answer first.
+      const special = this.buttonAuthorizer(interaction.customId, interaction.user.id, interaction.channelId, !interaction.inGuild())
+      if (!(special ?? this.isAuthorized(interaction.user.id))) {
         await interaction.reply({ content: "Not authorized.", ephemeral: true }).catch(() => {})
         return
       }
@@ -486,6 +494,37 @@ export class Gateway {
   async sendPlain(chatId: string, text: string): Promise<void> {
     const ch = await this.client.channels.fetch(chatId)
     if (ch && "send" in ch) await (ch as any).send({ content: text })
+  }
+
+  /** Post a plain message and return its id, for a message the hub will edit later
+   *  (the turn-progress holding reply). Mentions are never parsed. */
+  async sendPlainId(chatId: string, text: string): Promise<string | undefined> {
+    const ch = await this.client.channels.fetch(chatId)
+    if (!ch || !("send" in ch)) return undefined
+    const msg = await (ch as any).send({ content: text.slice(0, 2000), allowedMentions: { parse: [] } })
+    return msg?.id as string | undefined
+  }
+
+  /** Replace the text of a message the bot posted. Cosmetic: swallows its own failures. */
+  async editPlain(chatId: string, messageId: string, text: string): Promise<void> {
+    try {
+      const ch = await this.client.channels.fetch(chatId)
+      if (!ch || !("messages" in ch)) return
+      await (ch as any).messages.edit(messageId, { content: text.slice(0, 2000), allowedMentions: { parse: [] } })
+    } catch (e) {
+      process.stderr.write(`gateway: editPlain ${messageId} failed: ${e}\n`)
+    }
+  }
+
+  /** Delete a message the bot posted. Cosmetic: swallows its own failures. */
+  async deletePlain(chatId: string, messageId: string): Promise<void> {
+    try {
+      const ch = await this.client.channels.fetch(chatId)
+      if (!ch || !("messages" in ch)) return
+      await (ch as any).messages.delete(messageId)
+    } catch (e) {
+      process.stderr.write(`gateway: deletePlain ${messageId} failed: ${e}\n`)
+    }
   }
 
   /** Show Discord's own "typing…" line in a channel. Expires after ~10s, so a long
