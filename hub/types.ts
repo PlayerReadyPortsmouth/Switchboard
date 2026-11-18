@@ -114,6 +114,12 @@ export interface AgentAccess {
    *  by DM. Deliberate: the point of locking dev tools to a room is that they are not
    *  available outside it. */
   channels?: string[]
+  /** People may give this agent their own name (`!name Jeeves`). See assistantNames.ts. */
+  nameable?: boolean
+  /** This agent may be used in a DM by the people who already have access to it, even if
+   *  it is otherwise limited to `channels`. Needs hub.dmViaAgentAccess for people who are
+   *  not on the DM allowlist. */
+  dm?: boolean
   /** Discord user ids who may approve or deny a request for access to this agent.
    *  Absent ⇒ the hub's `accessRequests.approvers`. */
   owners?: string[]
@@ -173,6 +179,7 @@ export interface AgentRuntime {
   maxQueueDepth?: number     // turn-gate inbound queue cap (default 8); past it, submissions overflow
   coalesceBurst?: boolean    // fold consecutive same-conversation queued messages into one turn
   pool?: PoolPolicy          // opt-in replica auto-scaling for a hot persistent agent
+  speakerData?: string[]     // names from hub.speakerData.tools this agent may call via my_data
   audit?: boolean            // per-agent audit opt-out: false ⇒ skip this agent's events even when hub audit is on
   envPassthrough?: string[]  // hub env vars this agent inherits; ["*"] / absent = all (previous behaviour)
   envFile?: string           // KEY=value file read for this agent alone (~ expanded)
@@ -383,11 +390,18 @@ export interface HubConfig {
   gatedActions?: GatedAction[]   // hub-side button handlers that run shell commands
   channelAgents?: ChannelAgent[]  // channels pinned to a specific agent
   typingIndicator?: TypingIndicatorConfig;  // show "typing…" while an agent works (default OFF)
+  /** Let a person DM the bot without being on the DM allowlist, provided an agent marked
+   *  `access.dm` is one they are already allowed to use (default off). The DM allowlist
+   *  and pairing still apply to everyone else. */
+  dmViaAgentAccess?: boolean
   /** In a guild channel, stay silent when a message quote-replies to another person and
    *  does not open with an agent's name (default off: agents answer everything). */
   quietOnHumanReply?: boolean
   turnProgress?: TurnProgressConfig;  // routed-path typing + holding reply for big turns (default OFF)
   accessRequests?: AccessRequestsConfig;  // "Request access" cards when a person is refused an agent (default OFF)
+  /** Speaker-scoped data tools: the hub fetches "my tickets" etc. for whoever is speaking,
+   *  with its own key; the agent holds none (default OFF). See hub/speakerData.ts. */
+  speakerData?: import("./speakerData").SpeakerDataConfig
   threadAgents?: ThreadAgentsConfig; // per-thread dedicated agent instances (default off)
   // Memory & context (all optional; sensible defaults applied in index.ts).
   memoryDir?: string             // Obsidian-style note vault root (default <stateDir>/memory)
@@ -670,7 +684,7 @@ export interface FederationConfig {
 export type AuditKind =
   | "route" | "spawn" | "exec" | "outbound"
   | "session" | "access" | "approval" | "event" | "card" | "consult" | "mission"
-  | "liaison"
+  | "liaison" | "turn"
 
 /** One ledger record: who (`actor`) did what (`kind`/`action`) to what (`target`)
  *  in which conversation (`chat`), and how it resolved (`outcome`). Metadata only
@@ -713,6 +727,10 @@ export interface AuditFilter {
   since?: number
   limit?: number
 }
+
+/** hub.audit additions. `viewers` may run `!audit` / `!usage` without being on the DM
+ *  allowlist (which otherwise gates every operator command). */
+export interface AuditViewers { viewers?: string[] }
 
 export interface AuditSummary {
   total: number

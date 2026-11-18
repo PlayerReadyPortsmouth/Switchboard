@@ -82,9 +82,12 @@ import { ChannelStream, type ChannelEvent } from "./channelStream"
 import { pendingApprovalsToJson, buildWebInboundMessage, formatMirrorLine } from "./webActions"
 import { buildAuditText, buildToolsText } from "./commandActions"
 import type { WebDeps, ChannelInfo } from "./webServer"
-import { ConsultRegistry, TurnSpeakers, mayConsult, speakerBlocking, consultAnswerFromReply } from "./consult"
+import { ConsultRegistry, TurnSpeakers, mayConsult, speakerBlocking, consultAnswerFromReply, reachNote } from "./consult"
 import { TurnProgress, looksBig } from "./turnProgress"
 import { AccessGrantStore, AccessRequests, parseAccessCustomId } from "./accessRequests"
+import { PendingShares, PrivateReplies, SHARE_PREFIX, runSpeakerData, toolsFor } from "./speakerData"
+import { AssistantNames, displayName } from "./assistantNames"
+import { TurnLedger, parseUsageCommand, renderUsage } from "./turnLedger"
 import { formatOutbound } from "./format"
 import { resolveFederation, isRemoteTarget, consultRemote, startFederationListener } from "./federation"
 import { MissionRegistry, findWorkflow, renderStepPrompt, renderMissionCard, type MissionRun } from "./workflow"
@@ -533,7 +536,7 @@ function runLocalConsult(requester: string, targetName: string, message: string,
     // `getLastChatId()` is exact per process, so a pooled replica is checked against the
     // turn it is actually serving. A remote requester has no key: nobody to check here.
     const servingChat = requesterKey ? transports.get(requesterKey)?.getLastChatId() || undefined : undefined
-    const blocked = turnSpeakers && requesterKey
+    const blocked = turnSpeakers && hub.consult?.enforceCallerAccess && requesterKey
       ? speakerBlocking(turnSpeakers.behind(requester, servingChat), targetName)
       : null
     if (blocked) {
@@ -629,6 +632,26 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): ProcessAgen
       void memoryRetriever.indexNote(memoryStore.read(path)).then(() => runDedup(path)).catch(() => {})
     } catch (e) { process.stderr.write(`memory: remember failed: ${e}\n`) }
   })
+  // Speaker-scoped data: fetched by the hub for whoever this process is answering right
+  // now. `getLastChatId()` is exact per process, so a pooled replica is matched to its own
+  // turn; if the hub still cannot name exactly one person, runSpeakerData refuses.
+  socket.onMyData(async ({ tool, query }) => {
+    if (!hub.speakerData?.enabled || !turnSpeakers) return "(unavailable: data tools are not switched on.)"
+    const chat = transports.get(key)?.getLastChatId() || undefined
+    return runSpeakerData(hub.speakerData, {
+      fetch: (url, init) => fetch(url, init),
+      secret: (env) => process.env[env],
+      audit: (e) => audit.record({
+        kind: "access", actor: `agent:${e.agent}`, action: "my_data", target: e.tool, outcome: e.outcome,
+        detail: { user: e.userId, ...(e.detail ?? {}) },
+      }),
+      onFetched: (userId) => { turnLedger.data(key, tool); if (chat && !dmChats.has(chat)) privateReplies?.mark(name, chat, userId) },
+    }, {
+      agent: name, allowed: cfg.runtime.speakerData ?? [], tool, query,
+      // No chat known ⇒ nobody, never "everyone with a turn on this agent".
+      people: chat ? turnSpeakers.behind(name, chat) : [],
+    })
+  })
   socket.onRecall(async ({ query, scopes }) => {
     const sc = (scopes?.length ? scopes : ["global", `agents/${name}`]) as Scope[]
     // Exact-title fallback: find notes whose title matches the query string directly,
@@ -673,6 +696,7 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): ProcessAgen
       audit.record({ kind: "consult", actor: `agent:${requester}`, action: "ask", target: targetName, outcome: "ok", detail: { remote: true } })
       return consultRemote(fedRuntime, targetName, message, requester, hub.consult.timeoutMs ?? 90_000)
     }
+    turnLedger.consulted(key, targetName)
     return runLocalConsult(requester, targetName, message, key)
   })
   // Outbound peer notify: queue + spool. Fire-and-forget from the agent's view.
@@ -817,6 +841,7 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): ProcessAgen
     resumable: cfg.runtime.resumable === true,
     sessionPath: sessionPathFor(hub.stateDir, key, provider),
     consultEnabled: !!hub.consult?.enabled,
+    speakerDataTools: toolsFor(hub.speakerData, cfg.runtime.speakerData),
     attachEnabled: !!hub.outboundAttachments?.enabled,
     publishEnabled: shareLinksOn,
     peeringEnabled: peeringOn,
@@ -852,6 +877,7 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): ProcessAgen
     // orchestrator's.
     const chat = t.getLastChatId()
     trace.record({ agent: name, chat, kind: "tool_use", tools })
+    turnLedger.tools(key, tools.map(t => t.name))
     if (chat) channelStream.publish(chat, { kind: "tool_use", ts: Date.now(), agent: name, tools })
     if (toolObs) toolUsage.recordToolUse(name, tools)
     // Web execution spine: only for chats that resolve to a canonical conversation.
@@ -1076,7 +1102,29 @@ const accessRequests = hub.accessRequests?.enabled && discordEnabled
 
 // Who each agent's current turn is for, so a consult can be checked against the person
 // and not only the agent. Off unless consult.enforceCallerAccess.
-const turnSpeakers = hub.consult?.enabled && hub.consult.enforceCallerAccess
+// Answers built from a person's own records go to them by DM, not into a shared channel.
+const privateReplies = hub.speakerData?.enabled && hub.speakerData.privateReplies !== false && discordEnabled
+  ? new PrivateReplies()
+  : undefined
+/** One `turn` ledger record per agent turn: who asked, which agent, tools, tokens, cost. */
+const turnLedger = new TurnLedger()
+/** People's own names for agents marked `access.nameable` (`!name Jeeves`). */
+const assistantNames = new AssistantNames(join(hub.stateDir, "assistant-names.json"))
+const namingOn = Object.values(agents).some(a => a.access.nameable)
+/** The name a reply in this chat should carry: the asker's own name for the agent, when
+ *  exactly one person is behind the turn and has named it. */
+const replyDisplayName = (agent: string, chatId: string): string | undefined => {
+  if (!namingOn || !agents[agent]?.access.nameable || !turnSpeakers) return undefined
+  const ids = [...new Set(turnSpeakers.behind(agent, chatId).map(s => s.userId))]
+  const own = ids.length === 1 ? assistantNames.get(ids[0]!, agent) : undefined
+  return own ? displayName(agent, own) : undefined
+}
+/** Private answers their owner may still choose to share to the channel they asked in. */
+const pendingShares = new PendingShares()
+/** Chats known to be DMs: an answer there is already private. */
+const dmChats = new Set<string>()
+// Also needed by speaker-scoped data tools, which must know who a turn is for.
+const turnSpeakers = (hub.consult?.enabled && hub.consult.enforceCallerAccess) || hub.speakerData?.enabled
   ? new TurnSpeakers(() => Date.now())
   : undefined
 const turnProgress = hub.turnProgress?.enabled && discordEnabled
@@ -1365,6 +1413,19 @@ function cardTraceText(card: CardSpec): string {
 async function onAgentReply(reply: AgentReply, key: string): Promise<void | SendOutcome> {
   if (!conversationIngress.tryRun(() => true).accepted) return { ok: false, error: "Hub is shutting down" }
   if (toolObs) toolUsage.endTurn(reply.agent)
+  // The turn ledger: written here, before any branch below consumes the reply, so a
+  // consult answer, a mission step and an ordinary reply are all counted the same way.
+  if (reply.kind === "reply" && !auditOptedOut(reply.agent)) {
+    try {
+      const consult = consultRegistry.peek(reply.chatId)
+      const asker = consult ? [...new Set((turnSpeakers?.behind(consult.requester) ?? []).map(s => s.userId))] : []
+      audit.record(turnLedger.close({
+        key, agent: reply.agent, chat: reply.chatId, usage: reply.usage,
+        speakers: consult ? [] : (turnSpeakers?.behind(reply.agent, reply.chatId) ?? []),
+        ...(consult ? { consultedBy: consult.requester, ...(asker.length === 1 ? { forUser: asker[0] } : {}) } : {}),
+      }))
+    } catch (e) { process.stderr.write(`turn ledger: ${e}\n`) }
+  }
   // A tool whose result never arrived (agent restarted, transport died) would pin its
   // entry forever — the turn ending is the honest end of the wait, so drop this
   // agent's stragglers. Their spine rows stay on `running`; we can't measure what
@@ -1501,9 +1562,29 @@ async function onAgentReply(reply: AgentReply, key: string): Promise<void | Send
   // The real answer is about to land: stop typing and clear the holding reply first, so
   // the channel never shows both. Only a text reply ends the turn; a card or an update
   // mid-turn must not.
+  // Resolved BEFORE the turn is ended below: afterwards nobody is "behind" it any more.
+  const displayAs = reply.kind === "reply" ? replyDisplayName(reply.agent, reply.chatId) : undefined
   if (reply.kind === "reply") turnSpeakers?.end(reply.agent, reply.chatId)
   if (reply.kind === "reply") await turnProgress?.finish(reply.chatId, reply.agent)
-  await gateway.sendReply(reply, agents[reply.agent])
+  // This answer was built from one person's own records: it goes to them by DM, and the
+  // shared channel gets a pointer only. If the DM cannot be delivered the records are NOT
+  // posted in the channel as a fallback; the person is told how to get them instead.
+  const privateFor = reply.kind === "reply" ? privateReplies?.take(reply.agent, reply.chatId) ?? null : null
+  if (privateFor && agents[reply.agent]) {
+    const tag = formatOutbound("", agents[reply.agent], hub.tagStyle, 2000, "newline", reply.agent)[0] ?? ""
+    const share = pendingShares.create(privateFor, reply.chatId, reply.agent, reply.text ?? "")
+    const sent = await gateway.sendDMWithButtons(privateFor, `${tag}${reply.text ?? ""}`, [
+      { customId: `${SHARE_PREFIX}${share.id}`, label: "Share to the channel", style: "secondary", emoji: "📣" },
+    ])
+    if (sent) { share.dmChatId = sent.chatId; share.dmMessageId = sent.messageId }
+    const delivered = !!sent
+    audit.record({ kind: "access", actor: `agent:${reply.agent}`, action: "private_reply", outcome: delivered ? "ok" : "error", chat: reply.chatId, detail: { user: privateFor } })
+    await gateway.sendPlain(reply.chatId, delivered
+      ? `${tag}<@${privateFor}>, I've sent you that by DM, because it contains your own records. There's a button under it if you want to share it here.`
+      : `${tag}<@${privateFor}>, that answer contains your own records, so I won't post it here, and I couldn't DM you. Allow direct messages from this server, then ask again.`)
+    return
+  }
+  await gateway.sendReply(reply, agents[reply.agent], displayAs)
   // F3 auto-escalation: if this real persistent-agent turn logged tool errors, re-run
   // it once at higher effort (rate-capped). `key === reply.agent` only for a live
   // persistent agent — clones use distinct keys, so an escalation never re-triggers.
@@ -2081,6 +2162,8 @@ if (discordGateway) gateway.setPermissionAuthorizer((uid) => baseGate.listAllowe
 // allowlist. Who may press WHICH of those buttons is decided in AccessRequests.click. In a
 // DM there is no channel opt-in to lean on, so the allowlist still applies.
 if (discordGateway) gateway.setButtonAuthorizer((customId, uid, channelId, isDM) => {
+  // A share button lives in a DM and belongs to exactly one person: its owner may press it.
+  if (customId.startsWith(SHARE_PREFIX)) return pendingShares.ownedBy(customId, uid)
   if (!parseAccessCustomId(customId)) return undefined
   if (isDM) return undefined
   return baseGate.gate(uid, channelId, false, Date.now()).action === "deliver"
@@ -2166,6 +2249,20 @@ if (discordGateway) gateway.onNotifyButton((customId, userId) => {
   // against the Discord id of whoever clicked. A returned reason restores the buttons.
   if (parseAccessCustomId(customId)) {
     return accessRequests ? accessRequests.click(customId, userId) : "Access requests are switched off."
+  }
+  // "Share to the channel" under a private answer: only its owner, only once. The answer
+  // is posted where they originally asked, attributed to them as the one who shared it.
+  if (customId.startsWith(SHARE_PREFIX)) {
+    const share = pendingShares.claim(customId, userId)
+    if (typeof share === "string") return share
+    void (async () => {
+      if (agents[share.agent]) {
+        await gateway.sendReply({ kind: "reply", agent: share.agent, chatId: share.chatId, text: `*Shared by <@${share.userId}>:*\n${share.text}` } as AgentReply, agents[share.agent])
+      }
+      if (share.dmChatId && share.dmMessageId) await gateway.clearButtons(share.dmChatId, share.dmMessageId)
+      audit.record({ kind: "access", actor: `user:${share.userId}`, action: "private_reply_shared", outcome: "ok", chat: share.chatId, detail: { agent: share.agent } })
+    })().catch((e) => { process.stderr.write(`share: ${e}\n`) })
+    return
   }
   const busy = beginDiscordClick(customId)
   if (busy) return busy
@@ -2395,6 +2492,13 @@ const orchestrator = new Orchestrator(hub, agents, {
   isAvailable: (agent) => dispatcher.isAvailable(agent),
   sendPlain: (chatId, text) => gateway.sendPlain(chatId, text),
   grantedAgents: (userId) => accessGrants.agentsFor(userId),
+  ...(namingOn ? {
+    personalNames: (userId: string) => assistantNames.forUser(userId),
+    setPersonalName: (userId: string, agent: string, name: string | null) => {
+      if (name === null) assistantNames.clear(userId, agent); else assistantNames.set(userId, agent, name)
+      audit.record({ kind: "event", actor: `user:${userId}`, action: "assistant_named", target: agent, outcome: "ok", detail: { name } })
+    },
+  } : {}),
   ...(accessRequests ? { offerAccess: (chatId: string, userId: string, agent: string) => { void accessRequests.offer(chatId, userId, agent) } } : {}),
   // Control commands take the LEGACY path even in a canonical channel (they start with
   // "!"), so this is how they learn that the channel they are answering about is served
@@ -2419,15 +2523,20 @@ const orchestrator = new Orchestrator(hub, agents, {
     const rt = agents[agent]?.runtime
     // Routed-path progress: typing now, and a holding reply if this looks like a long job.
     // `big` is the router's call; with no router decision fall back to message length.
-    if (turnSpeakers && inbound.userId && inbound.userId !== "system") {
+    // What this person may use here: recorded for the consult caller check and the data
+    // tools, and told to the agent so it does not offer a colleague they cannot reach.
+    if (inbound.isDM) dmChats.add(inbound.chatId)
+    let reach = ""
+    if ((turnSpeakers || hub.consult?.enabled) && inbound.userId && inbound.userId !== "system") {
       let roles: string[] = []
       try { roles = discordEnabled ? await gateway.resolveRoles(inbound.userId) : [] } catch {}
-      turnSpeakers.begin(agent, {
-        userId: inbound.userId, chatId: inbound.chatId,
-        permitted: permittedAgents(agents, roles, inbound.userId, {
-          channelId: inbound.chatId, threadParentId: inbound.threadParentId, isDM: inbound.isDM,
-        }, accessGrants.agentsFor(inbound.userId)),
-      })
+      const permitted = permittedAgents(agents, roles, inbound.userId, {
+        channelId: inbound.chatId, threadParentId: inbound.threadParentId, isDM: inbound.isDM,
+      }, accessGrants.agentsFor(inbound.userId))
+      turnSpeakers?.begin(agent, { userId: inbound.userId, chatId: inbound.chatId, permitted })
+      if (hub.consult?.enabled && hub.consult.enforceCallerAccess) reach = reachNote(agent, agents, permitted)
+      const own = agents[agent]?.access.nameable ? assistantNames.get(inbound.userId, agent) : undefined
+      if (own) reach += `\n\n[hub] This person calls you "${own}". Answer to that name; do not correct them.`
     }
     turnProgress?.begin(inbound.chatId, agent, {
       big: big ?? looksBig(inbound.content, hub.turnProgress?.bigChars),
@@ -2487,8 +2596,10 @@ const orchestrator = new Orchestrator(hub, agents, {
     // for the turn about to begin (per agent key; persistent key === agent name).
     lastTurns.set(inbound.chatId, { agent, content: live })
     turnErrors.set(agent, 0)
-    if (!context && !memory && live === inbound.content) return inbound
-    return { ...inbound, content: enrich(live, { memory, context }) }
+    if (!context && !memory && !reach && live === inbound.content) return inbound
+    // `reach` is appended here, after the message was recorded, so the hub's note to the
+    // agent never enters the channel's message cache or the distilled memory.
+    return { ...inbound, content: enrich(live + reach, { memory, context }) }
   },
 })
 
@@ -2607,8 +2718,18 @@ if (discordGateway) gateway.handleInbound((m) => {
     void escalateTurn(m.chatId, "manual")
     return
   }
+  const mayViewAudit = baseGate.listAllowed().includes(m.userId) || (hub.audit as { viewers?: string[] } | undefined)?.viewers?.includes(m.userId) === true
+  const usageCmd = parseUsageCommand(trimmed)
+  if (usageCmd) {
+    if (!mayViewAudit) return
+    if (!hub.audit?.enabled) { void gateway.sendPlain(m.chatId, "📜 audit logging is off (set `hub.audit.enabled`)."); return }
+    const rows = audit.recent({ kind: "turn", since: Date.now() - usageCmd.days * 86_400_000, limit: 20_000 })
+    // sendPlainId suppresses mentions, so a usage report names people without pinging them.
+    void gateway.sendPlainId(m.chatId, renderUsage(rows, usageCmd.days === 1 ? "last 24 hours" : `last ${usageCmd.days} days`))
+    return
+  }
   if (/^!audit\b/i.test(trimmed)) {
-    if (!baseGate.listAllowed().includes(m.userId)) return
+    if (!mayViewAudit) return
     if (!hub.audit?.enabled) { void gateway.sendPlain(m.chatId, "📜 audit logging is off (set `hub.audit.enabled`)."); return }
     void gateway.sendPlain(m.chatId, buildAuditText(trimmed.replace(/^!audit\b/i, ""), audit, (ts) => new Date(ts).toISOString().slice(11, 19)))
     return

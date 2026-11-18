@@ -38,7 +38,10 @@ export function permittedAgents(
     if (!ok) continue
     const channels = cfg.access.channels
     if (channels && channels.length > 0) {
-      if (!where || where.isDM) continue
+      if (!where) continue
+      // A DM is not one of the listed channels. The agent is offered there only if it
+      // opts in with `access.dm`; who may use it was already decided above.
+      if (where.isDM) { if (cfg.access.dm) out.push(name); continue }
       const here = where.channelId
       const parent = where.threadParentId
       const inChannel =

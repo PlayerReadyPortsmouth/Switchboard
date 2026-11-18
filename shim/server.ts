@@ -112,7 +112,15 @@ async function main() {
   }
   let reqCounter = 0
   const pending = new Map<string, (notes: { title: string; body: string }[]) => void>()
-  const pendingAsk = new Map<string, (answer: string) => void>()
+  const pendingData = new Map<string, (answer: string) => void>()
+/** This agent's speaker-scoped data tools, as the hub configured them. */
+const SPEAKER_DATA: { name: string; description: string }[] = (() => {
+  try {
+    const v = JSON.parse(process.env.SPEAKER_DATA ?? "[]")
+    return Array.isArray(v) ? v.filter(t => t && typeof t.name === "string" && typeof t.description === "string") : []
+  } catch { return [] }
+})()
+const pendingAsk = new Map<string, (answer: string) => void>()
   const pendingPeerAsk = new Map<string, (answer: string) => void>()
   const pendingPublish = new Map<string, (r: { url?: string; error?: string }) => void>()
   const pendingReceipt = new Map<string, (r: { ok: boolean; messageId?: string; error?: string }) => void>()
@@ -129,6 +137,9 @@ async function main() {
           } else if (m.t === "ask_agent_result" && m.id && pendingAsk.has(m.id)) {
             pendingAsk.get(m.id)!(m.answer ?? "")
             pendingAsk.delete(m.id)
+          } else if (m.t === "my_data_result" && m.id && pendingData.has(m.id)) {
+            pendingData.get(m.id)!(m.answer ?? "")
+            pendingData.delete(m.id)
           } else if (m.t === "ask_peer_result" && m.id && pendingPeerAsk.has(m.id)) {
             pendingPeerAsk.get(m.id)!(m.answer ?? "")
             pendingPeerAsk.delete(m.id)
@@ -223,6 +234,18 @@ async function main() {
           target: { type: "string", description: "The configured outbound route id to fire." },
           body: { type: "string", description: "Optional request body (used when the route has no template)." } },
           required: ["target"] } },
+      // my_data is exposed only when the hub gives this agent speaker-scoped data tools.
+      // The hub decides WHO the records are for (the person who sent the message); there
+      // is deliberately no argument for it here.
+      ...(SPEAKER_DATA.length ? [{
+        name: "my_data",
+        description: "Fetch live records belonging to the person you are talking to right now. The hub identifies that person from their message; you cannot fetch anyone else's records and must not try. Available: " +
+          SPEAKER_DATA.map(t => `${t.name} (${t.description})`).join("; ") + ". Returns JSON, or a bracketed note if it could not be fetched; if so, say that plainly and do not guess.",
+        inputSchema: { type: "object", properties: {
+          tool: { type: "string", enum: SPEAKER_DATA.map(t => t.name), description: "Which records to fetch." },
+          query: { type: "string", description: "Optional search text to narrow the results." } },
+          required: ["tool"] },
+      }] : []),
       // ask_agent is exposed only when the hub enables inter-agent consult.
       ...(process.env.CONSULT === "1" ? [{
         name: "ask_agent",
@@ -294,6 +317,17 @@ async function main() {
         pendingPeerAsk.set(id, resolve)
         sock.write(encode({ t: "ask_peer", id, target: args.target, message: args.message }))
         const timer = setTimeout(() => { if (pendingPeerAsk.delete(id)) resolve("(the peer agent did not respond in time)") }, 310000)
+        ;(timer as { unref?: () => void }).unref?.()
+      })
+      return { content: [{ type: "text", text: answer }] }
+    }
+    // my_data is request/response: the hub fetches for the speaker and returns the text.
+    if (req.params.name === "my_data") {
+      const id = `d${++reqCounter}`
+      const answer = await new Promise<string>((resolve) => {
+        pendingData.set(id, resolve)
+        sock.write(encode({ t: "my_data", id, tool: args.tool, query: args.query }))
+        const timer = setTimeout(() => { if (pendingData.delete(id)) resolve("(unavailable: the hub did not answer in time. Say that you could not fetch it; do not guess.)") }, 30000)
         ;(timer as { unref?: () => void }).unref?.()
       })
       return { content: [{ type: "text", text: answer }] }

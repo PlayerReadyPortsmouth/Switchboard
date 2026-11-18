@@ -161,7 +161,7 @@ export function buildClaudeArgv(o: ClaudeArgvOpts): string[] {
  *  ATTACH_FILES=1 (exposes attach_file); `peeringEnabled` sets PEERING=1
  *  (exposes notify_peer + ask_peer); `receiptsEnabled` sets RECEIPTS=1 (the shim
  *  turns post_card/update_card/attach_file into request/response with a receipt). */
-export function buildShimMcpConfig(shimPath: string, socketPath: string, agentName: string, consultEnabled = false, attachEnabled = false, publishEnabled = false, peeringEnabled = false, receiptsEnabled = false) {
+export function buildShimMcpConfig(shimPath: string, socketPath: string, agentName: string, consultEnabled = false, attachEnabled = false, publishEnabled = false, peeringEnabled = false, receiptsEnabled = false, speakerDataTools: { name: string; description: string }[] = []) {
   return {
     mcpServers: {
       "switchboard-shim": {
@@ -173,6 +173,8 @@ export function buildShimMcpConfig(shimPath: string, socketPath: string, agentNa
           ...(publishEnabled ? { PUBLISH_LINK: "1" } : {}),
           ...(peeringEnabled ? { PEERING: "1" } : {}),
           ...(receiptsEnabled ? { RECEIPTS: "1" } : {}),
+          // The names + descriptions of this agent's speaker-scoped data tools (my_data).
+          ...(speakerDataTools.length ? { SPEAKER_DATA: JSON.stringify(speakerDataTools) } : {}),
         },
       },
     },

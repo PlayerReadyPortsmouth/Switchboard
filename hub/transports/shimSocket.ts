@@ -28,6 +28,7 @@ export class ShimSocketServer {
   private recallCb: (q: { query: string; scopes?: string[] }) => Promise<RecalledNote[]> = async () => []
   private postWebhookCb: (w: { target: string; body?: string }) => void = () => {}
   private askAgentCb: (q: { agent: string; message: string }) => Promise<string> = async () => ""
+  private myDataCb: (q: { tool: string; query?: string }) => Promise<string> = async () => "(unavailable: data tools are not switched on.)"
   private notifyPeerCb: (n: { target: string; text: string }) => void = () => {}
   private askPeerCb: (q: { target: string; message: string }) => Promise<string> = async () => ""
   private attachCb: (a: { chatId: string; path: string; caption?: string; filename?: string }) => OutcomeReturn = () => {}
@@ -45,6 +46,7 @@ export class ShimSocketServer {
   onRecall(cb: typeof this.recallCb) { this.recallCb = cb }
   onPostWebhook(cb: typeof this.postWebhookCb) { this.postWebhookCb = cb }
   onAskAgent(cb: typeof this.askAgentCb) { this.askAgentCb = cb }
+  onMyData(cb: typeof this.myDataCb) { this.myDataCb = cb }
   onNotifyPeer(cb: typeof this.notifyPeerCb) { this.notifyPeerCb = cb }
   onAskPeer(cb: typeof this.askPeerCb) { this.askPeerCb = cb }
   onAttach(cb: typeof this.attachCb) { this.attachCb = cb }
@@ -106,6 +108,12 @@ export class ShimSocketServer {
         // Request/response: run retrieval, then write the result back keyed by id.
         void this.recallCb({ query: m.query, scopes: m.scopes }).then((notes) => {
           try { socket.write(encode({ t: "recall_result", id: m.id, notes })) } catch {}
+        })
+        break
+      case "my_data":
+        // Request/response: the hub fetches for the SPEAKER (never an id from the agent).
+        void this.myDataCb({ tool: String(m.tool ?? ""), query: typeof m.query === "string" ? m.query : undefined }).then((answer) => {
+          try { socket.write(encode({ t: "my_data_result", id: m.id, answer })) } catch {}
         })
         break
       case "ask_agent":

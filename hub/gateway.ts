@@ -4,7 +4,7 @@ import {
   type Message, type Interaction,
 } from "discord.js"
 import { createHash } from "node:crypto"
-import type { AgentRegistry, InboundMessage, AgentReply, AgentConfig, HubConfig, CardSpec, CardModal } from "./types"
+import type { AgentRegistry, InboundMessage, AgentReply, AgentConfig, HubConfig, CardSpec, CardModal, CardButton } from "./types"
 import { chunk, formatOutbound } from "./format"
 import { buildModal } from "./modal"
 import { WORKING_BUTTON } from "./cardSync"
@@ -458,10 +458,10 @@ export class Gateway {
   }
 
   /** Send a tagged, chunked reply for a given agent. */
-  async sendReply(reply: AgentReply, agent: AgentConfig): Promise<void> {
+  async sendReply(reply: AgentReply, agent: AgentConfig, displayAs?: string): Promise<void> {
     const ch = await this.client.channels.fetch(reply.chatId)
     if (!ch || !("send" in ch)) return
-    const chunks = formatOutbound(reply.text ?? "", agent, this.cfg.tagStyle, 2000, "newline", reply.agent)
+    const chunks = formatOutbound(reply.text ?? "", agent, this.cfg.tagStyle, 2000, "newline", displayAs ?? reply.agent)
     for (let i = 0; i < chunks.length; i++) {
       await (ch as any).send({
         content: chunks[i],
@@ -494,6 +494,53 @@ export class Gateway {
   async sendPlain(chatId: string, text: string): Promise<void> {
     const ch = await this.client.channels.fetch(chatId)
     if (ch && "send" in ch) await (ch as any).send({ content: text })
+  }
+
+  /** Send text to a person by DM, chunked. Resolves false if it could not be delivered
+   *  (they have DMs from this server closed, or the user could not be fetched). */
+  async sendDM(userId: string, text: string): Promise<boolean> {
+    try {
+      const user = await this.client.users.fetch(userId)
+      const dm = await user.createDM()
+      for (const part of chunk(text, 2000, "newline")) await dm.send({ content: part, allowedMentions: { parse: [] } })
+      return true
+    } catch (e) {
+      process.stderr.write(`gateway: sendDM to ${userId} failed: ${e}\n`)
+      return false
+    }
+  }
+
+  /** DM a person text with a row of buttons under the last part. Resolves where it
+   *  landed, or null if it could not be delivered. */
+  async sendDMWithButtons(userId: string, text: string, buttons: CardButton[]): Promise<{ chatId: string; messageId: string } | null> {
+    try {
+      const user = await this.client.users.fetch(userId)
+      const dm = await user.createDM()
+      const parts = chunk(text, 2000, "newline")
+      const { row } = buildCardComponents({ title: "", body: "", buttons })
+      let last: any
+      for (let i = 0; i < parts.length; i++) {
+        last = await dm.send({
+          content: parts[i], allowedMentions: { parse: [] },
+          ...(i === parts.length - 1 && row ? { components: [row] } : {}),
+        })
+      }
+      return last?.id ? { chatId: dm.id, messageId: last.id as string } : null
+    } catch (e) {
+      process.stderr.write(`gateway: sendDMWithButtons to ${userId} failed: ${e}\n`)
+      return null
+    }
+  }
+
+  /** Remove the buttons from a message the bot posted. Cosmetic: swallows failures. */
+  async clearButtons(chatId: string, messageId: string): Promise<void> {
+    try {
+      const ch = await this.client.channels.fetch(chatId)
+      if (!ch || !("messages" in ch)) return
+      await (ch as any).messages.edit(messageId, { components: [] })
+    } catch (e) {
+      process.stderr.write(`gateway: clearButtons ${messageId} failed: ${e}\n`)
+    }
   }
 
   /** Post a plain message and return its id, for a message the hub will edit later
