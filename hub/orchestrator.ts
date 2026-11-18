@@ -1,5 +1,6 @@
 import type { AgentRegistry, HubConfig, InboundMessage } from "./types"
 import { addressedAgent, type RouteDecision } from "./router"
+import { nameProblem, parseNameCommand } from "./assistantNames"
 import { permittedAgents } from "./access"
 import { chatKey, decideAgent, BindingStore } from "./bindings"
 import { parseControlCommand, renderAgentList } from "./gateway"
@@ -24,6 +25,9 @@ export interface OrchestratorDeps {
     Promise<{ ok: true } | { ok: false; reason: "cap" } | { ok: false; reason: "worktree_error"; error: string }>
   isAvailable: (agent: string) => boolean
   sendPlain: (chatId: string, text: string) => Promise<void>
+  /** This person's own names for agents (agent → name). Absent ⇒ naming is off. */
+  personalNames?: (userId: string) => Record<string, string>
+  setPersonalName?: (userId: string, agent: string, name: string | null) => void
   /** Agents this person holds a live access grant for. Absent ⇒ none. */
   grantedAgents?: (userId: string) => string[]
   /** The person opened a message with the name of an agent they may not use, and a
@@ -58,8 +62,13 @@ export class Orchestrator {
   async handleMessage(inbound: InboundMessage): Promise<void> {
     // Layer 0: base pairing/allowlist wall — before any routing.
     const g = this.deps.baseGate(inbound.userId, inbound.chatId, inbound.isDM, inbound.threadParentId)
-    if (g.action === "drop") return
-    if (g.action === "pair") {
+    // A DM from someone the allowlist does not know, who is nonetheless already allowed an
+    // agent that opts in to DMs: let it through. `permittedAgents` below still decides
+    // which agents they get, and in a DM that is only the `access.dm` ones.
+    const viaAgent = g.action !== "deliver" && inbound.isDM && this.hub.dmViaAgentAccess
+      ? await this.mayDmViaAgent(inbound.userId) : false
+    if (g.action === "drop" && !viaAgent) return
+    if (g.action === "pair" && !viaAgent) {
       await this.deps.sendPlain(inbound.chatId,
         `Pairing required. Share this code with the operator to get access: \`${g.code}\``)
       return
@@ -83,19 +92,32 @@ export class Orchestrator {
     const control = parseControlCommand(inbound.content)
     if (control) { await this.handleControl(control, inbound, key, permitted, bound); return }
 
+    // `!name Jeeves`: a person's own name for an agent marked nameable. Handled here, by
+    // the hub, so no model can be talked into renaming anything.
+    const naming = this.deps.personalNames ? parseNameCommand(inbound.content) : null
+    if (naming) { await this.handleNaming(naming, inbound, permitted); return }
+    // Their names count as addressing the agent: "Jeeves, …" is "Assistant, …".
+    const mine = this.deps.personalNames?.(inbound.userId) ?? {}
+    const addressed = (list: string[]): string | null => {
+      const byOwn = Object.entries(mine).filter(([a]) => list.includes(a))
+      const hit = addressedAgent(inbound.content, byOwn.map(([, n]) => n))
+      if (hit) return byOwn.find(([, n]) => n === hit)![0]
+      return addressedAgent(inbound.content, list)
+    }
+
     // People talking to each other: a guild message that quote-replies to another PERSON
     // is not for an agent, unless it opens with an agent's name. (`quote` is only set for a
     // reply to a non-bot author, so replying to an agent's own message still reaches it.)
     // Silent by design, like a base-gate drop: answering "not for me" in a busy channel is
     // the very noise this exists to remove. Off unless hub.quietOnHumanReply.
     if (this.hub.quietOnHumanReply && !inbound.isDM && inbound.quote
-      && !addressedAgent(inbound.content, permitted)) return
+      && !addressed(permitted)) return
 
     // "Susie, …" from someone who may not use Susie. Sending it to whichever agent the
     // router fancies instead would answer a question they did not ask of that agent, so
     // stop here and offer the access request. Only when a grant would actually work in
     // this place: an agent scoped to other channels is not on offer here.
-    if (this.deps.offerAccess && !addressedAgent(inbound.content, permitted)) {
+    if (this.deps.offerAccess && !addressed(permitted)) {
       const wanted = addressedAgent(inbound.content, Object.keys(this.reg))
       if (wanted && permittedAgents(this.reg, roles, inbound.userId, {
         channelId: inbound.chatId, threadParentId: inbound.threadParentId, isDM: inbound.isDM,
@@ -140,14 +162,18 @@ export class Orchestrator {
     const current = bound && permitted.includes(bound) ? bound : null
     const routed = await this.deps.route(
       inbound.content,
-      permitted.map(n => ({ name: n, description: this.reg[n].description })),
+      // The router is told what this person calls an agent, so "ask Jeeves" lands right.
+      permitted.map(n => ({
+        name: n,
+        description: mine[n] ? `${this.reg[n].description} This person calls it "${mine[n]}".` : this.reg[n].description,
+      })),
       current,
     )
     // Guard: never honour a router pick outside the caller's permitted set.
     const decision = routed && permitted.includes(routed.agent) ? routed : null
     // A message that opens with a permitted agent's name goes to that agent, whatever the
     // router or the sticky binding would have done. The router still ran, for its `big` call.
-    const agent = addressedAgent(inbound.content, permitted) ?? decideAgent({
+    const agent = addressed(permitted) ?? decideAgent({
       current, permitted, decision,
       threshold: this.hub.switchThreshold, defaultAgent: this.hub.defaultAgent,
     })
@@ -159,6 +185,39 @@ export class Orchestrator {
     }
     this.bindings.set(key, { agent, sessionId: this.bindings.get(key)?.sessionId, lastActive: Date.parse(inbound.ts) })
     await this.dispatchEnriched(agent, key, inbound, bound !== agent, decision?.big)
+  }
+
+  /** True when this person is allowed at least one agent that opts in to DMs. */
+  private async mayDmViaAgent(userId: string): Promise<boolean> {
+    const roles = await this.deps.resolveRoles(userId)
+    return permittedAgents(this.reg, roles, userId, { isDM: true }, this.deps.grantedAgents?.(userId))
+      .some(n => this.reg[n]?.access.dm === true)
+  }
+
+  private async handleNaming(
+    cmd: { name?: string; clear?: boolean }, inbound: InboundMessage, permitted: string[],
+  ): Promise<void> {
+    const say = (text: string) => this.deps.sendPlain(inbound.chatId, text)
+    const nameable = permitted.filter(n => this.reg[n]?.access.nameable)
+    if (nameable.length === 0) { await say("There isn't an assistant you can name here."); return }
+    const agent = nameable[0]!
+    const current = this.deps.personalNames?.(inbound.userId)[agent]
+    const tag = `${this.reg[agent]!.emoji} **${agent}**`
+    if (cmd.clear) {
+      this.deps.setPersonalName?.(inbound.userId, agent, null)
+      await say(current ? `${tag} · Done. I'm no longer "${current}" to you; call me ${agent}.` : `${tag} · You hadn't given me a name.`)
+      return
+    }
+    if (!cmd.name) {
+      await say(current
+        ? `${tag} · You call me **${current}**. Change it with \`!name <new name>\`, or \`!name clear\`.`
+        : `${tag} · You haven't named me yet. Try \`!name Jeeves\`.`)
+      return
+    }
+    const problem = nameProblem(cmd.name, Object.keys(this.reg))
+    if (problem) { await say(`${tag} · ${problem}`); return }
+    this.deps.setPersonalName?.(inbound.userId, agent, cmd.name.trim())
+    await say(`${this.reg[agent]!.emoji} **${cmd.name.trim()} (${agent})** · Done. I'm **${cmd.name.trim()}** to you from now on. Start a message with my name and it comes to me.`)
   }
 
   /** Dispatch after an optional context/memory enrichment pass. `isSwitch` is

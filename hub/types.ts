@@ -114,6 +114,12 @@ export interface AgentAccess {
    *  by DM. Deliberate: the point of locking dev tools to a room is that they are not
    *  available outside it. */
   channels?: string[]
+  /** People may give this agent their own name (`!name Jeeves`). See assistantNames.ts. */
+  nameable?: boolean
+  /** This agent may be used in a DM by the people who already have access to it, even if
+   *  it is otherwise limited to `channels`. Needs hub.dmViaAgentAccess for people who are
+   *  not on the DM allowlist. */
+  dm?: boolean
   /** Discord user ids who may approve or deny a request for access to this agent.
    *  Absent ⇒ the hub's `accessRequests.approvers`. */
   owners?: string[]
@@ -384,6 +390,10 @@ export interface HubConfig {
   gatedActions?: GatedAction[]   // hub-side button handlers that run shell commands
   channelAgents?: ChannelAgent[]  // channels pinned to a specific agent
   typingIndicator?: TypingIndicatorConfig;  // show "typing…" while an agent works (default OFF)
+  /** Let a person DM the bot without being on the DM allowlist, provided an agent marked
+   *  `access.dm` is one they are already allowed to use (default off). The DM allowlist
+   *  and pairing still apply to everyone else. */
+  dmViaAgentAccess?: boolean
   /** In a guild channel, stay silent when a message quote-replies to another person and
    *  does not open with an agent's name (default off: agents answer everything). */
   quietOnHumanReply?: boolean

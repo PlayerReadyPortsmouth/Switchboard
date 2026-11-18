@@ -83,6 +83,27 @@ export function speakerBlocking(speakers: TurnSpeaker[], targetName: string): Tu
   return speakers.find(s => !s.permitted.includes(targetName)) ?? null
 }
 
+/** A one-line note telling an agent which colleagues it may consult FOR THE PERSON IT
+ *  IS ANSWERING, so it does not offer what the hub would refuse ("tell me which ticket
+ *  to hand to Susie" to someone with no access to Susie). The hub still enforces the
+ *  check on the consult itself; this only stops the agent promising it.
+ *
+ *  `permitted` is what that person may use where they spoke. Colleagues are the agents
+ *  this one is allowed to consult at all. Returns "" when the agent has no colleagues. */
+export function reachNote(
+  agent: string, registry: Record<string, AgentConfig>, permitted: string[],
+): string {
+  const colleagues = Object.keys(registry).filter(n => mayConsult(agent, n, registry[n]))
+  if (colleagues.length === 0) return ""
+  const can = colleagues.filter(n => permitted.includes(n))
+  const cannot = colleagues.filter(n => !permitted.includes(n))
+  const parts = [`For this person you may consult: ${can.length ? can.join(", ") : "nobody"}.`]
+  if (cannot.length) {
+    parts.push(`They do not have access to: ${cannot.join(", ")}. Do not offer to ask ${cannot.length === 1 ? "that colleague" : "those colleagues"} for them; if their request needs one, say they would need access first.`)
+  }
+  return `\n\n[hub] ${parts.join(" ")}`
+}
+
 export interface PendingConsult {
   id: string
   channel: string                    // the virtual channel "consult:<id>"

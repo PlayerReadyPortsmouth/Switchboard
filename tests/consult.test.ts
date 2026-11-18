@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test"
-import { mayConsult, ConsultRegistry, consultAnswerFromReply, TurnSpeakers, speakerBlocking } from "../hub/consult"
+import { mayConsult, ConsultRegistry, consultAnswerFromReply, TurnSpeakers, speakerBlocking, reachNote } from "../hub/consult"
 import type { AgentConfig, AgentReply } from "../hub/types"
 
 const target = (consultableBy?: string[]): AgentConfig => ({
@@ -181,4 +181,36 @@ test("TurnSpeakers keeps agents separate and ignores an end for an unknown turn"
   s.end("Bill", "999999")
   expect(s.behind("Bill").map(x => x.userId)).toEqual(["aurora"])
   expect(s.behind("Susie")).toEqual([])
+})
+
+// ---- reachNote: tell the agent who it may consult for THIS person ----
+
+const team: any = {
+  Ted: { access: { roles: [], consultableBy: ["Bill"] } },
+  Bill: { access: { roles: [], consultableBy: ["Ted"] } },
+  Susie: { access: { roles: [], consultableBy: ["Ted", "Bill"] } },
+  Geoff: { access: { roles: [] } },                       // consultable by nobody
+}
+
+test("reachNote lists who can and cannot be consulted for this person", () => {
+  const note = reachNote("Ted", team, ["Ted", "Bill"])
+  expect(note).toContain("you may consult: Bill.")
+  expect(note).toContain("do not have access to: Susie.")
+  expect(note).toContain("Do not offer to ask that colleague")
+  expect(note).not.toContain("Geoff")                     // not a colleague Ted may consult at all
+  expect(note.startsWith("\n\n[hub] ")).toBe(true)
+})
+
+test("reachNote: everyone reachable ⇒ no warning", () => {
+  const note = reachNote("Ted", team, ["Ted", "Bill", "Susie"])
+  expect(note).toContain("you may consult: Bill, Susie.")
+  expect(note).not.toContain("do not have access")
+})
+
+test("reachNote: nobody reachable is said plainly", () => {
+  expect(reachNote("Ted", team, ["Ted"])).toContain("you may consult: nobody.")
+})
+
+test("reachNote: an agent with no colleagues gets no note", () => {
+  expect(reachNote("Geoff", { Geoff: team.Geoff }, ["Geoff"])).toBe("")
 })

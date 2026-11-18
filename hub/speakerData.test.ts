@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { runSpeakerData, soleSpeaker, toolsFor, type SpeakerDataConfig } from "./speakerData"
+import { PendingShares, PrivateReplies, SHARE_PREFIX, runSpeakerData, soleSpeaker, toolsFor, type SpeakerDataConfig } from "./speakerData"
 
 const AURORA = "186188409499418628"
 const STEPHEN = "425368343789305865"
@@ -119,5 +119,69 @@ describe("runSpeakerData", () => {
     const out = await runSpeakerData({ ...cfg, maxChars: 100 }, h.deps, req())
     expect(out.startsWith("z".repeat(100) + "\n(cut:")).toBe(true)
     expect(out).toContain("300 characters")
+  })
+})
+
+describe("PrivateReplies", () => {
+  test("a mark is taken once, by the same agent in the same chat", () => {
+    const p = new PrivateReplies(() => 1000)
+    p.mark("Ted", "100000", AURORA)
+    expect(p.take("Bill", "100000")).toBeNull()
+    expect(p.take("Ted", "200000")).toBeNull()
+    expect(p.take("Ted", "100000")).toBe(AURORA)
+    expect(p.take("Ted", "100000")).toBeNull()
+  })
+  test("a stale mark does not make a later answer private", () => {
+    let now = 1000
+    const p = new PrivateReplies(() => now, 60_000)
+    p.mark("Ted", "100000", AURORA)
+    now += 61_000
+    expect(p.take("Ted", "100000")).toBeNull()
+  })
+})
+
+describe("runSpeakerData onFetched", () => {
+  test("fires for a successful fetch only", async () => {
+    const seen: string[] = []
+    const ok = harness()
+    await runSpeakerData(cfg, { ...ok.deps, onFetched: (u: string) => seen.push(u) }, req())
+    expect(seen).toEqual([AURORA])
+    for (const bad of [harness({ ok: false, status: 500 }), harness({ throws: true })]) {
+      await runSpeakerData(cfg, { ...bad.deps, onFetched: (u: string) => seen.push(u) }, req())
+    }
+    await runSpeakerData(cfg, { ...ok.deps, onFetched: (u: string) => seen.push(u) }, req({ people: [] }))
+    await runSpeakerData(cfg, { ...ok.deps, onFetched: (u: string) => seen.push(u) }, req({ tool: "deals" }))
+    expect(seen).toEqual([AURORA])
+  })
+})
+
+describe("PendingShares", () => {
+  const mk = (now = () => 1000, max = 60_000) => new PendingShares(now, max, () => "abc")
+  test("only the owner may press, and only the owner gets the text, once", () => {
+    const p = mk()
+    const s = p.create(AURORA, "100000", "Ted", "your tickets")
+    const id = SHARE_PREFIX + s.id
+    expect(p.ownedBy(id, AURORA)).toBe(true)
+    expect(p.ownedBy(id, STEPHEN)).toBe(false)
+    expect(p.claim(id, STEPHEN)).toBe("Only the person this answer was sent to can share it.")
+    const got = p.claim(id, AURORA)
+    expect(typeof got).toBe("object")
+    expect((got as any).text).toBe("your tickets")
+    expect((got as any).chatId).toBe("100000")
+    expect(typeof p.claim(id, AURORA)).toBe("string")
+    expect(p.ownedBy(id, AURORA)).toBe(false)
+  })
+  test("an expired or unknown share cannot be claimed", () => {
+    let now = 1000
+    const p = mk(() => now)
+    const s = p.create(AURORA, "100000", "Ted", "x")
+    now += 61_000
+    expect(p.claim(SHARE_PREFIX + s.id, AURORA)).toContain("can no longer be shared")
+    expect(p.claim(SHARE_PREFIX + "nope", AURORA)).toContain("can no longer be shared")
+    expect(p.claim("access:approve:Ted~1", AURORA)).toBe("That is not a share button.")
+  })
+  test("ids are distinct even when the generator repeats", () => {
+    const p = mk()
+    expect(p.create(AURORA, "1", "Ted", "a").id).not.toBe(p.create(AURORA, "1", "Ted", "b").id)
   })
 })

@@ -414,3 +414,73 @@ test("no offer when the person may already use the agent they named", async () =
   expect(offers).toEqual([])
   expect(f.dispatched.map(d => d.agent)).toEqual(["research"])
 })
+
+// ---- personal names + DMs via agent access (18 Nov 2026) ----
+
+function namingRig(over: Partial<HubConfig> = {}, gate: GateResult = { action: "deliver" }) {
+  const f = fakes()
+  const names: Record<string, Record<string, string>> = {}
+  const routed: { name: string; description: string }[][] = []
+  const nreg: AgentRegistry = {
+    Assistant: { emoji: "🗂️", description: "general help", mode: "persistent",
+      access: { roles: ["dev"], nameable: true, dm: true, channels: ["100000"] }, runtime: { cwd: "." } },
+    Bill: { emoji: "💷", description: "finance", mode: "persistent", access: { roles: ["dev"], channels: ["100000"] }, runtime: { cwd: "." } },
+  }
+  const deps = {
+    ...f.deps,
+    baseGate: () => gate,
+    route: async (_m: string, permitted: { name: string; description: string }[]) => { routed.push(permitted); return { agent: "Bill", confidence: 0.9, switch: true } },
+    personalNames: (u: string) => ({ ...(names[u] ?? {}) }),
+    setPersonalName: (u: string, a: string, n: string | null) => { if (n === null) delete names[u]?.[a]; else (names[u] ??= {})[a] = n },
+  }
+  return { f, names, routed, o: new Orchestrator({ ...hub, defaultAgent: "Bill", ...over }, nreg, deps as any) }
+}
+
+test("!name sets a personal name, and that name then addresses the agent over the router", async () => {
+  const r = namingRig()
+  await r.o.handleMessage(guildMsg("!name Jeeves"))
+  expect(r.names.u1).toEqual({ Assistant: "Jeeves" })
+  expect(r.f.plain.at(-1)!.text).toContain("Jeeves")
+  expect(r.f.dispatched).toEqual([])
+  await r.o.handleMessage(guildMsg("Jeeves, what's on today?"))     // router would say Bill
+  expect(r.f.dispatched.map(d => d.agent)).toEqual(["Assistant"])
+  expect(r.routed.at(-1)!.find(a => a.name === "Assistant")!.description).toContain('calls it "Jeeves"')
+})
+
+test("a personal name is the namer's alone", async () => {
+  const r = namingRig()
+  await r.o.handleMessage(guildMsg("!name Jeeves"))
+  await r.o.handleMessage({ ...guildMsg("Jeeves, what's on today?"), userId: "u2" })
+  expect(r.f.dispatched.map(d => d.agent)).toEqual(["Bill"])          // falls to the router for u2
+})
+
+test("!name refuses another agent's name and common words, and can be cleared", async () => {
+  const r = namingRig()
+  await r.o.handleMessage(guildMsg("!name Bill"))
+  expect(r.f.plain.at(-1)!.text).toContain("already the name of an agent")
+  await r.o.handleMessage(guildMsg("!name hey"))
+  expect(r.f.plain.at(-1)!.text).toContain("too common")
+  expect(r.names.u1).toBeUndefined()
+  await r.o.handleMessage(guildMsg("!name Jeeves"))
+  await r.o.handleMessage(guildMsg("!name clear"))
+  expect(r.names.u1).toEqual({})
+})
+
+test("a DM from someone off the allowlist is let through only for an agent that opts in to DMs", async () => {
+  const on = namingRig({ dmViaAgentAccess: true }, { action: "pair", code: "abc123" })
+  await on.o.handleMessage(dm("what's on today?"))
+  expect(on.f.dispatched.map(d => d.agent)).toEqual(["Assistant"])    // Bill is channel-only
+  expect(on.f.plain).toEqual([])
+
+  const off = namingRig({}, { action: "pair", code: "abc123" })
+  await off.o.handleMessage(dm("what's on today?"))
+  expect(off.f.dispatched).toEqual([])
+  expect(off.f.plain[0]!.text).toContain("Pairing required")
+})
+
+test("dmViaAgentAccess does not help someone with no access to a DM-enabled agent", async () => {
+  const r = namingRig({ dmViaAgentAccess: true }, { action: "drop" })
+  ;(r.o as any).deps.resolveRoles = async () => []
+  await r.o.handleMessage(dm("hello?"))
+  expect(r.f.dispatched).toEqual([])
+})
