@@ -429,6 +429,7 @@ export interface HubConfig {
   overseerModel?: string         // default judge model for overseen agents
   memory?: MemoryBackend         // recall index + embedder backend selection (default: all local)
   gardener?: GardenerConfig      // access-weighting + periodic vault hygiene (default: off)
+  learner?: LearnerConfig        // periodic review of misses → proposals for a person (default: off)
   // Session health, live status & scaling (all optional; default off/derived).
   contextWindows?: Record<string, number>  // model id → context window (tokens); `default` is the fallback
   statusChannelId?: string       // channel for the live status embed (absent ⇒ board off)
@@ -806,6 +807,17 @@ export interface TraceConfig {
 
 /** Access-weighted recall + the periodic vault-tending pass. Absent ⇒ recall
  *  stays pure-cosine and no gardening runs (access hits are still recorded). */
+/** The Learner: reads the audit trail and conversations for turns that went wrong,
+ *  asks a cheap model why, and writes proposals. It never applies anything itself. */
+export interface LearnerConfig {
+  enabled?: boolean              // run the periodic learner pass
+  intervalMs?: number            // cadence (default 24h)
+  lookbackMs?: number            // how far back each pass reads (default: intervalMs)
+  model?: string                 // diagnosis model (default: hub.routerModel)
+  channelId?: string             // where to post the report (default: statusChannelId; none ⇒ file only)
+  slowMs?: number                // a turn at least this long counts as a miss (default 45s)
+}
+
 export interface GardenerConfig {
   enabled?: boolean              // run the periodic gardener pass
   intervalMs?: number            // gardener cadence (default 6h)

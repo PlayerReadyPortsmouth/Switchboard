@@ -56,6 +56,7 @@ import { QdrantIndex } from "./memory/qdrantIndex"
 import { MemoryRetriever } from "./memory/retriever"
 import { AccessStore } from "./memory/accessStore"
 import { Gardener } from "./memory/gardener"
+import { runLearner, renderReport } from "./learnerDiagnose"
 import { distill } from "./memory/distiller"
 import { Overseer } from "./overseer"
 import { SessionGovernor } from "./sessionGovernor"
@@ -2579,6 +2580,37 @@ if (garden.enabled) {
     }
   }).catch((e) => process.stderr.write(`gardener: ${e}\n`))
   setInterval(() => void runGarden(), garden.intervalMs ?? 6 * 60 * 60_000).unref()
+}
+
+// Periodic learner: what went wrong since the last pass, why, and what to change.
+// Proposals only. It writes <stateDir>/learner/*.md|json and posts the report; a
+// person decides. Nothing here edits a prompt or an allow list.
+if (hub.learner?.enabled) {
+  const lc = hub.learner
+  const every = lc.intervalMs ?? 24 * 60 * 60_000
+  const learnerRunner = makeRouterRunner()
+  const runLearn = () => runLearner({
+    stateDir: hub.stateDir, run: learnerRunner, model: lc.model ?? hub.routerModel,
+    opts: { since: Date.now() - (lc.lookbackMs ?? every), slowMs: lc.slowMs },
+    contextFor: (name) => {
+      const a = agents[name]
+      if (!a) return undefined
+      const scope = typeof a.runtime.readyApp === "object" ? a.runtime.readyApp : undefined
+      return { prompt: a.runtime.appendSystemPrompt, reads: scope?.reads, actions: scope?.actions }
+    },
+  }).then(async (r) => {
+    const total = r.findings.reduce((n, f) => n + f.total, 0)
+    if (!total) return
+    process.stderr.write(`learner: misses=${total} proposals=${r.proposals.length} failed=${r.failed.length}\n`)
+    const channel = lc.channelId ?? hub.statusChannelId
+    if (!channel) return
+    const text = renderReport(r).replace(/^# .*\n\n/, "")
+    await gateway.sendCard(channel, {
+      title: "🎓 Learner report", fields: [], buttons: [],
+      body: text.length > 3800 ? `${text.slice(0, 3800)}…\n(full report: learner/latest.md on the hub)` : text,
+    })
+  }).catch((e) => process.stderr.write(`learner: ${e}\n`))
+  setInterval(() => void runLearn(), every).unref()
 }
 
 const orchestrator = new Orchestrator(hub, agents, {

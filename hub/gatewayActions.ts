@@ -71,6 +71,16 @@ export function scopeCatalog(cat: Catalog, scope: AgentScope | undefined, userId
   return { ...cat, reads: cat.reads.filter(r => scopeAllows(scope, "reads", r.name, userId)), actions: cat.actions.filter(a => scopeAllows(scope, "actions", a.kind, userId)) }
 }
 
+/** ReadyApp's placeholder for text it will not show outside ReadyApp. */
+const WITHHELD = /^\s*(sensitive details: open readyapp\.?|\[[a-z ]+ in readyapp\])\s*$/i
+/** True when a proposal that leaves Player Ready cannot be read on its card: the
+ *  person would be confirming an email they have not seen. */
+export function previewWithheld(pr: { external?: boolean; title?: unknown; preview?: unknown }): boolean {
+  if (!pr.external) return false
+  const values = [pr.title, ...(Array.isArray(pr.preview) ? pr.preview.map((f: { value?: unknown }) => f?.value) : [])]
+  return values.some(v => typeof v === "string" && WITHHELD.test(v))
+}
+
 export const GW_ACTION_PREFIX = "gwa:"
 export type GwVerb = "confirm" | "cancel"
 export function gwCustomId(verb: GwVerb, id: string): string { return `${GW_ACTION_PREFIX}${verb}:${id}` }
@@ -227,9 +237,12 @@ export class GatewayActions {
     const warnings = (Array.isArray(pr.warnings) ? pr.warnings : []).map(str).filter(Boolean)
     if (warnings.length) fields.push({ name: "⚠️ Check before confirming", value: clip(warnings.map(w => `• ${w}`).join("\n"), 1000), inline: false })
     const lines = [head[state]]
+    const hidden = state === "ask" && previewWithheld(pr)
     if (state === "done" && note) lines.push(clip(note, 500))
-    if (state === "ask" && pr.external) lines.push("📤 **This goes outside Player Ready.** Read the full text and who it goes to.")
-    if (state === "ask" && Array.isArray(pr.editable) && pr.editable.length) {
+    if (hidden) lines.push(`🔒 **This goes outside Player Ready and ReadyApp has hidden its text here, so it cannot be confirmed from Discord.** ${pr.readyAppUrl ? `${link(pr.readyAppUrl).replace("Open", "Read and send it")}, or cancel it below.` : "Read and send it in ReadyApp, or cancel it below."}`)
+    else if (state === "ask" && pr.external) lines.push("📤 **This goes outside Player Ready.** Read the full text and who it goes to.")
+    if (hidden) { /* no wording hint: there is nothing readable to change */ }
+    else if (state === "ask" && Array.isArray(pr.editable) && pr.editable.length) {
       lines.push(pr.readyAppUrl
         ? `To change the wording, tell ${p.agent} what to change (it will show you a new card), or ${link(pr.readyAppUrl).replace("Open", "edit it")}.`
         : `To change the wording, tell ${p.agent} what to change and it will show you a new card.`)
@@ -239,8 +252,8 @@ export class GatewayActions {
       body: lines.join("\n"),
       fields: fields.slice(0, 20),
       buttons: state === "ask" ? [
-        { customId: gwCustomId("confirm", p.id), label: "Confirm", style: "success", emoji: "✅" },
-        { customId: gwCustomId("cancel", p.id), label: "Cancel", style: "secondary" },
+        ...(hidden ? [] : [{ customId: gwCustomId("confirm", p.id), label: "Confirm", style: "success" as const, emoji: "✅" }]),
+        { customId: gwCustomId("cancel", p.id), label: "Cancel", style: "secondary" as const },
       ] : [],
       ...(state === "ask" ? { footer: "Only you can confirm this. It also appears in your ReadyApp messages." } : {}),
     }
@@ -321,6 +334,9 @@ export class GatewayActions {
       expiresAt: Number.isFinite(exp) ? exp : this.now() + 15 * 60_000, state: "open",
     })
     this.audit({ action: "propose", target: req.action, agent: req.agent, userId, outcome: "pending", detail: { ...safe, cardId: proposal.cardId, external: !!proposal.external } })
+    if (previewWithheld(proposal)) {
+      return `(proposed, but ReadyApp hid the text on the card, so the person CANNOT confirm it from Discord${req.isDM ? "" : " (the card is in their DMs)"}. NOTHING HAS BEEN SENT. Tell them exactly that, show them the full text you proposed in your reply so they can read it, and tell them to open the card's ReadyApp link to send it, or cancel the card. Do not propose it again.)`
+    }
     return `(proposed: a confirmation card is now in front of the person${req.isDM ? "" : ", in their DMs, not in this channel: say so"}. NOTHING HAS CHANGED YET. Tell them to check it and press Confirm if it is right. Do not say it is done, and do not propose it again.)`
   }
 

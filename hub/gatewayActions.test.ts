@@ -155,6 +155,29 @@ describe("propose", () => {
   })
 })
 
+describe("an outside-going card ReadyApp has hidden", () => {
+  const hiddenReply = { cardId: "c10", title: "Sensitive details: open ReadyApp.", external: true, readyAppUrl: "https://ra/x", editable: [{ field: "text" }],
+    preview: [{ label: "Recipient", value: "[email in ReadyApp]" }, { label: "Reply", value: "Sensitive details: open ReadyApp." }] }
+  test("has no Confirm button and says why", async () => {
+    const h = rig({ propose: () => hiddenReply })
+    const out = await h.propose()
+    const card = h.cards[0]!.card
+    expect(card.buttons.map(b => b.label)).toEqual(["Cancel"])
+    expect(card.body).toContain("cannot be confirmed from Discord")
+    expect(card.body).toContain("(https://ra/x)")
+    expect(card.body).not.toContain("To change the wording")
+    expect(out).toContain("CANNOT confirm it from Discord")
+  })
+  test("a readable outside-going card, and a hidden internal one, keep Confirm", async () => {
+    const a = rig({ propose: () => ({ ...hiddenReply, title: "Reply to Lee", preview: [{ label: "Reply", value: "Hi Lee, 12pm works." }] }) })
+    await a.propose()
+    expect(a.cards[0]!.card.buttons.map(b => b.label)).toEqual(["Confirm", "Cancel"])
+    const b = rig({ propose: () => ({ ...hiddenReply, external: false }) })
+    await b.propose()
+    expect(b.cards[0]!.card.buttons.map(b => b.label)).toEqual(["Confirm", "Cancel"])
+  })
+})
+
 describe("how a card reads", () => {
   test("no 'Target: You', readable labels, and a new value is not shown twice", async () => {
     const h = rig({ propose: () => ({ cardId: "c2", title: "Create My Day task: You", preview: [{ label: "Target", value: "You" }, { label: "title", value: "test from discord" }, { label: "dueAt", value: "Fri" }], changes: [{ field: "title", before: null, after: "test from discord" }, { field: "stage", before: "Open", after: "Closed" }, { field: "notes", before: null, after: "n" }], warnings: [], editable: [], readyAppUrl: "https://ra/m" }) })
