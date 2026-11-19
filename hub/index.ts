@@ -1,5 +1,5 @@
 import { join, dirname } from "path"
-import { unlinkSync, appendFileSync, mkdirSync, readFileSync, writeFileSync, existsSync, statSync, renameSync, readdirSync, rmSync } from "fs"
+import { copyFileSync, unlinkSync, appendFileSync, mkdirSync, readFileSync, writeFileSync, existsSync, statSync, renameSync, readdirSync, rmSync } from "fs"
 import { config as loadEnv } from "./env"
 import { createDiscordRuntime, loadConfigs, resolveDiscordStartup } from "./config"
 import { escalatedRuntime, countErrors, RateCap } from "./escalation"
@@ -56,7 +56,8 @@ import { QdrantIndex } from "./memory/qdrantIndex"
 import { MemoryRetriever } from "./memory/retriever"
 import { AccessStore } from "./memory/accessStore"
 import { Gardener } from "./memory/gardener"
-import { runLearner, renderReport } from "./learnerDiagnose"
+import { runLearner } from "./learnerDiagnose"
+import { LEARNER_PREFIX, LearnerCards } from "./learnerCards"
 import { distill } from "./memory/distiller"
 import { Overseer } from "./overseer"
 import { SessionGovernor } from "./sessionGovernor"
@@ -2266,6 +2267,8 @@ if (discordGateway) gateway.setButtonAuthorizer((customId, uid, channelId, isDM)
   // A proposed change belongs to the person it is for, wherever the card was shown.
   if (customId.startsWith(ACTION_PREFIX)) return speakerActions?.ownedBy(customId, uid) ?? false
   if (customId.startsWith(GW_ACTION_PREFIX)) return raGateway?.ownedBy(customId, uid) ?? false
+  // A Learner proposal: only an approver for that agent, wherever the card is.
+  if (customId.startsWith(LEARNER_PREFIX)) return learnerCards?.mayPress(customId, uid) ?? false
   if (!parseAccessCustomId(customId)) return undefined
   if (isDM) return undefined
   return baseGate.gate(uid, channelId, false, Date.now()).action === "deliver"
@@ -2358,6 +2361,9 @@ if (discordGateway) gateway.onNotifyButton((customId, userId) => {
   }
   if (customId.startsWith(GW_ACTION_PREFIX)) {
     return raGateway ? raGateway.click(customId, userId) : "ReadyApp actions are switched off."
+  }
+  if (customId.startsWith(LEARNER_PREFIX)) {
+    return learnerCards ? learnerCards.click(customId, userId) : "The Learner is switched off."
   }
   // "Share to the channel" under a private answer: only its owner, only once. The answer
   // is posted where they originally asked, attributed to them as the one who shared it.
@@ -2585,8 +2591,30 @@ if (garden.enabled) {
 // Periodic learner: what went wrong since the last pass, why, and what to change.
 // Proposals only. It writes <stateDir>/learner/*.md|json and posts the report; a
 // person decides. Nothing here edits a prompt or an allow list.
+let learnerCards: LearnerCards | undefined
 if (hub.learner?.enabled) {
   const lc = hub.learner
+  learnerCards = new LearnerCards({
+    storePath: join(hub.stateDir, "learner", "pending.json"),
+    sendCard: (chatId, card) => gateway.sendCard(chatId, card),
+    editCard: (chatId, messageId, card) => gateway.editCard(chatId, messageId, card),
+    approversFor: (agent) => lc.approvers ?? agents[agent]?.access.owners ?? hub.accessRequests?.approvers ?? [],
+    audit: (e) => audit.record({ kind: "exec", actor: `user:${e.userId}`, action: e.action, target: e.agent, outcome: e.outcome as "ok" | "error", detail: e.detail }),
+    // Adds to the instructions on disk (previous file kept beside it) and in memory.
+    applyPromptEdit: (agent, text) => {
+      try {
+        const registry = readAgentsJson() as unknown as Record<string, { runtime?: { appendSystemPrompt?: string } }>
+        const entry = registry[agent]
+        if (!entry?.runtime || !agents[agent]) return "no such agent"
+        const next = `${entry.runtime.appendSystemPrompt ?? ""}${entry.runtime.appendSystemPrompt ? " " : ""}${text}`
+        copyFileSync(AGENTS_JSON_PATH, `${AGENTS_JSON_PATH}.bak-learner-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "")}`)
+        entry.runtime.appendSystemPrompt = next
+        writeAgentsJson(registry as unknown as AgentRegistry)
+        agents[agent]!.runtime.appendSystemPrompt = `${agents[agent]!.runtime.appendSystemPrompt ?? ""} ${text}`.trim()
+        return undefined
+      } catch (e) { return String(e) }
+    },
+  })
   const every = lc.intervalMs ?? 24 * 60 * 60_000
   const learnerRunner = makeRouterRunner()
   const runLearn = () => runLearner({
@@ -2604,13 +2632,10 @@ if (hub.learner?.enabled) {
     process.stderr.write(`learner: misses=${total} proposals=${r.proposals.length} failed=${r.failed.length}\n`)
     const channel = lc.channelId ?? hub.statusChannelId
     if (!channel) return
-    const text = renderReport(r).replace(/^# .*\n\n/, "")
-    await gateway.sendCard(channel, {
-      title: "🎓 Learner report", fields: [], buttons: [],
-      body: text.length > 3800 ? `${text.slice(0, 3800)}…\n(full report: learner/latest.md on the hub)` : text,
-    })
+    await learnerCards!.post(channel, r)
   }).catch((e) => process.stderr.write(`learner: ${e}\n`))
   setInterval(() => void runLearn(), every).unref()
+  if (lc.firstRunMs !== undefined) setTimeout(() => void runLearn(), Math.max(0, lc.firstRunMs)).unref()
 }
 
 const orchestrator = new Orchestrator(hub, agents, {

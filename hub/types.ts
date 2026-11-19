@@ -816,6 +816,8 @@ export interface LearnerConfig {
   model?: string                 // diagnosis model (default: hub.routerModel)
   channelId?: string             // where to post the report (default: statusChannelId; none ⇒ file only)
   slowMs?: number                // a turn at least this long counts as a miss (default 45s)
+  firstRunMs?: number            // also run once this long after startup (default: wait a full interval)
+  approvers?: string[]           // who may approve a proposed prompt change (default: the agent's owners, then accessRequests.approvers)
 }
 
 export interface GardenerConfig {
