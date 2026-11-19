@@ -74,3 +74,15 @@ test("runLearner writes nothing when there were no misses", async () => {
   expect(report.findings).toEqual([])
   expect(existsSync(join(dir, "learner"))).toBe(false)
 })
+
+test("a tool the agent already has is dropped, and misses before notBefore are ignored", async () => {
+  const run = async () => '{"proposals":[{"type":"allow_tool","summary":"Allow sessionfit","tool":"sessionfit"},{"type":"allow_tool","summary":"Allow rota","tool":"rota"}]}'
+  const got = await diagnoseAgent("A", [miss], { reads: ["sessionfit"] }, run, "m")
+  expect(got!.map(p => p.tool)).toEqual(["rota"])
+
+  const dir = mkdtempSync(join(tmpdir(), "learner-"))
+  writeFileSync(join(dir, "audit.jsonl"), JSON.stringify({ ts: T, kind: "access", actor: "user:u1", action: "readyapp.read", outcome: "deny", target: "finance", detail: { agent: "A", reason: "not_in_agent_scope" } }) + "\n")
+  const base = { stateDir: dir, model: "m", now: () => T + 1000, contextFor: () => ({}), run, write: false, opts: { since: 0 } }
+  expect((await runLearner(base)).findings).toHaveLength(1)
+  expect((await runLearner({ ...base, notBefore: () => T + 1 })).findings).toEqual([])
+})

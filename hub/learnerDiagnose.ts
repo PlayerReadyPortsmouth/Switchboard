@@ -48,6 +48,8 @@ export function buildDiagnosePrompt(agent: string, misses: Miss[], ctx: AgentCon
     "readyapp_fix: the tool call errored, or returned hidden or cut-short content that blocked a reasonable answer. " +
     "no_change: the agent was right to say no, or the miss is a false alarm (for example a good answer that merely " +
     "contains the words \"I can't\"). " +
+    "Before proposing a prompt_edit, read the agent's current instructions: if they already say it, do NOT propose it " +
+    "again; use no_change and say the rule is already there. Never propose allow_tool for a tool already on the allow list. " +
     "Group misses with one cause into ONE proposal and set `evidence` to how many it covers. At most 6 proposals. " +
     "Never propose anything that weakens a safety rule, widens who can see pay, safeguarding or HR records, or lets " +
     "the agent send or change something without the person confirming. Plain English, no jargon."
@@ -90,7 +92,11 @@ export async function diagnoseAgent(agent: string, misses: Miss[], ctx: AgentCon
   const { system, user } = buildDiagnosePrompt(agent, misses, ctx)
   try {
     const out = await run(["-p", "--model", model, "--append-system-prompt", system, "--output-format", "text"], user)
-    return parseDiagnosis(agent, out)
+    const parsed = parseDiagnosis(agent, out)
+    if (!parsed) return null
+    // Belt and braces: a tool the agent already has is not a proposal.
+    const have = new Set([...(ctx.reads ?? []), ...(ctx.actions ?? [])])
+    return parsed.filter(p => !(p.type === "allow_tool" && p.tool && have.has(p.tool)))
   } catch { return null }
 }
 
@@ -129,12 +135,15 @@ export interface RunLearnerDeps {
   contextFor: (agent: string) => AgentContext | undefined   // undefined ⇒ not one of our agents, skip the model
   run: ClaudeRunner; model: string
   now?: () => number; opts?: LearnerOptions; write?: boolean
+  /** Ignore misses from before this time, e.g. the last change to the agents' instructions:
+   *  a miss the prompt has since been changed to fix is not evidence for changing it again. */
+  notBefore?: () => number
 }
 
 /** One full pass: collect, diagnose per agent, write the report. Read-only apart from its own report files. */
 export async function runLearner(d: RunLearnerDeps): Promise<LearnerReport> {
   const now = d.now?.() ?? Date.now()
-  const since = d.opts?.since ?? now - 24 * 3600_000
+  const since = Math.max(d.opts?.since ?? now - 24 * 3600_000, d.notBefore?.() ?? 0)
   const misses = collectFromStateDir(d.stateDir, { ...d.opts, since })
   const findings = summariseMisses(misses)
   const proposals: Proposal[] = [], failed: string[] = []

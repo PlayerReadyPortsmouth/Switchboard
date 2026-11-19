@@ -2620,6 +2620,7 @@ if (hub.learner?.enabled) {
   const runLearn = () => runLearner({
     stateDir: hub.stateDir, run: learnerRunner, model: lc.model ?? hub.routerModel,
     opts: { since: Date.now() - (lc.lookbackMs ?? every), slowMs: lc.slowMs },
+    notBefore: () => { try { return statSync(AGENTS_JSON_PATH).mtimeMs } catch { return 0 } },
     contextFor: (name) => {
       const a = agents[name]
       if (!a) return undefined
