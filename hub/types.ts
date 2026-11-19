@@ -181,6 +181,12 @@ export interface AgentRuntime {
   pool?: PoolPolicy          // opt-in replica auto-scaling for a hot persistent agent
   speakerData?: string[]     // names from hub.speakerData.tools this agent may call via my_data
   speakerActions?: string[]  // names from hub.speakerData.actions this agent may PROPOSE via my_action
+  /** This agent reads and proposes through hub.readyAppGateway (ReadyApp decides what each
+   *  person may do). Takes the place of speakerData/speakerActions for this agent.
+   *  `true` = every tool the person has. An object narrows it to THIS agent's lists
+   *  (see AgentScope in gatewayActions.ts): the hub hides and refuses anything else
+   *  before ReadyApp is called. It can only narrow what ReadyApp allows, never widen it. */
+  readyApp?: boolean | import("./gatewayActions").AgentScope
   audit?: boolean            // per-agent audit opt-out: false ⇒ skip this agent's events even when hub audit is on
   envPassthrough?: string[]  // hub env vars this agent inherits; ["*"] / absent = all (previous behaviour)
   envFile?: string           // KEY=value file read for this agent alone (~ expanded)
@@ -309,6 +315,10 @@ export interface TurnProgressConfig {
   bigChars?: number
   /** Stop waiting on an unfinished turn after this long (default 900000 = 15 min). */
   maxMs?: number
+  /** Tell a person their message is queued behind someone else's request (default false). */
+  busyNotice?: boolean
+  /** Post a "still working" note once a turn has run this long with nothing shown (0 = never). */
+  slowMs?: number
 }
 
 export interface TypingIndicatorConfig {
@@ -403,6 +413,12 @@ export interface HubConfig {
   /** Speaker-scoped data tools: the hub fetches "my tickets" etc. for whoever is speaking,
    *  with its own key; the agent holds none (default OFF). See hub/speakerData.ts. */
   speakerData?: import("./speakerData").SpeakerDataConfig
+  /** ReadyApp's hub gateway: reads and confirm-first actions for the person speaking, with
+   *  ReadyApp owning the rules (default OFF). See hub/gatewayActions.ts. */
+  readyAppGateway?: import("./gatewayActions").ReadyAppGatewayConfig
+  /** Public / sensitive / confidential channels, deciding whether a records answer may be
+   *  posted where it was asked or must go by DM. See hub/channelLevels.ts. */
+  channelLevels?: import("./channelLevels").ChannelLevelsConfig
   threadAgents?: ThreadAgentsConfig; // per-thread dedicated agent instances (default off)
   // Memory & context (all optional; sensible defaults applied in index.ts).
   memoryDir?: string             // Obsidian-style note vault root (default <stateDir>/memory)

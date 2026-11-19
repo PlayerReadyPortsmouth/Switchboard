@@ -17,7 +17,7 @@
  *  Metadata only, like the rest of the ledger: never the message or the answer. */
 import type { AuditInput, TurnUsage } from "./types"
 
-interface Open { tools: Map<string, number>; consulted: string[]; data: string[] }
+interface Open { tools: Map<string, number>; consulted: string[]; data: string[]; ra?: { calls: number; tokensIn: number; tokensOut: number } }
 
 export interface TurnClose {
   /** Process key (agent name, or a replica / clone key). */
@@ -56,9 +56,16 @@ export class TurnLedger {
   /** The process fetched speaker-scoped records during its current turn. */
   data(key: string, tool: string): void { this.get(key).data.push(tool) }
 
+  /** ReadyApp generated a summary for a read in this turn, and said what it used. */
+  readyApp(key: string, u: { tokensIn: number; tokensOut: number }): void {
+    const o = this.get(key)
+    const ra = o.ra ??= { calls: 0, tokensIn: 0, tokensOut: 0 }
+    ra.calls++; ra.tokensIn += u.tokensIn; ra.tokensOut += u.tokensOut
+  }
+
   /** The turn's reply has arrived: build its ledger record and reset for the next turn. */
   close(c: TurnClose): AuditInput {
-    const o = this.open.get(c.key) ?? { tools: new Map(), consulted: [], data: [] }
+    const o: Open = this.open.get(c.key) ?? { tools: new Map(), consulted: [], data: [] }
     this.open.delete(c.key)
 
     // The CLI reports cumulative session cost. A drop means a fresh session, so the
@@ -95,6 +102,7 @@ export class TurnLedger {
     if (o.tools.size) detail.tools = Object.fromEntries(o.tools)
     if (o.consulted.length) detail.consulted = o.consulted
     if (o.data.length) detail.data = o.data
+    if (o.ra) { detail.raSummaries = o.ra.calls; detail.raTokensIn = o.ra.tokensIn; detail.raTokensOut = o.ra.tokensOut }
     const began = c.speakers.map(s => s.at).filter((x): x is number => typeof x === "number")
     const ms = c.usage?.durationMs ?? (began.length ? this.now() - Math.min(...began) : undefined)
     if (ms !== undefined) detail.ms = Math.round(ms)
@@ -112,13 +120,20 @@ export class TurnLedger {
 
 export interface TurnRow { actor: string; target?: string; cost?: number; detail?: Record<string, unknown> }
 
-interface Tally { turns: number; cost: number; tokensIn: number; tokensOut: number }
+/** The ra* fields appear only once a turn in the tally used a ReadyApp summary. */
+interface Tally { turns: number; cost: number; tokensIn: number; tokensOut: number; raSummaries?: number; raTokensIn?: number; raTokensOut?: number }
 const blank = (): Tally => ({ turns: 0, cost: 0, tokensIn: 0, tokensOut: 0 })
 const add = (t: Tally, r: TurnRow): void => {
   t.turns++
   t.cost += r.cost ?? 0
   t.tokensIn += Number(r.detail?.tokensIn ?? 0) + Number(r.detail?.tokensCacheRead ?? 0) + Number(r.detail?.tokensCacheWrite ?? 0)
   t.tokensOut += Number(r.detail?.tokensOut ?? 0)
+  const ra = Number(r.detail?.raSummaries ?? 0)
+  if (ra > 0) {
+    t.raSummaries = (t.raSummaries ?? 0) + ra
+    t.raTokensIn = (t.raTokensIn ?? 0) + Number(r.detail?.raTokensIn ?? 0)
+    t.raTokensOut = (t.raTokensOut ?? 0) + Number(r.detail?.raTokensOut ?? 0)
+  }
   t.cost = Math.round(t.cost * 1e6) / 1e6   // keep sums of small floats readable
 }
 
@@ -156,6 +171,12 @@ export function renderUsage(rows: TurnRow[], label: string): string {
     ...sorted(byPerson).map(([a, t]) => line(who(a), t)),
     "**By agent**",
     ...sorted(byAgent).map(([a, t]) => line(a, t)),
+    // ReadyApp's own summaries: token counts as it reported them. No price is given, so
+    // none is shown and they are not in the dollar figures above.
+    ...(total.raSummaries ? [
+      `**ReadyApp summaries** (tokens only, not in the cost above): ${total.raSummaries}, ${k(total.raTokensIn ?? 0)} in / ${k(total.raTokensOut ?? 0)} out`,
+      ...sorted(byPerson).filter(([, t]) => t.raSummaries).map(([a, t]) => `${who(a)}: ${t.raSummaries}, ${k(t.raTokensIn ?? 0)} in / ${k(t.raTokensOut ?? 0)} out`),
+    ] : []),
   ].join("\n")
 }
 

@@ -45,6 +45,12 @@ export interface TurnProgressOptions {
   maxMs?: number
   /** Most progress lines kept on the holding reply (oldest dropped). Default 8. */
   maxLines?: number
+  /** Tell a person their message is queued when the agent is busy with someone else's
+   *  request. Default false. */
+  busyNotice?: boolean
+  /** Post a "still working" note when a turn with no holding reply has run this long.
+   *  0 or absent ⇒ never. */
+  slowMs?: number
 }
 
 interface Turn {
@@ -57,6 +63,10 @@ interface Turn {
   /** Serialises edits so a slow edit can never overwrite a newer one. */
   chain: Promise<void>
   done: boolean
+  /** Which opening line the holding message carries. */
+  intro: string
+  /** True once a holding message has been (or is being) posted for this turn. */
+  held: boolean
 }
 
 /** A real Discord location. Virtual channels ("consult:c3", mission channels) are not
@@ -69,7 +79,14 @@ export const HOLDING_INTRO =
   "⏳ On it. This looks like a big one, so there may be a quiet spell while I work. " +
   "I'll keep this message updated."
 
+export const BUSY_INTRO = (ahead: number): string =>
+  `⏳ I'm on another request at the moment. Yours is ${ahead === 1 ? "next" : `queued, ${ahead} ahead of it`}; I'll answer here as soon as I'm free.`
+export const SLOW_INTRO =
+  "⏳ Still working on this. It's taking longer than usual; I'll post the answer here when it's done."
+
 export class TurnProgress {
+  private readonly busyNotice: boolean
+  private readonly slowMs: number
   private readonly byAgent = new Map<string, Turn[]>()
   private readonly holdingReply: boolean
   private readonly maxMs: number
@@ -81,6 +98,8 @@ export class TurnProgress {
     this.holdingReply = options.holdingReply ?? true
     this.maxMs = options.maxMs ?? 15 * 60_000
     this.maxLines = options.maxLines ?? 8
+    this.busyNotice = options.busyNotice === true
+    this.slowMs = options.slowMs && options.slowMs > 0 ? options.slowMs : 0
     this.now = deps.now ?? (() => Date.now())
     this.clock = deps.clock ?? ((ts) => new Date(ts).toLocaleTimeString("en-GB", {
       hour: "2-digit", minute: "2-digit", timeZone: "Europe/London",
@@ -88,17 +107,23 @@ export class TurnProgress {
   }
 
   /** A turn has been dispatched to `agent` for `chatId`. */
-  begin(chatId: string, agent: string, opts: { big?: boolean } = {}): void {
+  begin(chatId: string, agent: string, opts: { big?: boolean; capacity?: number } = {}): void {
     if (!isRealChat(chatId)) return
     try { this.deps.typing?.start(chatId) } catch {}
     const turn: Turn = {
       chatId, agent, startedAt: this.now(), lines: [], chain: Promise.resolve(), done: false,
-      holding: Promise.resolve(undefined),
-    }
-    if (opts.big && this.holdingReply) {
-      turn.holding = this.deps.post(chatId, this.render(turn)).catch(() => undefined)
+      holding: Promise.resolve(undefined), intro: HOLDING_INTRO, held: false,
     }
     const list = this.byAgent.get(agent) ?? []
+    // Busy: every worker this agent has is already on a turn, so this one will wait. Say so,
+    // unless the wait is behind the same chat's own earlier message (they can see that).
+    const running = list.filter(t => !t.done)
+    const ahead = running.length - Math.max(1, opts.capacity ?? 1) + 1
+    if (this.busyNotice && ahead > 0 && running.some(t => t.chatId !== chatId)) turn.intro = BUSY_INTRO(ahead)
+    if ((opts.big && this.holdingReply) || turn.intro !== HOLDING_INTRO) {
+      turn.held = true
+      turn.holding = this.deps.post(chatId, this.render(turn)).catch(() => undefined)
+    }
     list.push(turn)
     this.byAgent.set(agent, list)
   }
@@ -141,6 +166,12 @@ export class TurnProgress {
     for (const [agent, list] of [...this.byAgent]) {
       const keep: Turn[] = []
       for (const turn of list) {
+        // Slow: a turn nobody expected to be big has run long with nothing on screen.
+        if (this.slowMs && !turn.held && !turn.done && turn.startedAt > cutoff && this.now() - turn.startedAt >= this.slowMs) {
+          turn.held = true
+          turn.intro = SLOW_INTRO
+          turn.holding = this.deps.post(turn.chatId, this.render(turn)).catch(() => undefined)
+        }
         if (turn.startedAt > cutoff) { keep.push(turn); continue }
         turn.done = true
         closed++
@@ -175,7 +206,7 @@ export class TurnProgress {
 
   private render(turn: Turn): string {
     const body = turn.lines.length ? `\n${turn.lines.join("\n")}` : ""
-    return `${this.deps.tag(turn.agent)}${HOLDING_INTRO}${body}`
+    return `${this.deps.tag(turn.agent)}${turn.intro}${body}`
   }
 
   private queueEdit(turn: Turn): void {

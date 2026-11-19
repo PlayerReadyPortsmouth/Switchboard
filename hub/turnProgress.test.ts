@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { HOLDING_INTRO, TurnProgress, isRealChat, looksBig } from "./turnProgress"
+import { BUSY_INTRO, HOLDING_INTRO, SLOW_INTRO, TurnProgress, isRealChat, looksBig } from "./turnProgress"
 
 const CHAT = "1521490913413824563"
 const OTHER = "1572534896629653554"
@@ -170,5 +170,51 @@ describe("TurnProgress", () => {
     tp.note("Bill", "x")
     await tp.finish(CHAT, "Bill")
     expect(log).toEqual([])
+  })
+})
+
+describe("busy and slow notices", () => {
+  test("a message queued behind someone else's turn is told it is next, and the note goes when answered", async () => {
+    const h = harness({ busyNotice: true })
+    h.tp.begin(CHAT, "Bill")
+    h.tp.begin(OTHER, "Bill")
+    await settle()
+    expect([...h.messages.values()]).toEqual([`**Bill** · ${BUSY_INTRO(1)}`])
+    await h.tp.finish(CHAT, "Bill")
+    await h.tp.finish(OTHER, "Bill")
+    expect(h.messages.size).toBe(0)
+  })
+  test("no busy note while the agent still has a free worker, or when the feature is off", async () => {
+    const h = harness({ busyNotice: true })
+    h.tp.begin(CHAT, "Assistant", { capacity: 3 })
+    h.tp.begin(OTHER, "Assistant", { capacity: 3 })
+    await settle()
+    expect(h.messages.size).toBe(0)
+    const off = harness()
+    off.tp.begin(CHAT, "Bill"); off.tp.begin(OTHER, "Bill")
+    await settle()
+    expect(off.messages.size).toBe(0)
+  })
+  test("no busy note behind the same chat's own earlier message", async () => {
+    const h = harness({ busyNotice: true })
+    h.tp.begin(CHAT, "Bill"); h.tp.begin(CHAT, "Bill")
+    await settle()
+    expect(h.messages.size).toBe(0)
+  })
+  test("a turn that runs long gets one still-working note, removed when the answer lands", async () => {
+    const h = harness({ slowMs: 45_000 })
+    h.tp.begin(CHAT, "Bill")
+    h.advance(30_000); h.tp.sweep(); await settle()
+    expect(h.messages.size).toBe(0)
+    h.advance(30_000); h.tp.sweep(); h.tp.sweep(); await settle()
+    expect([...h.messages.values()]).toEqual([`**Bill** · ${SLOW_INTRO}`])
+    await h.tp.finish(CHAT, "Bill")
+    expect(h.messages.size).toBe(0)
+  })
+  test("a big turn keeps its own holding reply and gets no second note", async () => {
+    const h = harness({ slowMs: 45_000 })
+    h.tp.begin(CHAT, "Bill", { big: true })
+    h.advance(60_000); h.tp.sweep(); await settle()
+    expect([...h.messages.values()]).toEqual([`**Bill** · ${HOLDING_INTRO}`])
   })
 })

@@ -89,6 +89,9 @@ import { PendingShares, PrivateReplies, SHARE_PREFIX, runSpeakerData, toolsFor }
 import { AssistantNames, displayName } from "./assistantNames"
 import { TurnLedger, parseUsageCommand, renderUsage } from "./turnLedger"
 import { ACTION_PREFIX, SpeakerActions, actionsFor } from "./speakerActions"
+import { GW_ACTION_PREFIX, GatewayActions, agentScope, scopeAllows } from "./gatewayActions"
+import { mustGoPrivate } from "./channelLevels"
+import { HubGatewayClient } from "./hubGateway"
 import { formatOutbound } from "./format"
 import { resolveFederation, isRemoteTarget, consultRemote, startFederationListener } from "./federation"
 import { MissionRegistry, findWorkflow, renderStepPrompt, renderMissionCard, type MissionRun } from "./workflow"
@@ -637,6 +640,16 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): ProcessAgen
   // now. `getLastChatId()` is exact per process, so a pooled replica is matched to its own
   // turn; if the hub still cannot name exactly one person, runSpeakerData refuses.
   socket.onMyAction(async ({ action, params }) => {
+    if (raGateway && cfg.runtime.readyApp && turnSpeakers) {
+      const chat = transports.get(key)?.getLastChatId() || undefined
+      turnLedger.data(key, `propose:${action}`)
+      const real = chat && /^\d{5,}$/.test(chat) ? chat : undefined
+      return raGateway.propose({
+        agent: name, action, params, chatId: real, isDM: !!real && dmChats.has(real),
+        scope: agentScope(cfg.runtime.readyApp) ?? undefined,
+        people: chat ? turnSpeakers.behind(name, chat) : [],
+      })
+    }
     if (!speakerActions || !turnSpeakers) return "(unavailable: actions are not switched on. Nothing was proposed or changed.)"
     const chat = transports.get(key)?.getLastChatId() || undefined
     turnLedger.data(key, `propose:${action}`)
@@ -647,7 +660,16 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): ProcessAgen
       people: chat ? turnSpeakers.behind(name, chat) : [],
     })
   })
-  socket.onMyData(async ({ tool, query }) => {
+  socket.onMyData(async ({ tool, query, recordId, params }) => {
+    if (raGateway && cfg.runtime.readyApp && turnSpeakers) {
+      const chat = transports.get(key)?.getLastChatId() || undefined
+      return raGateway.read({
+        agent: name, tool, query, recordId, params,
+        scope: agentScope(cfg.runtime.readyApp) ?? undefined,
+        people: chat ? turnSpeakers.behind(name, chat) : [],
+        onFetched: (userId, usage) => { turnLedger.data(key, tool); if (usage) turnLedger.readyApp(key, usage); if (chat && !dmChats.has(chat) && mustGoPrivate(hub.channelLevels, { channelId: chat, parentId: threadParents.get(chat), tool, detail: !!recordId })) privateReplies?.mark(name, chat, userId) },
+      })
+    }
     if (!hub.speakerData?.enabled || !turnSpeakers) return "(unavailable: data tools are not switched on.)"
     const chat = transports.get(key)?.getLastChatId() || undefined
     return runSpeakerData(hub.speakerData, {
@@ -853,8 +875,13 @@ function makeTransport(name: string, key: string, cfg: AgentConfig): ProcessAgen
     resumable: cfg.runtime.resumable === true,
     sessionPath: sessionPathFor(hub.stateDir, key, provider),
     consultEnabled: !!hub.consult?.enabled,
-    speakerDataTools: toolsFor(hub.speakerData, cfg.runtime.speakerData),
-    speakerActions: hub.speakerData?.enabled ? actionsFor(hub.speakerData.actions, cfg.runtime.speakerActions) : [],
+    speakerDataTools: raGateway && cfg.runtime.readyApp
+      ? [{ name: "catalog", description: "what THIS person can read and do in ReadyApp through you; call it before your first read or action in a conversation" },
+         ...(hub.readyAppGateway?.reads ?? []).filter(n => scopeAllows(agentScope(cfg.runtime.readyApp) ?? undefined, "reads", n)).map(n => ({ name: n, description: RA_READS[n] ?? "see the catalog" }))]
+      : toolsFor(hub.speakerData, cfg.runtime.speakerData),
+    speakerActions: raGateway && cfg.runtime.readyApp
+      ? [{ name: "*", description: "per person, from the catalog", params: {}, required: [] }]
+      : hub.speakerData?.enabled ? actionsFor(hub.speakerData.actions, cfg.runtime.speakerActions) : [],
     attachEnabled: !!hub.outboundAttachments?.enabled,
     publishEnabled: shareLinksOn,
     peeringEnabled: peeringOn,
@@ -1116,7 +1143,7 @@ const accessRequests = hub.accessRequests?.enabled && discordEnabled
 // Who each agent's current turn is for, so a consult can be checked against the person
 // and not only the agent. Off unless consult.enforceCallerAccess.
 // Answers built from a person's own records go to them by DM, not into a shared channel.
-const privateReplies = hub.speakerData?.enabled && hub.speakerData.privateReplies !== false && discordEnabled
+const privateReplies = ((hub.speakerData?.enabled && hub.speakerData.privateReplies !== false) || hub.readyAppGateway?.enabled) && discordEnabled
   ? new PrivateReplies()
   : undefined
 // Speaker-scoped actions: an agent proposes a change to the speaker's own records, the
@@ -1137,6 +1164,41 @@ const speakerActions = hub.speakerData?.enabled && hub.speakerData.actions && Ob
       }),
     })
   : undefined
+/** What each ReadyApp read returns, as the agent is told. ReadyApp decides who may use which. */
+const RA_READS: Record<string, string> = {
+  tickets: "the person's tickets; query narrows them",
+  deals: "the person's deals; query narrows them",
+  contacts: "contacts the person can reach; query is a name",
+  callbacks: "the person's callbacks",
+  myday: "the person's My Day items",
+  sessions: "the person's sessions over the next seven days (read only)",
+  resolve: "find a record by free text and get its type and id; query is REQUIRED",
+}
+// ReadyApp's hub gateway: reads and confirm-first actions for the person speaking. ReadyApp
+// owns what each person may do, the preview and the write; the hub signs, shows and relays.
+const raGateway = hub.readyAppGateway?.enabled && discordEnabled
+  ? new GatewayActions(hub.readyAppGateway, {
+      client: new HubGatewayClient(hub.readyAppGateway, {
+        fetch: (url, init) => fetch(url, init),
+        secret: (env) => process.env[env],
+        linkUrl: hub.readyAppGateway.linkUrl,
+        onSkew: (hubNow, serverTime) => process.stderr.write(`readyapp gateway: clock skew, server - hub = ${serverTime - hubNow} ms\n`),
+      }),
+      sendCard: (chatId, card) => gateway.sendCard(chatId, card),
+      sendCardDM: (userId, card) => gateway.sendCardDM(userId, card),
+      editCard: (chatId, id, card) => gateway.editCard(chatId, id, card),
+      notify: (chatId, text) => gateway.sendPlain(chatId, text),
+      agentEmoji: (agent) => agents[agent]?.emoji ?? "",
+      audit: (e) => audit.record({
+        kind: e.action === "read" || e.action === "catalog" ? "access" : "exec",
+        actor: e.userId ? `user:${e.userId}` : `agent:${e.agent}`, action: `readyapp.${e.action}`, target: e.target, outcome: e.outcome,
+        detail: { agent: e.agent, ...(e.detail ?? {}) },
+      }),
+    })
+  : undefined
+if (raGateway && (hub.readyAppGateway?.pollMs ?? 20_000) > 0) {
+  setInterval(() => { if (raGateway.openCount()) void raGateway.poll().catch(() => {}) }, hub.readyAppGateway?.pollMs ?? 20_000).unref()
+}
 /** One `turn` ledger record per agent turn: who asked, which agent, tools, tokens, cost. */
 const turnLedger = new TurnLedger()
 /** People's own names for agents marked `access.nameable` (`!name Jeeves`). */
@@ -1154,8 +1216,10 @@ const replyDisplayName = (agent: string, chatId: string): string | undefined => 
 const pendingShares = new PendingShares()
 /** Chats known to be DMs: an answer there is already private. */
 const dmChats = new Set<string>()
+/** Thread id → its parent channel, so a thread takes its parent's channel level. */
+const threadParents = new Map<string, string>()
 // Also needed by speaker-scoped data tools, which must know who a turn is for.
-const turnSpeakers = (hub.consult?.enabled && hub.consult.enforceCallerAccess) || hub.speakerData?.enabled
+const turnSpeakers = (hub.consult?.enabled && hub.consult.enforceCallerAccess) || hub.speakerData?.enabled || hub.readyAppGateway?.enabled
   ? new TurnSpeakers(() => Date.now())
   : undefined
 const turnProgress = hub.turnProgress?.enabled && discordEnabled
@@ -1166,7 +1230,7 @@ const turnProgress = hub.turnProgress?.enabled && discordEnabled
       typing: routedTyping,
       // The same tag a real reply carries, so the holding reply reads as that agent's.
       tag: (agent) => agents[agent] ? formatOutbound("", agents[agent], hub.tagStyle, 2000, "newline", agent)[0] ?? "" : "",
-    }, { holdingReply: hub.turnProgress.holdingReply, maxMs: hub.turnProgress.maxMs })
+    }, { holdingReply: hub.turnProgress.holdingReply, maxMs: hub.turnProgress.maxMs, busyNotice: hub.turnProgress.busyNotice, slowMs: hub.turnProgress.slowMs })
   : undefined
 if (turnProgress) setInterval(() => { turnProgress.sweep() }, 30_000).unref()
 
@@ -1602,7 +1666,7 @@ async function onAgentReply(reply: AgentReply, key: string): Promise<void | Send
   // posted in the channel as a fallback; the person is told how to get them instead.
   const privateFor = reply.kind === "reply" ? privateReplies?.take(reply.agent, reply.chatId) ?? null : null
   if (privateFor && agents[reply.agent]) {
-    const tag = formatOutbound("", agents[reply.agent], hub.tagStyle, 2000, "newline", reply.agent)[0] ?? ""
+    const tag = formatOutbound("", agents[reply.agent], hub.tagStyle, 2000, "newline", displayAs ?? reply.agent)[0] ?? ""
     const share = pendingShares.create(privateFor, reply.chatId, reply.agent, reply.text ?? "")
     const sent = await gateway.sendDMWithButtons(privateFor, `${tag}${reply.text ?? ""}`, [
       { customId: `${SHARE_PREFIX}${share.id}`, label: "Share to the channel", style: "secondary", emoji: "📣" },
@@ -1610,9 +1674,12 @@ async function onAgentReply(reply: AgentReply, key: string): Promise<void | Send
     if (sent) { share.dmChatId = sent.chatId; share.dmMessageId = sent.messageId }
     const delivered = !!sent
     audit.record({ kind: "access", actor: `agent:${reply.agent}`, action: "private_reply", outcome: delivered ? "ok" : "error", chat: reply.chatId, detail: { user: privateFor } })
-    await gateway.sendPlain(reply.chatId, delivered
-      ? `${tag}<@${privateFor}>, I've sent you that by DM, because it contains your own records. There's a button under it if you want to share it here.`
-      : `${tag}<@${privateFor}>, that answer contains your own records, so I won't post it here, and I couldn't DM you. Allow direct messages from this server, then ask again.`)
+    if (delivered) {
+      share.tag = tag
+      share.pointerMessageId = await gateway.sendPlainId(reply.chatId, `${tag}<@${privateFor}>, I've sent you that by DM, because it contains your own records. There's a button under it if you want to share it here.`).catch(() => undefined)
+    } else {
+      await gateway.sendPlain(reply.chatId, `${tag}<@${privateFor}>, that answer contains your own records, so I won't post it here, and I couldn't DM you. Allow direct messages from this server, then ask again.`)
+    }
     return
   }
   await gateway.sendReply(reply, agents[reply.agent], displayAs)
@@ -2197,6 +2264,7 @@ if (discordGateway) gateway.setButtonAuthorizer((customId, uid, channelId, isDM)
   if (customId.startsWith(SHARE_PREFIX)) return pendingShares.ownedBy(customId, uid)
   // A proposed change belongs to the person it is for, wherever the card was shown.
   if (customId.startsWith(ACTION_PREFIX)) return speakerActions?.ownedBy(customId, uid) ?? false
+  if (customId.startsWith(GW_ACTION_PREFIX)) return raGateway?.ownedBy(customId, uid) ?? false
   if (!parseAccessCustomId(customId)) return undefined
   if (isDM) return undefined
   return baseGate.gate(uid, channelId, false, Date.now()).action === "deliver"
@@ -2287,14 +2355,24 @@ if (discordGateway) gateway.onNotifyButton((customId, userId) => {
   if (customId.startsWith(ACTION_PREFIX)) {
     return speakerActions ? speakerActions.click(customId, userId) : "Actions are switched off."
   }
+  if (customId.startsWith(GW_ACTION_PREFIX)) {
+    return raGateway ? raGateway.click(customId, userId) : "ReadyApp actions are switched off."
+  }
   // "Share to the channel" under a private answer: only its owner, only once. The answer
   // is posted where they originally asked, attributed to them as the one who shared it.
   if (customId.startsWith(SHARE_PREFIX)) {
     const share = pendingShares.claim(customId, userId)
     if (typeof share === "string") return share
     void (async () => {
-      if (agents[share.agent]) {
+      // The answer takes the place of the "sent by DM" line where it fits in one message;
+      // a longer one is posted in full and the line removed, so the channel is not left
+      // saying it was sent privately next to the thing itself.
+      const inPlace = `${share.tag ?? ""}*Shared by <@${share.userId}>:*\n${share.text}`
+      if (share.pointerMessageId && inPlace.length <= 2000) {
+        await gateway.editPlain(share.chatId, share.pointerMessageId, inPlace)
+      } else if (agents[share.agent]) {
         await gateway.sendReply({ kind: "reply", agent: share.agent, chatId: share.chatId, text: `*Shared by <@${share.userId}>:*\n${share.text}` } as AgentReply, agents[share.agent])
+        if (share.pointerMessageId) await gateway.deletePlain(share.chatId, share.pointerMessageId)
       }
       if (share.dmChatId && share.dmMessageId) await gateway.clearButtons(share.dmChatId, share.dmMessageId)
       audit.record({ kind: "access", actor: `user:${share.userId}`, action: "private_reply_shared", outcome: "ok", chat: share.chatId, detail: { agent: share.agent } })
@@ -2563,6 +2641,7 @@ const orchestrator = new Orchestrator(hub, agents, {
     // What this person may use here: recorded for the consult caller check and the data
     // tools, and told to the agent so it does not offer a colleague they cannot reach.
     if (inbound.isDM) dmChats.add(inbound.chatId)
+    if (inbound.threadParentId) threadParents.set(inbound.chatId, inbound.threadParentId)
     let reach = ""
     if ((turnSpeakers || hub.consult?.enabled) && inbound.userId && inbound.userId !== "system") {
       let roles: string[] = []
@@ -2577,6 +2656,7 @@ const orchestrator = new Orchestrator(hub, agents, {
     }
     turnProgress?.begin(inbound.chatId, agent, {
       big: big ?? looksBig(inbound.content, hub.turnProgress?.bigChars),
+      capacity: agents[agent]?.runtime.pool?.max ?? 1,
     })
     // Record inbound in the trace. Attribution of this agent's tool_use/
     // tool_result records (which carry no chat id) is handled by the transport's

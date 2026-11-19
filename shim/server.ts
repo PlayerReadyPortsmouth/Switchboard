@@ -122,6 +122,8 @@ const SPEAKER_ACTIONS: { name: string; description: string; params: Record<strin
   } catch { return [] }
 })()
 /** This agent's speaker-scoped data tools, as the hub configured them. */
+/** "*" ⇒ the actions are per person and come from the catalog, not a fixed list. */
+const OPEN_ACTIONS = SPEAKER_ACTIONS.some(a => a.name === "*")
 const SPEAKER_DATA: { name: string; description: string }[] = (() => {
   try {
     const v = JSON.parse(process.env.SPEAKER_DATA ?? "[]")
@@ -250,11 +252,12 @@ const pendingAsk = new Map<string, (answer: string) => void>()
       // and only they can press it. There is no argument for whose records.
       ...(SPEAKER_ACTIONS.length ? [{
         name: "my_action",
-        description: "Propose a change to the records of the person you are talking to. This does NOT make the change: the hub shows that person a confirmation card with exactly what will happen, and only they can confirm it. After calling it, tell them to check the card and press Confirm; never say the change has been made. Actions: " +
-          SPEAKER_ACTIONS.map(a => `${a.name} (${a.description}; params: ${Object.entries(a.params).map(([k, d]) => `${k}=${d}${a.required.includes(k) ? " [required]" : ""}`).join(", ")})`).join("; ") + ".",
+        description: "Propose a change to the records of the person you are talking to. This does NOT make the change: the hub shows that person a confirmation card with exactly what will happen, and only they can confirm it. After calling it, tell them to check the card and press Confirm; never say the change has been made. " + (OPEN_ACTIONS
+          ? "The actions differ per person: call my_data with tool \"catalog\" first to see this person's actions and each one's fields. params = { target: { type, id }, payload: { the action's fields } }. A target id must come from a read (use \"resolve\" to find a record by name); never invent or reuse one from memory."
+          : "Actions: " + SPEAKER_ACTIONS.map(a => `${a.name} (${a.description}; params: ${Object.entries(a.params).map(([k, d]) => `${k}=${d}${a.required.includes(k) ? " [required]" : ""}`).join(", ")})`).join("; ") + "."),
         inputSchema: { type: "object", properties: {
-          action: { type: "string", enum: SPEAKER_ACTIONS.map(a => a.name), description: "Which action to propose." },
-          params: { type: "object", description: "The action's parameters, by the names listed for it.", additionalProperties: true } },
+          action: { type: "string", ...(OPEN_ACTIONS ? {} : { enum: SPEAKER_ACTIONS.map(a => a.name) }), description: OPEN_ACTIONS ? "The action kind, exactly as the catalog lists it." : "Which action to propose." },
+          params: { type: "object", description: OPEN_ACTIONS ? "{ target: { type, id }, payload: { ... } }" : "The action's parameters, by the names listed for it.", additionalProperties: true } },
           required: ["action", "params"] },
       }] : []),
       // my_data is exposed only when the hub gives this agent speaker-scoped data tools.
@@ -265,8 +268,12 @@ const pendingAsk = new Map<string, (answer: string) => void>()
         description: "Fetch live records belonging to the person you are talking to right now. The hub identifies that person from their message; you cannot fetch anyone else's records and must not try. Available: " +
           SPEAKER_DATA.map(t => `${t.name} (${t.description})`).join("; ") + ". Returns JSON, or a bracketed note if it could not be fetched; if so, say that plainly and do not guess.",
         inputSchema: { type: "object", properties: {
-          tool: { type: "string", enum: SPEAKER_DATA.map(t => t.name), description: "Which records to fetch." },
-          query: { type: "string", description: "Optional search text to narrow the results." } },
+          tool: { type: "string", ...(OPEN_ACTIONS ? {} : { enum: SPEAKER_DATA.map(t => t.name) }), description: OPEN_ACTIONS ? "Which records to fetch: one of those listed, or any other read the catalog lists." : "Which records to fetch." },
+          query: { type: "string", description: "Optional search text to narrow the results." },
+          ...(OPEN_ACTIONS ? {
+            id: { type: "string", description: "A record id from an earlier read, to fetch that one record in detail (where the catalog says the read supports it)." },
+            params: { type: "object", description: "Other filters the catalog lists for this read, e.g. { status: \"open\", summary: true }.", additionalProperties: true },
+          } : {}) },
           required: ["tool"] },
       }] : []),
       // ask_agent is exposed only when the hub enables inter-agent consult.
@@ -360,7 +367,7 @@ const pendingAsk = new Map<string, (answer: string) => void>()
       const id = `d${++reqCounter}`
       const answer = await new Promise<string>((resolve) => {
         pendingData.set(id, resolve)
-        sock.write(encode({ t: "my_data", id, tool: args.tool, query: args.query }))
+        sock.write(encode({ t: "my_data", id, tool: args.tool, query: args.query, recordId: args.id, params: args.params }))
         const timer = setTimeout(() => { if (pendingData.delete(id)) resolve("(unavailable: the hub did not answer in time. Say that you could not fetch it; do not guess.)") }, 30000)
         ;(timer as { unref?: () => void }).unref?.()
       })

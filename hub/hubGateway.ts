@@ -46,7 +46,7 @@ export function signRequest(
 
 export interface CatalogRead { name: string; description: string; params?: Record<string, string> }
 export interface CatalogAction {
-  kind: string; description: string; targetType?: string
+  kind: string; description: string; targetType?: string; targetTypes?: string[]; blastRadius?: string
   risk?: "auto" | "confirm"; external?: boolean
   schema?: Record<string, unknown>
 }
@@ -69,6 +69,7 @@ export interface Proposal {
 }
 
 export interface ActionResult { status: string; message?: string; url?: string }
+export interface CardStatus { cardId?: string; status: string; message?: string }
 
 /** A refusal or failure, already phrased for the person. `code` is ReadyApp's error code. */
 export class GatewayError extends Error {
@@ -93,7 +94,13 @@ export function explain(code: string, status: number, message?: string, linkUrl?
     case "not_requester": return "Only the person who asked can confirm this."
     case "card_changed": return "The record changed after this was proposed, so it wasn't applied. Ask again to see the current version."
     case "expired": return "This wasn't confirmed in time, so it has lapsed."
-    case "bad_signature": case "stale": case "unknown_client": case "replayed":
+    // ReadyApp's general login check answers for any path the gateway does not serve, so
+    // this means "no such route here", not a problem with the hub's own sign-in.
+    case "missing_token": return "ReadyApp doesn't offer that through this assistant yet."
+    case "read_disabled": return "ReadyApp has the detailed view switched off for this account."
+    case "idempotency_pending": return "ReadyApp is still working on that. Check the record before trying again."
+    case "catalog_stale": return "The list of what you can do has changed. Ask again."
+    case "bad_signature": case "stale": case "stale_timestamp": case "unknown_client": case "replayed": case "replayed_nonce":
       return "The assistant couldn't sign in to ReadyApp. An operator needs to check the hub's registration."
     default: return status >= 500 ? "ReadyApp had a problem. Nothing was changed; try again shortly."
       : `ReadyApp refused that (${code || status}).`
@@ -153,7 +160,8 @@ export class HubGatewayClient {
     const raw = await res.text()
     let json: any = undefined
     try { json = raw ? JSON.parse(raw) : undefined } catch {}
-    if (res.ok) return (json ?? {}) as T
+    // ReadyApp wraps successes as { data: ... }.
+    if (res.ok) return ((json && typeof json === "object" && "data" in json ? json.data : json) ?? {}) as T
     const code = typeof json?.error === "string" ? json.error : ""
     const serverTime = Number(res.headers?.get("x-server-time") ?? NaN)
     if (Number.isFinite(serverTime)) { try { this.deps.onSkew?.(sentAt, serverTime) } catch {} }
@@ -170,9 +178,27 @@ export class HubGatewayClient {
   }
 
   /** One of the person's reads. The identity is set here; `q` is the model's search text. */
-  read(discordId: string, name: string, q?: string, limit?: number): Promise<unknown> {
+  read(discordId: string, name: string, q?: string, limit?: number, opts: { id?: string; params?: Record<string, unknown> } = {}): Promise<unknown> {
     if (!/^[a-z][a-z0-9_.-]{0,63}$/i.test(name)) throw new GatewayError("unknown_read", 404, "ReadyApp couldn't find that.")
-    return this.call("GET", `/read/${name}`, { discordId, q: q?.slice(0, 200), limit: limit ? String(Math.min(Math.max(1, Math.floor(limit)), 50)) : undefined })
+    // One record in detail: /read/{name}/{id}. The id is a plain token, never a path.
+    if (opts.id !== undefined && !/^[A-Za-z0-9_-]{1,64}$/.test(opts.id)) throw new GatewayError("unknown_target", 404, "ReadyApp couldn't find that.")
+    // Filters the catalog lists (status, sort, summary, cursor…). Simple names and short
+    // scalar values only; the identity, search text and limit cannot be set this way.
+    // The private reply helper for one ticket: /read/tickets/{id}/reply-context. A fixed
+    // path, chosen by a fixed word; nothing the model writes becomes part of the path.
+    if (opts.params?.view === "reply-context") {
+      if (name !== "tickets" || opts.id === undefined) throw new GatewayError("unknown_read", 404, "Reply context is only available for one ticket: give the ticket's id.")
+      return this.call("GET", `/read/tickets/${opts.id}/reply-context`, { discordId })
+    }
+    const extra: Record<string, string> = {}
+    for (const [k, v] of Object.entries(opts.params ?? {}).filter(([k]) => k !== "view").slice(0, 8)) {
+      if (!/^[A-Za-z][A-Za-z0-9]{0,31}$/.test(k) || ["discordid", "q", "limit"].includes(k.toLowerCase())) continue
+      if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") extra[k] = String(v).slice(0, 200)
+    }
+    const lim = limit ?? (typeof opts.params?.limit === "number" ? opts.params.limit : undefined)
+    return this.call("GET", `/read/${name}${opts.id !== undefined ? `/${opts.id}` : ""}`, {
+      discordId, q: q?.slice(0, 200), limit: lim ? String(Math.min(Math.max(1, Math.floor(lim)), 50)) : undefined, ...extra,
+    })
   }
 
   propose(discordId: string, p: { kind: string; target?: { type: string; id: string }; payload: unknown; surface: { kind: string; channelId: string; isDM: boolean } }): Promise<Proposal> {
@@ -183,9 +209,19 @@ export class HubGatewayClient {
     return this.call<ActionResult>("POST", `/actions/${encodeURIComponent(cardId)}/confirm`, {}, { discordId, ...(edits ? { edits } : {}) }, { "idempotency-key": idempotencyKey })
   }
 
-  cancel(discordId: string, cardId: string): Promise<ActionResult> {
-    return this.call<ActionResult>("POST", `/actions/${encodeURIComponent(cardId)}/cancel`, {}, { discordId })
+  cancel(discordId: string, cardId: string, idempotencyKey: string): Promise<ActionResult> {
+    return this.call<ActionResult>("POST", `/actions/${encodeURIComponent(cardId)}/cancel`, {}, { discordId }, { "idempotency-key": idempotencyKey })
   }
+
+  /** Where a card has got to. Status only, by design: no preview comes back. */
+  status(discordId: string, cardId: string): Promise<CardStatus> {
+    return this.call<CardStatus>("GET", `/actions/${encodeURIComponent(cardId)}`, { discordId })
+  }
+}
+
+function targetNote(a: CatalogAction): string {
+  const types = (a.targetTypes?.length ? a.targetTypes : a.targetType ? [a.targetType] : []).filter(t => t && t !== "self")
+  return types.length ? ` [target: a ${types.join(" or ")} id]` : ""
 }
 
 /** The catalog as the Assistant should see it: names, what each needs, and how to call
@@ -196,12 +232,12 @@ export function renderCatalog(c: Catalog): string {
     const props = (a.schema?.properties ?? {}) as Record<string, { type?: string; enum?: unknown[]; maxLength?: number }>
     const req = new Set(Array.isArray(a.schema?.required) ? a.schema!.required as string[] : [])
     const fields = Object.entries(props).map(([k, s]) => `${k}${req.has(k) ? "*" : ""}${s.enum ? ` (one of ${s.enum.join("/")})` : s.type ? ` (${s.type})` : ""}`).join(", ")
-    return `- ${a.kind}: ${a.description}${a.targetType && a.targetType !== "self" ? ` [target: a ${a.targetType} id]` : ""}${fields ? ` {${fields}}` : ""}${a.external ? " [goes outside Player Ready]" : ""}`
+    return `- ${a.kind}: ${a.description}${targetNote(a)}${fields ? ` {${fields}}` : ""}${a.external ? " [goes outside Player Ready]" : ""}`
   })
   return [
-    "READS (call my_data with tool = the name):",
+    "READS (call my_data with tool = the name; `query` is search text):",
     ...(reads.length ? reads : ["- none"]),
-    "ACTIONS (call my_action with action = the kind; * marks a required field):",
+    "ACTIONS (call my_action with action = the kind and params = { target: { type, id }, payload: { fields } }; * marks a required field; ids come from a read, never from memory):",
     ...(actions.length ? actions : ["- none"]),
   ].join("\n")
 }

@@ -28,7 +28,7 @@ export class ShimSocketServer {
   private recallCb: (q: { query: string; scopes?: string[] }) => Promise<RecalledNote[]> = async () => []
   private postWebhookCb: (w: { target: string; body?: string }) => void = () => {}
   private askAgentCb: (q: { agent: string; message: string }) => Promise<string> = async () => ""
-  private myDataCb: (q: { tool: string; query?: string }) => Promise<string> = async () => "(unavailable: data tools are not switched on.)"
+  private myDataCb: (q: { tool: string; query?: string; recordId?: string; params?: Record<string, unknown> }) => Promise<string> = async () => "(unavailable: data tools are not switched on.)"
   private myActionCb: (q: { action: string; params: unknown }) => Promise<string> = async () => "(unavailable: actions are not switched on. Nothing was proposed or changed.)"
   private notifyPeerCb: (n: { target: string; text: string }) => void = () => {}
   private askPeerCb: (q: { target: string; message: string }) => Promise<string> = async () => ""
@@ -120,7 +120,11 @@ export class ShimSocketServer {
         break
       case "my_data":
         // Request/response: the hub fetches for the SPEAKER (never an id from the agent).
-        void this.myDataCb({ tool: String(m.tool ?? ""), query: typeof m.query === "string" ? m.query : undefined }).then((answer) => {
+        void this.myDataCb({
+          tool: String(m.tool ?? ""), query: typeof m.query === "string" ? m.query : undefined,
+          recordId: typeof m.recordId === "string" || typeof m.recordId === "number" ? String(m.recordId) : undefined,
+          params: m.params && typeof m.params === "object" && !Array.isArray(m.params) ? m.params as Record<string, unknown> : undefined,
+        }).then((answer) => {
           try { socket.write(encode({ t: "my_data_result", id: m.id, answer })) } catch {}
         })
         break

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { TurnLedger, parseUsageCommand, renderUsage, rollupTurns } from "./turnLedger"
+import { TurnLedger, parseUsageCommand, renderUsage, rollupTurns, type TurnRow } from "./turnLedger"
 
 const AURORA = "186188409499418628"
 const STEPHEN = "425368343789305865"
@@ -104,4 +104,31 @@ test("parseUsageCommand", () => {
   expect(parseUsageCommand("!usage lots")).toEqual({ days: 1 })
   expect(parseUsageCommand("usage")).toBeNull()
   expect(parseUsageCommand("!usages")).toBeNull()
+})
+
+import { raUsage } from "./gatewayActions"
+
+describe("ReadyApp summary usage", () => {
+  test("a generated summary is counted; a cached one and a plain read are not", () => {
+    expect(raUsage({ usage: { model: "m", inputTokens: 900, outputTokens: 90, cacheReadInputTokens: 31, cacheCreationInputTokens: 0 }, summaryCached: false }))
+      .toEqual({ model: "m", tokensIn: 931, tokensOut: 90 })
+    expect(raUsage({ usage: { inputTokens: 900, outputTokens: 90 }, summaryCached: true })).toBeUndefined()
+    expect(raUsage({ items: [] })).toBeUndefined()
+    expect(raUsage(null)).toBeUndefined()
+  })
+
+  test("the turn carries the counts and !usage shows them apart from the cost", () => {
+    const l = new TurnLedger(() => 1000)
+    l.readyApp("A", { tokensIn: 931, tokensOut: 96 })
+    l.readyApp("A", { tokensIn: 817, tokensOut: 250 })
+    const rec = l.close({ key: "A", agent: "A", chat: "c", speakers: [{ userId: "42" }] })
+    expect(rec.detail).toMatchObject({ raSummaries: 2, raTokensIn: 1748, raTokensOut: 346 })
+    expect(rec.cost).toBeUndefined()
+    const out = renderUsage([rec as TurnRow], "today")
+    expect(out).toContain("**ReadyApp summaries** (tokens only, not in the cost above): 2, 1.7k in / 346 out")
+    expect(out).toContain("<@42>: 2, 1.7k in / 346 out")
+    // A turn with none leaves the report as it was.
+    const plain = l.close({ key: "B", agent: "B", chat: "c", speakers: [{ userId: "42" }] })
+    expect(renderUsage([plain as TurnRow], "today")).not.toContain("ReadyApp summaries")
+  })
 })

@@ -91,6 +91,8 @@ export class PrivateReplies {
 export interface PendingShare {
   id: string; userId: string; chatId: string; agent: string; text: string; at: number
   dmChatId?: string; dmMessageId?: string
+  /** The "I've sent you that by DM" line in the channel, replaced by the answer if shared. */
+  pointerMessageId?: string; tag?: string
 }
 
 export const SHARE_PREFIX = "share:post:"

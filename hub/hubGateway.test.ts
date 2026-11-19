@@ -149,3 +149,54 @@ test("renderCatalog lists reads and actions with their fields", () => {
   expect(text).toContain("- reminder.create: Set a reminder {dueAt* (string), text (string)}")
   expect(renderCatalog({ reads: [], actions: [] })).toContain("- none")
 })
+
+describe("the real contract", () => {
+  test("successes are unwrapped from ReadyApp's { data } envelope", async () => {
+    const h = client(() => ({ status: 200, body: { data: { version: "2026-11-18.1", reads: [{ name: "resolve", description: "Find a record" }], actions: [] } } }))
+    expect((await h.c.catalog(AURORA)).reads[0]!.name).toBe("resolve")
+  })
+  test("cancel carries an idempotency key; status is a signed GET with the speaker", async () => {
+    const h = client((url) => ({ status: 200, body: { data: url.includes("cancel") ? { status: "cancelled" } : { cardId: "c1", status: "done", message: "ok" } } }))
+    await h.c.cancel(AURORA, "c1", "k-1")
+    expect(h.calls[0]!.init.headers["idempotency-key"]).toBe("k-1")
+    expect((await h.c.status(AURORA, "c1")).status).toBe("done")
+    expect(h.calls[1]!.url).toBe(`https://ra.example/hub/v1/actions/c1?discordId=${AURORA}`)
+  })
+  test("stale_timestamp and replayed_nonce read as a sign-in problem", () => {
+    expect(explain("stale_timestamp", 401)).toContain("couldn't sign in")
+    expect(explain("replayed_nonce", 401)).toContain("couldn't sign in")
+  })
+  test("targetTypes are listed", () => {
+    expect(renderCatalog({ reads: [], actions: [{ kind: "x", description: "d", targetTypes: ["ticket", "deal"] }] })).toContain("[target: a ticket or deal id]")
+  })
+})
+
+describe("detail reads and filters", () => {
+  test("id goes in the path, filters in the query; identity, q and limit cannot be overridden", async () => {
+    const h = client(() => ({ status: 200, body: { data: {} } }))
+    await h.c.read(AURORA, "tickets", "x", undefined, { id: "4553", params: { status: "open", summary: true, discordId: "999", q: "evil", limit: 5, "bad key": "v", nested: { a: 1 } } })
+    const u = new URL(h.calls[0]!.url)
+    expect(u.pathname).toBe("/hub/v1/read/tickets/4553")
+    expect(u.searchParams.getAll("discordId")).toEqual([AURORA])
+    expect(u.searchParams.getAll("q")).toEqual(["x"])
+    expect(u.searchParams.get("limit")).toBe("5")
+    expect(u.searchParams.get("status")).toBe("open")
+    expect(u.searchParams.get("summary")).toBe("true")
+    expect([...u.searchParams.keys()].sort()).toEqual(["discordId", "limit", "q", "status", "summary"])
+  })
+  test("reply context is a fixed path for one ticket, with only the identity in the query", async () => {
+    const h = client(() => ({ status: 200, body: { data: {} } }))
+    await h.c.read(AURORA, "tickets", "ignored", undefined, { id: "4553", params: { view: "reply-context", status: "open" } })
+    const u = new URL(h.calls[0]!.url)
+    expect(u.pathname).toBe("/hub/v1/read/tickets/4553/reply-context")
+    expect([...u.searchParams.keys()]).toEqual(["discordId"])
+    await expect(Promise.resolve().then(() => h.c.read(AURORA, "deals", undefined, undefined, { id: "1", params: { view: "reply-context" } }))).rejects.toBeInstanceOf(GatewayError)
+    await expect(Promise.resolve().then(() => h.c.read(AURORA, "tickets", undefined, undefined, { params: { view: "reply-context" } }))).rejects.toBeInstanceOf(GatewayError)
+    expect(h.calls.length).toBe(1)
+  })
+  test("an id that is not a plain token never reaches the network", async () => {
+    const h = client(() => ({ status: 200, body: {} }))
+    for (const bad of ["../x", "1/2", "a b", ""]) await expect(Promise.resolve().then(() => h.c.read(AURORA, "tickets", undefined, undefined, { id: bad }))).rejects.toBeInstanceOf(GatewayError)
+    expect(h.calls.length).toBe(0)
+  })
+})

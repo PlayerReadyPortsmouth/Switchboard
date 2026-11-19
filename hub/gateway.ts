@@ -480,6 +480,20 @@ export class Gateway {
     return msg?.id as string | undefined
   }
 
+  /** DM a person a card. Resolves where it landed, or null if it could not be delivered. */
+  async sendCardDM(userId: string, card: CardSpec): Promise<{ chatId: string; messageId: string } | null> {
+    try {
+      const user = await this.client.users.fetch(userId)
+      const dm = await user.createDM()
+      const { embed, row } = buildCardComponents(card)
+      const msg = await dm.send({ embeds: [embed], components: row ? [row] : [] })
+      return msg?.id ? { chatId: dm.id, messageId: msg.id as string } : null
+    } catch (e) {
+      process.stderr.write(`gateway: sendCardDM to ${userId} failed: ${e}\n`)
+      return null
+    }
+  }
+
   async editCard(chatId: string, messageId: string, card: CardSpec): Promise<void> {
     try {
       const ch = await this.client.channels.fetch(chatId)
